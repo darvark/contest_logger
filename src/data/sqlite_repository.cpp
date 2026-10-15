@@ -840,7 +840,11 @@ bool SqliteRepository::saveSpot(Spot &spot, QString *error)
         "timestamp_utc, source, band) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"));
     query.addBindValue(spot.callsign.trimmed().toUpper());
     query.addBindValue(spot.frequencyHz);
-    query.addBindValue(spot.mode.trimmed().toUpper());
+    QString mode = spot.mode.trimmed().toUpper();
+    if (mode.isNull()) {
+        mode = QStringLiteral("");
+    }
+    query.addBindValue(mode);
     query.addBindValue(spot.spotter.trimmed().toUpper());
     query.addBindValue(spot.comment);
     query.addBindValue(utcString(spot.timestampUtc));

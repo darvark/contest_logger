@@ -51,7 +51,8 @@ void SupportDataParserTest::parsesMasterCpyAndDeduplicates()
     QStringList callsigns;
     QString error;
     QVERIFY2(logger::SupportDataParser::parseMasterCpy(
-                 QStringLiteral("# master list\nK1ABC 123\nW1AW\nK1ABC\n"),
+                 QStringLiteral("!!Order,1,1\n# Super Check Partial\n"
+                                "# master list\nK1ABC 123\nW1AW\nK1ABC\n"),
                  callsigns, &error),
              qPrintable(error));
     QCOMPARE(callsigns, QStringList({QStringLiteral("K1ABC"),

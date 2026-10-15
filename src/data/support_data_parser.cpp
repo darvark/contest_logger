@@ -212,7 +212,8 @@ bool SupportDataParser::parseMasterCpy(const QString &contents,
     for (qsizetype lineNumber = 0; lineNumber < lines.size(); ++lineNumber) {
         const QString line = lines.at(lineNumber).trimmed();
         if (line.isEmpty() || line.startsWith(QLatin1Char('#'))
-            || line.startsWith(QLatin1Char(';'))) {
+            || line.startsWith(QLatin1Char(';'))
+            || line.startsWith(QLatin1Char('!'))) {
             continue;
         }
         const QString token = line.section(QRegularExpression(QStringLiteral("\\s+")),

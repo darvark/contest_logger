@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDateTimeEdit>
+#include <QDir>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QInputDialog>
@@ -34,13 +35,21 @@
 #include <QLabel>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSet>
+#include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTableWidget>
@@ -52,9 +61,73 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <functional>
+#include <utility>
 
 namespace logger {
 namespace {
+
+void issueNetworkRequest(QObject *context, QNetworkAccessManager *manager,
+                         const QNetworkRequest &request,
+                         std::function<void(QNetworkReply *)> finished)
+{
+    QNetworkReply *reply = manager->get(request);
+    QObject::connect(reply, &QNetworkReply::finished, context,
+                     [reply, finished = std::move(finished)]() mutable {
+                         finished(reply);
+                         reply->deleteLater();
+                     });
+}
+
+QNetworkRequest supportDataRequest(const QUrl &url)
+{
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("ContestLogger/0.1"));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    return request;
+}
+
+QString networkReplyError(const QNetworkReply *reply)
+{
+    if (reply->error() != QNetworkReply::NoError) {
+        return reply->errorString();
+    }
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status < 200 || status >= 300) {
+        return QStringLiteral("HTTP %1").arg(status);
+    }
+    return {};
+}
+
+bool saveSupportDataFile(const QString &fileName, const QByteArray &contents,
+                         QString &path, QString &error)
+{
+    const QString directory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+        error = QStringLiteral("Unable to create the application data directory.");
+        return false;
+    }
+    path = QDir(directory).filePath(fileName);
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        error = file.errorString();
+        return false;
+    }
+    if (file.write(contents) != contents.size()) {
+        error = file.errorString();
+        file.cancelWriting();
+        return false;
+    }
+    if (!file.commit()) {
+        error = file.errorString();
+        return false;
+    }
+    error.clear();
+    return true;
+}
 
 QString fieldTypeName(ExchangeFieldType type)
 {
@@ -366,6 +439,61 @@ QStringList defaultBands()
             QStringLiteral("10m"), QStringLiteral("6m"), QStringLiteral("2m")};
 }
 
+QStringList defaultModes()
+{
+    return {QStringLiteral("CW"), QStringLiteral("SSB"), QStringLiteral("USB"),
+            QStringLiteral("LSB"), QStringLiteral("RTTY"), QStringLiteral("DATA"),
+            QStringLiteral("FM")};
+}
+
+void selectAdjacentBandmapRow(QTableWidget *bandmap, int direction)
+{
+    if (bandmap == nullptr || bandmap->rowCount() == 0 || direction == 0) {
+        return;
+    }
+    const int rowCount = bandmap->rowCount();
+    const int currentRow = bandmap->currentRow();
+    const int startRow = currentRow < 0 ? (direction > 0 ? -1 : 0) : currentRow;
+    const int nextRow = (startRow + direction + rowCount) % rowCount;
+    bandmap->setCurrentCell(nextRow, 0);
+    if (QTableWidgetItem *item = bandmap->item(nextRow, 0)) {
+        bandmap->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+    }
+    bandmap->setFocus(Qt::ShortcutFocusReason);
+}
+
+CwKeyerConfig cwKeyerConfigFromSettings(const QSettings &settings, int radioIndex,
+                                       RadioConfig radio)
+{
+    const int previousRadioIndex =
+        settings.value(QStringLiteral("cw/radioIndex"), radioIndex).toInt();
+    CwKeyerConfig config;
+    config.type = static_cast<CwKeyerType>(
+        settings.value(QStringLiteral("cw/type"),
+                       static_cast<int>(CwKeyerType::Mock)).toInt());
+    config.host = settings.value(QStringLiteral("cw/host"),
+                                 QStringLiteral("127.0.0.1")).toString();
+    config.port = settings.value(QStringLiteral("cw/port"), 6789).toInt();
+    config.wpm = settings.value(QStringLiteral("cw/wpm"), 25).toInt();
+    config.radio = std::move(radio);
+    if (previousRadioIndex == radioIndex) {
+        config.radio.modelId = settings.value(QStringLiteral("cw/hamlib/modelId"),
+                                              config.radio.modelId).toInt();
+        config.radio.transport = static_cast<RadioTransport>(
+            settings.value(QStringLiteral("cw/hamlib/transport"),
+                           static_cast<int>(config.radio.transport)).toInt());
+        config.radio.devicePath = settings.value(
+            QStringLiteral("cw/hamlib/devicePath"), config.radio.devicePath).toString();
+        config.radio.baudRate = settings.value(
+            QStringLiteral("cw/hamlib/baudRate"), config.radio.baudRate).toInt();
+        config.radio.host = settings.value(
+            QStringLiteral("cw/hamlib/host"), config.radio.host).toString();
+        config.radio.port = settings.value(
+            QStringLiteral("cw/hamlib/port"), config.radio.port).toInt();
+    }
+    return config;
+}
+
 QFont monoFont(int pointSize, bool bold)
 {
     QFont font;
@@ -461,8 +589,25 @@ QString dxlogStyleSheet()
     return QStringLiteral(R"(
 QMainWindow { background: #20B2AA; }
 QMainWindow::separator { background: #178F89; width: 4px; height: 4px; }
-QMenuBar { background: #ECECEC; }
-QToolBar { background: #ECECEC; border: none; spacing: 4px; padding: 2px; }
+QMenuBar { background: #ECECEC; color: #202020; }
+QMenuBar::item {
+    background: transparent; color: #202020; padding: 4px 8px;
+}
+QMenuBar::item:selected { background: #C7E7E4; color: #101010; }
+QMenu {
+    background: #F5F5F5; color: #202020; border: 1px solid #888888;
+}
+QMenu::item {
+    background: transparent; color: #202020; padding: 4px 24px 4px 8px;
+}
+QMenu::item:selected { background: #4682B4; color: white; }
+QMenu::item:disabled { color: #777777; }
+QMenu::separator { height: 1px; background: #C0C0C0; margin: 4px 8px; }
+QToolBar {
+    background: #ECECEC; color: #202020; border: none; spacing: 4px; padding: 2px;
+}
+QToolBar QCheckBox, QToolBar QLabel { color: #202020; }
+QToolBar QComboBox { color: #202020; background: white; }
 QStatusBar { background: #D4D0C8; }
 QStatusBar QLabel { padding: 0 8px; border-left: 1px solid #A0A0A0; }
 
@@ -632,10 +777,22 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     connect(radioAction, &QAction::triggered, this, &MainWindow::configureRadio);
     auto *radioBAction = radioMenu->addAction(tr("Radio B CAT settings..."));
     connect(radioBAction, &QAction::triggered, this, &MainWindow::configureRadioB);
-    auto *disconnectAction = radioMenu->addAction(tr("Disconnect radio A"));
+    auto *reconnectRadioAAction = radioMenu->addAction(tr("Reconnect Radio A CAT"));
+    reconnectRadioAAction->setObjectName(QStringLiteral("reconnectRadioAAction"));
+    connect(reconnectRadioAAction, &QAction::triggered, this, [this] {
+        m_radioControllers[0].connectRadio(radioConfigFromSettings(0));
+    });
+    auto *reconnectRadioBAction = radioMenu->addAction(tr("Reconnect Radio B CAT"));
+    reconnectRadioBAction->setObjectName(QStringLiteral("reconnectRadioBAction"));
+    connect(reconnectRadioBAction, &QAction::triggered, this, [this] {
+        m_radioControllers[1].connectRadio(radioConfigFromSettings(1));
+    });
+    auto *disconnectAction = radioMenu->addAction(tr("Disconnect Radio A CAT"));
+    disconnectAction->setObjectName(QStringLiteral("disconnectRadioAAction"));
     connect(disconnectAction, &QAction::triggered,
             &m_radioControllers[0], &RadioController::disconnectRadio);
-    auto *disconnectRadioBAction = radioMenu->addAction(tr("Disconnect radio B"));
+    auto *disconnectRadioBAction = radioMenu->addAction(tr("Disconnect Radio B CAT"));
+    disconnectRadioBAction->setObjectName(QStringLiteral("disconnectRadioBAction"));
     connect(disconnectRadioBAction, &QAction::triggered,
             &m_radioControllers[1], &RadioController::disconnectRadio);
     for (int radio = 0; radio < 2; ++radio) {
@@ -657,13 +814,26 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::configureDxCluster);
     auto *disconnectClusterAction =
         radioMenu->addAction(tr("Disconnect DX cluster"));
+        disconnectClusterAction->setObjectName(QStringLiteral("disconnectDxClusterAction"));
     connect(disconnectClusterAction, &QAction::triggered,
             &m_dxClusterController, &DxClusterController::stop);
     radioMenu->addSeparator();
     auto *cwKeyerAction = radioMenu->addAction(tr("CW keyer..."));
     connect(cwKeyerAction, &QAction::triggered,
             this, &MainWindow::configureCwKeyer);
+        auto *reconnectCwAction = radioMenu->addAction(tr("Reconnect CW keyer"));
+        reconnectCwAction->setObjectName(QStringLiteral("reconnectCwKeyerAction"));
+        connect(reconnectCwAction, &QAction::triggered, this, [this] {
+            const int radioIndex = m_cwRadioSelector->currentData().toInt();
+            QSettings settings;
+            const CwKeyerConfig config = cwKeyerConfigFromSettings(
+                settings, radioIndex, radioConfigFromSettings(radioIndex));
+            m_cwWpmSpin->setValue(config.wpm);
+            m_cwConfiguredRadio = radioIndex;
+            m_cwKeyerController.connectKeyer(config);
+        });
     auto *disconnectCwAction = radioMenu->addAction(tr("Disconnect CW keyer"));
+        disconnectCwAction->setObjectName(QStringLiteral("disconnectCwKeyerAction"));
     connect(disconnectCwAction, &QAction::triggered,
             &m_cwKeyerController, &CwKeyerController::disconnectKeyer);
     auto *abortCwAction = radioMenu->addAction(tr("Abort CW transmission"));
@@ -674,7 +844,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::abortCwTransmission);
 
     auto *wipeAction = operatingMenu->addAction(tr("&Wipe QSO entry"));
-    wipeAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_W));
+    wipeAction->setObjectName(QStringLiteral("wipeQsoEntryAction"));
+    wipeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
+    wipeAction->setShortcutContext(Qt::WindowShortcut);
     connect(wipeAction, &QAction::triggered,
             this, [this] { wipeEntry(currentEntryContext()); });
     auto *switchEntryAction = operatingMenu->addAction(tr("Switch entry A/B"));
@@ -685,6 +857,18 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             m_callsignEdits[other]->setFocus();
         }
     });
+    auto *previousSpotAction = operatingMenu->addAction(tr("Previous bandmap spot"));
+    previousSpotAction->setObjectName(QStringLiteral("previousBandmapSpotAction"));
+    previousSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Up));
+    previousSpotAction->setShortcutContext(Qt::WindowShortcut);
+    connect(previousSpotAction, &QAction::triggered, this,
+            [this] { selectAdjacentBandmapRow(m_bandmap, -1); });
+    auto *nextSpotAction = operatingMenu->addAction(tr("Next bandmap spot"));
+    nextSpotAction->setObjectName(QStringLiteral("nextBandmapSpotAction"));
+    nextSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Down));
+    nextSpotAction->setShortcutContext(Qt::WindowShortcut);
+    connect(nextSpotAction, &QAction::triggered, this,
+            [this] { selectAdjacentBandmapRow(m_bandmap, 1); });
     operatingMenu->addAction(abortCwAction);
     operatingMenu->addSeparator();
     auto *editKeysMenu = new QMenu(tr("Edit function key message"), operatingMenu);
@@ -710,19 +894,182 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *backupAction = fileMenu->addAction(tr("Back up database..."));
     connect(backupAction, &QAction::triggered,
             this, &MainWindow::backupDatabase);
-    auto *supportDataMenu = fileMenu->addMenu(tr("Import support data"));
+    auto *supportDataMenu = fileMenu->addMenu(tr("Support data"));
     auto *callHistoryAction =
         supportDataMenu->addAction(tr("Call history file..."));
     connect(callHistoryAction, &QAction::triggered,
             this, &MainWindow::importCallHistory);
     auto *masterCpyAction =
-        supportDataMenu->addAction(tr("master.cpy callsign list..."));
+        supportDataMenu->addAction(tr("Master callsign list from file..."));
     connect(masterCpyAction, &QAction::triggered,
             this, &MainWindow::importMasterCpy);
+    auto *downloadMasterScpAction =
+        supportDataMenu->addAction(tr("Download/update Master.SCP..."));
+    downloadMasterScpAction->setObjectName(QStringLiteral("downloadMasterScpAction"));
+    connect(downloadMasterScpAction, &QAction::triggered, this, [this] {
+        auto *manager = new QNetworkAccessManager(this);
+        const QUrl catalogUrl(QStringLiteral(
+            "https://www.supercheckpartial.com/api/v1/files"));
+        const QNetworkRequest catalogRequest = supportDataRequest(catalogUrl);
+        issueNetworkRequest(this, manager, catalogRequest,
+                            [this, manager](QNetworkReply *catalogReply) {
+            const QString catalogError = networkReplyError(catalogReply);
+            if (!catalogError.isEmpty()) {
+                manager->deleteLater();
+                QMessageBox::warning(this, tr("Master.SCP download failed"), catalogError);
+                return;
+            }
+            QJsonParseError jsonError;
+            const QJsonDocument catalog = QJsonDocument::fromJson(
+                catalogReply->readAll(), &jsonError);
+            if (!catalog.isArray()) {
+                manager->deleteLater();
+                QMessageBox::warning(
+                    this, tr("Master.SCP download failed"),
+                    tr("The SCP file catalog is invalid: %1").arg(jsonError.errorString()));
+                return;
+            }
+            QJsonObject masterFile;
+            for (const QJsonValue &value : catalog.array()) {
+                if (value.isObject()
+                    && value.toObject().value(QStringLiteral("name")).toString()
+                           .compare(QStringLiteral("MASTER.SCP"), Qt::CaseInsensitive) == 0) {
+                    masterFile = value.toObject();
+                    break;
+                }
+            }
+            const QString fileName = masterFile.value(QStringLiteral("name")).toString();
+            const QString etag = masterFile.value(QStringLiteral("etag")).toString();
+            const qint64 expectedSize = masterFile.value(QStringLiteral("size")).toInteger();
+            if (fileName.isEmpty() || etag.isEmpty() || expectedSize <= 0) {
+                manager->deleteLater();
+                QMessageBox::warning(
+                    this, tr("Master.SCP download failed"),
+                    tr("The SCP catalog does not contain valid Master.SCP metadata."));
+                return;
+            }
+
+            QSettings settings;
+            const QString cachePath = settings.value(
+                QStringLiteral("supportData/masterScpPath")).toString();
+            const QString cachedEtag = settings.value(
+                QStringLiteral("supportData/masterScpEtag")).toString();
+            const QString encodedName = QString::fromLatin1(
+                QUrl::toPercentEncoding(fileName));
+            QNetworkRequest fileRequest = supportDataRequest(QUrl(
+                QStringLiteral("https://www.supercheckpartial.com/downloads/%1")
+                    .arg(encodedName)));
+            if (cachedEtag == etag && QFileInfo::exists(cachePath)) {
+                fileRequest.setRawHeader(
+                    "If-None-Match", QByteArray("\"") + etag.toUtf8() + QByteArray("\""));
+            }
+            issueNetworkRequest(this, manager, fileRequest,
+                                [this, manager, fileName, etag, expectedSize]
+                                (QNetworkReply *fileReply) {
+                const int status = fileReply->attribute(
+                    QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                if (status == 304) {
+                    manager->deleteLater();
+                    statusBar()->showMessage(tr("Master.SCP is already up to date."), 5000);
+                    return;
+                }
+                const QString downloadError = networkReplyError(fileReply);
+                if (!downloadError.isEmpty()) {
+                    manager->deleteLater();
+                    QMessageBox::warning(this, tr("Master.SCP download failed"),
+                                         downloadError);
+                    return;
+                }
+                const QByteArray contents = fileReply->readAll();
+                if (contents.size() != expectedSize) {
+                    manager->deleteLater();
+                    QMessageBox::warning(
+                        this, tr("Master.SCP download failed"),
+                        tr("Downloaded file size does not match the catalog."));
+                    return;
+                }
+                QStringList callsigns;
+                QString error;
+                if (!SupportDataParser::parseMasterCpy(
+                        QString::fromUtf8(contents), callsigns, &error)) {
+                    manager->deleteLater();
+                    QMessageBox::warning(this, tr("Invalid Master.SCP file"), error);
+                    return;
+                }
+                QString path;
+                if (!saveSupportDataFile(QStringLiteral("master.scp"), contents,
+                                         path, error)) {
+                    manager->deleteLater();
+                    QMessageBox::warning(this, tr("Unable to save Master.SCP"), error);
+                    return;
+                }
+                QSettings settings;
+                settings.setValue(QStringLiteral("supportData/masterScpPath"), path);
+                settings.setValue(QStringLiteral("supportData/masterScpEtag"), etag);
+                QStringList paths = settings.value(
+                    QStringLiteral("supportData/masterCpyFiles")).toStringList();
+                if (paths.isEmpty()) {
+                    const QString legacyPath = settings.value(
+                        QStringLiteral("supportData/masterCpy")).toString();
+                    if (!legacyPath.isEmpty()) {
+                        paths.append(legacyPath);
+                    }
+                }
+                if (!paths.contains(path)) {
+                    paths.append(path);
+                }
+                settings.setValue(QStringLiteral("supportData/masterCpyFiles"), paths);
+                loadSupportData();
+                manager->deleteLater();
+                statusBar()->showMessage(
+                    tr("Loaded %1 callsigns from Master.SCP.").arg(callsigns.size()), 6000);
+            });
+        });
+    });
     auto *ctyDatAction =
-        supportDataMenu->addAction(tr("wl_cty.dat prefix database..."));
+        supportDataMenu->addAction(tr("wl_cty.dat from file..."));
     connect(ctyDatAction, &QAction::triggered,
             this, &MainWindow::importCtyDat);
+    auto *downloadCtyAction =
+        supportDataMenu->addAction(tr("Download/update wl_cty.dat..."));
+    downloadCtyAction->setObjectName(QStringLiteral("downloadWlCtyAction"));
+    connect(downloadCtyAction, &QAction::triggered, this, [this] {
+        auto *manager = new QNetworkAccessManager(this);
+        const QNetworkRequest request = supportDataRequest(QUrl(
+            QStringLiteral("https://www.country-files.com/cty/wl_cty.dat")));
+        issueNetworkRequest(this, manager, request,
+                            [this, manager](QNetworkReply *reply) {
+            const QString downloadError = networkReplyError(reply);
+            if (!downloadError.isEmpty()) {
+                manager->deleteLater();
+                QMessageBox::warning(this, tr("wl_cty.dat download failed"),
+                                     downloadError);
+                return;
+            }
+            const QByteArray contents = reply->readAll();
+            QVector<CtyPrefixEntry> prefixes;
+            QString error;
+            if (!SupportDataParser::parseCtyDat(
+                    QString::fromUtf8(contents), prefixes, &error)) {
+                manager->deleteLater();
+                QMessageBox::warning(this, tr("Invalid wl_cty.dat file"), error);
+                return;
+            }
+            QString path;
+            if (!saveSupportDataFile(QStringLiteral("wl_cty.dat"), contents,
+                                     path, error)) {
+                manager->deleteLater();
+                QMessageBox::warning(this, tr("Unable to save wl_cty.dat"), error);
+                return;
+            }
+            QSettings().setValue(QStringLiteral("supportData/ctyDat"), path);
+            loadSupportData();
+            manager->deleteLater();
+            statusBar()->showMessage(
+                tr("Loaded %1 callsign prefixes from wl_cty.dat.").arg(prefixes.size()),
+                6000);
+        });
+    });
     fileMenu->addSeparator();
     auto *exitAction = fileMenu->addAction(tr("E&xit"));
     exitAction->setShortcut(QKeySequence::Quit);
@@ -849,16 +1196,19 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         fieldsRow->setContentsMargins(6, 0, 6, 0);
         fieldsRow->setSpacing(6);
         m_bandSelectors[vfo] = new QComboBox(entryPanel);
+        m_bandSelectors[vfo]->setObjectName(
+            vfo == 0 ? QStringLiteral("bandSelectorA")
+                     : QStringLiteral("bandSelectorB"));
         m_bandSelectors[vfo]->setEditable(true);
         m_bandSelectors[vfo]->addItems(defaultBands());
         m_bandSelectors[vfo]->setFont(monoFont(11, true));
         m_bandSelectors[vfo]->setFixedWidth(84);
         m_modeSelectors[vfo] = new QComboBox(entryPanel);
+        m_modeSelectors[vfo]->setObjectName(
+            vfo == 0 ? QStringLiteral("modeSelectorA")
+                     : QStringLiteral("modeSelectorB"));
         m_modeSelectors[vfo]->setEditable(true);
-        m_modeSelectors[vfo]->addItems({QStringLiteral("CW"), QStringLiteral("SSB"),
-                                         QStringLiteral("USB"), QStringLiteral("LSB"),
-                                         QStringLiteral("RTTY"), QStringLiteral("DATA"),
-                                         QStringLiteral("FM")});
+        m_modeSelectors[vfo]->addItems(defaultModes());
         m_modeSelectors[vfo]->setFont(monoFont(11, true));
         m_modeSelectors[vfo]->setFixedWidth(84);
         m_callsignEdits[vfo] = new QLineEdit(entryPanel);
@@ -1017,6 +1367,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *abortCwButton = new QPushButton(tr("Abort (Esc)"), cwPane);
     abortCwButton->setObjectName(QStringLiteral("abortCwButton"));
     m_cwStatusLabel = new QLabel(tr("CW keyer disconnected"), cwPane);
+    m_cwStatusLabel->setObjectName(QStringLiteral("cwKeyerStatus"));
     m_cwStatusLabel->setWordWrap(true);
     cwLayout->addWidget(new QLabel(tr("Text:"), cwPane), 0, 0);
     cwLayout->addWidget(m_cwMessageEdit, 0, 1, 1, 3);
@@ -1094,7 +1445,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                                         QStringLiteral("checkPartialDock"),
                                         checkPartialPane);
 
-    // Bandmap (frequency-sorted spots for the active band).
+    // Bandmap (spots for the active band).
     auto *bandmapPane = createPane(QStringLiteral("bandmapPane"));
     auto *bandmapControls = new QHBoxLayout;
     bandmapControls->setContentsMargins(2, 2, 2, 0);
@@ -1105,11 +1456,18 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     for (const QString &band : defaultBands()) {
         m_bandmapBandFilter->addItem(band, band);
     }
+    auto *bandmapSortSelector = new QComboBox(bandmapPane);
+    bandmapSortSelector->setObjectName(QStringLiteral("bandmapSortSelector"));
+    bandmapSortSelector->addItem(tr("Frequency"), QStringLiteral("frequency"));
+    bandmapSortSelector->addItem(tr("Newest first"), QStringLiteral("time"));
+    bandmapSortSelector->setToolTip(
+        tr("Sort spots by frequency or by time, newest first."));
     m_hideWorkedSpots = new QCheckBox(tr("Hide worked"), bandmapPane);
     m_hideWorkedSpots->setChecked(true);
     auto *tuneSelectedSpot = new QPushButton(tr("Tune"), bandmapPane);
     tuneSelectedSpot->setObjectName(QStringLiteral("tuneSelectedSpotButton"));
     bandmapControls->addWidget(m_bandmapBandFilter, 1);
+    bandmapControls->addWidget(bandmapSortSelector);
     bandmapControls->addWidget(m_hideWorkedSpots);
     bandmapControls->addWidget(tuneSelectedSpot);
     static_cast<QVBoxLayout *>(bandmapPane->layout())->addLayout(bandmapControls);
@@ -1131,7 +1489,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_bandmap->setFocusPolicy(Qt::StrongFocus);
     m_bandmap->installEventFilter(this);
     m_bandmap->setToolTip(
-        tr("Up/Down selects a spot, Enter copies its callsign and tunes the active radio. "
+        tr("Ctrl+Up/Down selects a spot; Enter copies its callsign and tunes the active radio. "
            "Orange = spot nearest the active radio frequency; grey = already worked."));
     connect(m_bandmap, &QTableWidget::cellDoubleClicked,
             this, &MainWindow::activateSpot);
@@ -1139,6 +1497,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         activateSpot(m_bandmap->currentRow(), 0);
     });
     connect(m_bandmapBandFilter, &QComboBox::currentIndexChanged,
+            this, &MainWindow::refreshBandmap);
+        connect(bandmapSortSelector, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
     connect(m_hideWorkedSpots, &QCheckBox::toggled,
             this, &MainWindow::refreshBandmap);
@@ -1554,35 +1914,10 @@ void MainWindow::configureDxCluster()
 
 void MainWindow::configureCwKeyer()
 {
-    QSettings settings;
     const int radioIndex = m_cwRadioSelector->currentData().toInt();
-    const int previousRadioIndex =
-        settings.value(QStringLiteral("cw/radioIndex"), radioIndex).toInt();
-    CwKeyerConfig config;
-    config.type = static_cast<CwKeyerType>(
-        settings.value(QStringLiteral("cw/type"),
-                      static_cast<int>(CwKeyerType::Mock)).toInt());
-    config.host = settings.value(QStringLiteral("cw/host"),
-                                 QStringLiteral("127.0.0.1")).toString();
-    config.port = settings.value(QStringLiteral("cw/port"), 6789).toInt();
-    config.wpm = settings.value(QStringLiteral("cw/wpm"), 25).toInt();
-    config.radio = radioConfigFromSettings(radioIndex);
-    if (previousRadioIndex == radioIndex) {
-        config.radio.modelId = settings.value(QStringLiteral("cw/hamlib/modelId"),
-                                              config.radio.modelId).toInt();
-        config.radio.transport = static_cast<RadioTransport>(
-            settings.value(QStringLiteral("cw/hamlib/transport"),
-                           static_cast<int>(config.radio.transport)).toInt());
-        config.radio.devicePath = settings.value(
-            QStringLiteral("cw/hamlib/devicePath"), config.radio.devicePath).toString();
-        config.radio.baudRate = settings.value(
-            QStringLiteral("cw/hamlib/baudRate"), config.radio.baudRate).toInt();
-        config.radio.host = settings.value(
-            QStringLiteral("cw/hamlib/host"), config.radio.host).toString();
-        config.radio.port = settings.value(
-            QStringLiteral("cw/hamlib/port"), config.radio.port).toInt();
-    }
-
+    QSettings settings;
+    CwKeyerConfig config = cwKeyerConfigFromSettings(
+        settings, radioIndex, radioConfigFromSettings(radioIndex));
     CwKeyerConfigDialog dialog(config, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -1979,27 +2314,35 @@ void MainWindow::selectContest(int index)
                  definition->dupeKey.join(QStringLiteral(", ")).toHtmlEscaped());
         m_activeContestLabel->setText(preview);
     }
-    if (definition != m_definitions.cend()) {
-        for (int vfo = 0; vfo < 2; ++vfo) {
-            const QString currentBand = m_bandSelectors[vfo]->currentText();
-            const bool bandAllowed = std::any_of(
-                definition->bands.cbegin(), definition->bands.cend(),
-                [&currentBand](const QString &allowed) {
-                    return allowed.compare(currentBand, Qt::CaseInsensitive) == 0;
-                });
-            if (!bandAllowed && !definition->bands.isEmpty()) {
-                m_bandSelectors[vfo]->setCurrentText(definition->bands.first());
-            }
-            const QString currentMode = m_modeSelectors[vfo]->currentText();
-            const bool modeAllowed = std::any_of(
-                definition->modes.cbegin(), definition->modes.cend(),
-                [&currentMode](const QString &allowed) {
-                    return allowed.compare(currentMode, Qt::CaseInsensitive) == 0;
-                });
-            if (!modeAllowed && !definition->modes.isEmpty()) {
-                m_modeSelectors[vfo]->setCurrentText(definition->modes.first());
-            }
+    const auto configureSelector = [](QComboBox *selector,
+                                      const QStringList &allowedValues,
+                                      const QStringList &fallbackValues,
+                                      bool constrained) {
+        const QString current = selector->currentText();
+        const QStringList &values = constrained ? allowedValues : fallbackValues;
+        selector->setEditable(!constrained);
+        selector->clear();
+        selector->addItems(values);
+        const auto match = std::find_if(
+            values.cbegin(), values.cend(), [&current](const QString &value) {
+                return value.compare(current, Qt::CaseInsensitive) == 0;
+            });
+        if (match != values.cend()) {
+            selector->setCurrentIndex(static_cast<int>(match - values.cbegin()));
+        } else if (!constrained && !current.isEmpty()) {
+            selector->setCurrentText(current);
+        } else if (!values.isEmpty()) {
+            selector->setCurrentIndex(0);
         }
+    };
+    const bool hasDefinition = definition != m_definitions.cend();
+    for (int vfo = 0; vfo < 2; ++vfo) {
+        configureSelector(m_bandSelectors[vfo],
+                          hasDefinition ? definition->bands : QStringList{},
+                          defaultBands(), hasDefinition);
+        configureSelector(m_modeSelectors[vfo],
+                          hasDefinition ? definition->modes : QStringList{},
+                          defaultModes(), hasDefinition);
     }
     rebuildQsoForm();
     updateSentReportForMode(0);
@@ -2144,8 +2487,8 @@ void MainWindow::importCallHistory()
 void MainWindow::importMasterCpy()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Import master.cpy"), {},
-        tr("Callsign lists (*.cpy *.txt);;All files (*)"));
+        this, tr("Import callsign list"), {},
+        tr("Callsign lists (*.scp *.cpy *.txt);;All files (*)"));
     if (path.isEmpty()) {
         return;
     }
@@ -2169,13 +2512,21 @@ void MainWindow::importMasterCpy()
             m_masterCallsigns.append(callsign);
         }
     }
-    QSettings().setValue(QStringLiteral("supportData/masterCpy"), path);
-    QStringList paths = QSettings().value(
+    QSettings settings;
+    QStringList paths = settings.value(
         QStringLiteral("supportData/masterCpyFiles")).toStringList();
+    if (paths.isEmpty()) {
+        const QString legacyPath = settings.value(
+            QStringLiteral("supportData/masterCpy")).toString();
+        if (!legacyPath.isEmpty()) {
+            paths.append(legacyPath);
+        }
+    }
+    settings.setValue(QStringLiteral("supportData/masterCpy"), path);
     if (!paths.contains(path)) {
         paths.append(path);
     }
-    QSettings().setValue(QStringLiteral("supportData/masterCpyFiles"), paths);
+    settings.setValue(QStringLiteral("supportData/masterCpyFiles"), paths);
     rebuildCheckPartialIndex();
     QMessageBox::information(this, tr("master.cpy imported"),
                              tr("Loaded %1 callsign suggestions.")
@@ -2218,6 +2569,10 @@ void MainWindow::importCtyDat()
 
 void MainWindow::loadSupportData()
 {
+    m_callHistory.clear();
+    m_masterCallsigns.clear();
+    m_ctyPrefixes.clear();
+    m_ctyCache.clear();
     QSettings settings;
     const auto readFile = [this](const QString &path, QString &contents) {
         QFile file(path);
@@ -4164,8 +4519,22 @@ void MainWindow::refreshBandmap()
         }
         visible.append({spot, worked});
     }
-    std::sort(visible.begin(), visible.end(), [](const auto &left, const auto &right) {
-        return left.first.frequencyHz < right.first.frequencyHz;
+    const QComboBox *sortSelector =
+        findChild<QComboBox *>(QStringLiteral("bandmapSortSelector"));
+    const bool sortByTime = sortSelector != nullptr
+        && sortSelector->currentData().toString() == QLatin1String("time");
+    std::sort(visible.begin(), visible.end(), [sortByTime](const auto &left,
+                                                           const auto &right) {
+        if (sortByTime) {
+            if (left.first.timestampUtc != right.first.timestampUtc) {
+                return left.first.timestampUtc > right.first.timestampUtc;
+            }
+            return left.first.frequencyHz < right.first.frequencyHz;
+        }
+        if (left.first.frequencyHz != right.first.frequencyHz) {
+            return left.first.frequencyHz < right.first.frequencyHz;
+        }
+        return left.first.timestampUtc > right.first.timestampUtc;
     });
 
     const int radio = m_so2rToggle->isChecked()

@@ -83,6 +83,7 @@ private slots:
     void updatesQsoAndPersistsExchangeFields();
     void loadsAllQsosForDupeChecking();
     void savesAndReadsSpot();
+    void savesSpotWithoutMode();
     void prunesRetainedSpots();
     void findsDuplicateQsos();
     void migratesLegacyExchangesAndPreservesOnUpdate();
@@ -297,6 +298,26 @@ void SqliteRepositoryTest::savesAndReadsSpot()
     QCOMPARE(spots.first().band, QStringLiteral("20m"));
     QCOMPARE(spots.first().mode, QStringLiteral("CW"));
     QCOMPARE(spots.first().spotter, QStringLiteral("K1ABC"));
+}
+
+void SqliteRepositoryTest::savesSpotWithoutMode()
+{
+    TestDatabase database;
+    logger::Spot spot;
+    spot.callsign = QStringLiteral("W1AW");
+    spot.frequencyHz = 14'025'000;
+    spot.band = QStringLiteral("20m");
+    spot.spotter = QStringLiteral("K1ABC");
+    spot.comment = QStringLiteral("");
+    spot.timestampUtc = QDateTime::currentDateTimeUtc();
+    spot.source = QStringLiteral("DX cluster");
+    QString error;
+
+    QVERIFY2(database.repository().saveSpot(spot, &error), qPrintable(error));
+    const QVector<logger::Spot> spots = database.repository().recentSpots(10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(spots.size(), 1);
+    QVERIFY(spots.first().mode.isEmpty());
 }
 
 void SqliteRepositoryTest::savesContestDefinition()

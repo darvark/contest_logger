@@ -2,6 +2,7 @@
 #include "logger/ui/main_window.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -29,6 +30,11 @@ private slots:
     void initTestCase();
     void init();
     void cleanup();
+    void contestDefinitionConstrainsBandAndModeSelectors();
+    void connectionMenuReconnectsAndDisconnects();
+    void bandmapSortAndKeyboardNavigation();
+    void ctrlWipeClearsCallAndReceivedExchange();
+    void supportDataDownloadActionsExist();
     void enterLogsQsoAndRefreshesTable();
     void invalidExchangeIsRejectedWithMessage();
     void duplicateIsRejected();
@@ -135,6 +141,134 @@ QTableWidget *MainWindowUiTest::table() const
 QString MainWindowUiTest::message() const
 {
     return m_window->findChild<QLabel *>(QStringLiteral("messageLine"))->text();
+}
+
+void MainWindowUiTest::contestDefinitionConstrainsBandAndModeSelectors()
+{
+    auto *bands = m_window->findChild<QComboBox *>(QStringLiteral("bandSelectorA"));
+    auto *modes = m_window->findChild<QComboBox *>(QStringLiteral("modeSelectorA"));
+    QVERIFY(bands != nullptr);
+    QVERIFY(modes != nullptr);
+    QCOMPARE(bands->isEditable(), false);
+    QCOMPARE(modes->isEditable(), false);
+    QCOMPARE(bands->count(), 3);
+    QCOMPARE(bands->itemText(0), QStringLiteral("80m"));
+    QCOMPARE(bands->itemText(1), QStringLiteral("40m"));
+    QCOMPARE(bands->itemText(2), QStringLiteral("20m"));
+    QCOMPARE(modes->count(), 1);
+    QCOMPARE(modes->itemText(0), QStringLiteral("CW"));
+}
+
+void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
+{
+    const auto action = [this](const QString &name) {
+        return m_window->findChild<QAction *>(name);
+    };
+    auto *reconnectRadioA = action(QStringLiteral("reconnectRadioAAction"));
+    auto *disconnectRadioA = action(QStringLiteral("disconnectRadioAAction"));
+    auto *disconnectCluster = action(QStringLiteral("disconnectDxClusterAction"));
+    auto *reconnectCw = action(QStringLiteral("reconnectCwKeyerAction"));
+    auto *disconnectCw = action(QStringLiteral("disconnectCwKeyerAction"));
+    QVERIFY(reconnectRadioA != nullptr);
+    QVERIFY(disconnectRadioA != nullptr);
+    QVERIFY(action(QStringLiteral("reconnectRadioBAction")) != nullptr);
+    QVERIFY(action(QStringLiteral("disconnectRadioBAction")) != nullptr);
+    QVERIFY(disconnectCluster != nullptr);
+    QVERIFY(reconnectCw != nullptr);
+    QVERIFY(disconnectCw != nullptr);
+
+    disconnectCluster->trigger();
+    auto *clusterStatus = m_window->findChild<QLabel *>(QStringLiteral("clusterStatus"));
+    QTRY_VERIFY(clusterStatus->text().contains(QStringLiteral("DX cluster: Disconnected")));
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("radio/A/backend"),
+                      static_cast<int>(RadioBackendType::Mock));
+    reconnectRadioA->trigger();
+    auto *radioStatus = m_window->findChild<QLabel *>(QStringLiteral("radioStatus"));
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: "))
+                && radioStatus->text().contains(QStringLiteral(" MHz ")));
+    disconnectRadioA->trigger();
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: Radio disconnected.")));
+
+    settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
+    reconnectCw->trigger();
+    auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
+    disconnectCw->trigger();
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Disconnected")));
+}
+
+void MainWindowUiTest::bandmapSortAndKeyboardNavigation()
+{
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const auto addSpot = [this, &now](const QString &callsign, qint64 frequency,
+                                      int ageSeconds) {
+        Spot spot;
+        spot.callsign = callsign;
+        spot.frequencyHz = frequency;
+        spot.band = QStringLiteral("40m");
+        spot.mode = QStringLiteral("CW");
+        spot.spotter = QStringLiteral("K1ABC");
+        spot.comment = QStringLiteral("CQ TEST");
+        spot.timestampUtc = now.addSecs(-ageSeconds);
+        spot.source = QStringLiteral("test");
+        return QMetaObject::invokeMethod(
+            m_window.get(), "receiveSpot", Qt::DirectConnection,
+            Q_ARG(logger::Spot, spot));
+    };
+    QVERIFY(addSpot(QStringLiteral("K1NEW"), 7'040'000, 10));
+    QVERIFY(addSpot(QStringLiteral("K1OLD"), 7'020'000, 60));
+    QVERIFY(addSpot(QStringLiteral("K1MID"), 7'030'000, 30));
+
+    auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    auto *sortSelector = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapSortSelector"));
+    auto *previousAction = m_window->findChild<QAction *>(
+        QStringLiteral("previousBandmapSpotAction"));
+    auto *nextAction = m_window->findChild<QAction *>(
+        QStringLiteral("nextBandmapSpotAction"));
+    QVERIFY(bandmap != nullptr);
+    QVERIFY(sortSelector != nullptr);
+    QVERIFY(previousAction != nullptr);
+    QVERIFY(nextAction != nullptr);
+    QCOMPARE(bandmap->rowCount(), 3);
+    QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("K1OLD"));
+    QCOMPARE(bandmap->item(1, 1)->text(), QStringLiteral("K1MID"));
+    QCOMPARE(bandmap->item(2, 1)->text(), QStringLiteral("K1NEW"));
+
+    sortSelector->setCurrentIndex(sortSelector->findData(QStringLiteral("time")));
+    QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("K1NEW"));
+    QCOMPARE(bandmap->item(1, 1)->text(), QStringLiteral("K1MID"));
+    QCOMPARE(bandmap->item(2, 1)->text(), QStringLiteral("K1OLD"));
+
+    callEdit()->setFocus();
+    QTest::keyClick(callEdit(), Qt::Key_Down, Qt::ControlModifier);
+    QCOMPARE(bandmap->currentRow(), 0);
+    QTest::keyClick(callEdit(), Qt::Key_Down, Qt::ControlModifier);
+    QCOMPARE(bandmap->currentRow(), 1);
+    QTest::keyClick(callEdit(), Qt::Key_Up, Qt::ControlModifier);
+    QCOMPARE(bandmap->currentRow(), 0);
+    QTest::keyClick(callEdit(), Qt::Key_Up, Qt::ControlModifier);
+    QCOMPARE(bandmap->currentRow(), 2);
+}
+
+void MainWindowUiTest::ctrlWipeClearsCallAndReceivedExchange()
+{
+    callEdit()->setText(QStringLiteral("SP2ABC"));
+    exchangeEdit(QStringLiteral("serial"))->setText(QStringLiteral("123"));
+    QTest::keyClick(callEdit(), Qt::Key_W, Qt::ControlModifier);
+    QVERIFY(callEdit()->text().isEmpty());
+    QVERIFY(exchangeEdit(QStringLiteral("serial"))->text().isEmpty());
+    QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QStringLiteral("001"));
+}
+
+void MainWindowUiTest::supportDataDownloadActionsExist()
+{
+    QVERIFY(m_window->findChild<QAction *>(QStringLiteral("downloadMasterScpAction"))
+            != nullptr);
+    QVERIFY(m_window->findChild<QAction *>(QStringLiteral("downloadWlCtyAction"))
+            != nullptr);
 }
 
 void MainWindowUiTest::enterQso(const QString &call, const QString &report,
