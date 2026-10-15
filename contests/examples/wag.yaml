@@ -1,0 +1,20 @@
+schema_version: 1
+id: wag
+name: Worked All Germany (WAG)
+description: >-
+  Starter free-text exchange profile. German DOK and non-German serial
+  exchanges are conditional; select the applicable value and verify scoring.
+bands: [80m, 40m, 20m, 15m, 10m]
+modes: [CW, SSB, RTTY]
+exchange:
+  sent:
+    - {name: report, label: RST, type: rst, default: "599"}
+    - {name: serial, label: Serial, type: serial, generated: true, width: 3}
+  received:
+    - {name: report, label: RST, type: rst}
+    - {name: exchange, label: DOK or serial, type: text}
+scoring:
+  qso_points: 1
+  multipliers:
+    - {type: exchange, field: exchange, per_band: false}
+dupe_key: [callsign, band, mode]

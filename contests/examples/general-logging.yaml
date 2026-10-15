@@ -1,0 +1,24 @@
+schema_version: 1
+id: general-logging
+name: General QSO Logging
+description: General-purpose logging without contest multipliers.
+
+bands: [160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m, 6m]
+modes: [CW, SSB, FM, AM, RTTY, DATA]
+
+exchange:
+  sent:
+    - name: report
+      label: Signal report
+      type: rst
+      default: "599"
+  received:
+    - name: report
+      label: Signal report
+      type: rst
+
+scoring:
+  qso_points: 1
+  multipliers: []
+
+dupe_key: [callsign, band, mode]

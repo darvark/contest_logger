@@ -1,0 +1,32 @@
+schema_version: 1
+id: grid-field-day
+name: Grid Field Day (example)
+description: Grid-based example with per-band grid and overall prefix multipliers.
+
+bands: [80m, 40m, 20m, 15m, 10m]
+modes: [CW, SSB, DATA]
+
+exchange:
+  sent:
+    - name: report
+      label: Signal report
+      type: rst
+      default: "599"
+  received:
+    - name: report
+      label: Signal report
+      type: rst
+    - name: grid
+      label: Maidenhead grid
+      type: grid
+
+scoring:
+  qso_points: 1
+  multipliers:
+    - type: exchange
+      field: grid
+      per_band: true
+    - type: prefix
+      per_band: false
+
+dupe_key: [callsign, band, mode]

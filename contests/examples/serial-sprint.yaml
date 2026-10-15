@@ -1,0 +1,37 @@
+schema_version: 1
+id: serial-sprint
+name: Serial Sprint (example)
+description: CW sprint example with generated serials and prefix multipliers.
+
+bands: [80m, 40m, 20m]
+modes: [CW]
+
+exchange:
+  sent:
+    - name: report
+      label: Signal report
+      type: rst
+      default: "599"
+    - name: serial
+      label: Serial number
+      type: serial
+      generated: true
+      width: 3
+  received:
+    - name: report
+      label: Signal report
+      type: rst
+    - name: serial
+      label: Serial number
+      type: integer
+      min: 1
+      max: 9999
+
+scoring:
+  qso_points: 2
+  serial_start: 1
+  multipliers:
+    - type: prefix
+      per_band: false
+
+dupe_key: [callsign, band, mode]

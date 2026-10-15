@@ -1,0 +1,18 @@
+schema_version: 1
+id: arrl-dx-10m
+name: ARRL 10-Meter Contest
+description: Starter profile; configure the applicable state/province or power exchange.
+bands: [10m]
+modes: [CW, SSB]
+exchange:
+  sent:
+    - {name: report, label: RST, type: rst, default: "599"}
+    - {name: exchange, label: State/province or power (station), type: text}
+  received:
+    - {name: report, label: RST, type: rst}
+    - {name: exchange, label: State/province or power, type: text}
+scoring:
+  qso_points: 1
+  multipliers:
+    - {type: exchange, field: exchange, per_band: false}
+dupe_key: [callsign, band, mode]

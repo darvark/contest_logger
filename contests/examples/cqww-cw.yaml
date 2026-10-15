@@ -1,0 +1,21 @@
+schema_version: 1
+id: cqww-cw
+name: CQ WW DX Contest — CW
+description: >-
+  Starter CW exchange profile. Enter the station CQ zone in Sent exchange;
+  official DXCC scoring is not inferred automatically.
+bands: [160m, 80m, 40m, 20m, 15m, 10m]
+modes: [CW]
+exchange:
+  sent:
+    - {name: report, label: RST, type: rst, default: "599"}
+    - {name: zone, label: CQ Zone (station), type: integer, min: 1, max: 40}
+  received:
+    - {name: report, label: RST, type: rst}
+    - {name: zone, label: CQ Zone, type: integer, min: 1, max: 40}
+scoring:
+  qso_points: 1
+  multipliers:
+    - {type: exchange, field: zone, per_band: true}
+    - {type: prefix, per_band: true}
+dupe_key: [callsign, band, mode]

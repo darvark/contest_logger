@@ -1,0 +1,19 @@
+<RCC>
+    <qresource prefix="/contests">
+        <file alias="general-logging.yaml">../contests/examples/general-logging.yaml</file>
+        <file alias="serial-sprint.yaml">../contests/examples/serial-sprint.yaml</file>
+        <file alias="grid-field-day.yaml">../contests/examples/grid-field-day.yaml</file>
+        <file alias="cqww-cw.yaml">../contests/examples/cqww-cw.yaml</file>
+        <file alias="cqww-ssb.yaml">../contests/examples/cqww-ssb.yaml</file>
+        <file alias="cqwpx-cw.yaml">../contests/examples/cqwpx-cw.yaml</file>
+        <file alias="cqwpx-ssb.yaml">../contests/examples/cqwpx-ssb.yaml</file>
+        <file alias="iaruhfc.yaml">../contests/examples/iaruhfc.yaml</file>
+        <file alias="spdx.yaml">../contests/examples/spdx.yaml</file>
+        <file alias="wag.yaml">../contests/examples/wag.yaml</file>
+        <file alias="arrl-dx-cw.yaml">../contests/examples/arrl-dx-cw.yaml</file>
+        <file alias="arrl-dx-ssb.yaml">../contests/examples/arrl-dx-ssb.yaml</file>
+        <file alias="arrl-dx-10m.yaml">../contests/examples/arrl-dx-10m.yaml</file>
+        <file alias="eudx.yaml">../contests/examples/eudx.yaml</file>
+        <file alias="euhfc.yaml">../contests/examples/euhfc.yaml</file>
+    </qresource>
+</RCC>
