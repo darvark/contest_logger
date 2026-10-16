@@ -71,7 +71,7 @@ private slots:
     void receiveSpot(const logger::Spot &spot);
     void refreshBandmap();
     void activateSpot(int row, int column);
-    void activateSpotId(qint64 spotId);
+    void activateSpotId(qint64 spotId, int radio = -1, int context = -1);
     void queueCwMessage();
     void abortCwTransmission();
     void handleEntryEnter(int vfo, bool callsignField);
@@ -187,6 +187,7 @@ private:
     int m_scorePoints = 0;
     int m_scoreMultipliers = 0;
     QTableWidget *m_bandmap = nullptr;
+    QTableWidget *m_radioABandmap = nullptr;
     QTableWidget *m_clusterLog = nullptr;
     QComboBox *m_bandmapBandFilter = nullptr;
     QCheckBox *m_hideWorkedSpots = nullptr;
@@ -213,6 +214,7 @@ private:
     QSpinBox *m_cwWpmSpin = nullptr;
     QLabel *m_cwStatusLabel = nullptr;
     QDockWidget *m_bandmapDock = nullptr;
+    QDockWidget *m_radioABandmapDock = nullptr;
     QDockWidget *m_cwDock = nullptr;
     QDockWidget *m_contestInfoDock = nullptr;
     QDockWidget *m_clusterDock = nullptr;

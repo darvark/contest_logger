@@ -25,6 +25,25 @@ enum class SerialControlState {
     Off
 };
 
+enum class SerialParity {
+    None,
+    Odd,
+    Even,
+    Mark,
+    Space
+};
+
+enum class SerialHandshake {
+    None,
+    XonXoff,
+    Hardware
+};
+
+struct RadioModel {
+    int id = 0;
+    QString name;
+};
+
 struct RadioConfig {
     RadioBackendType backend = RadioBackendType::Hamlib;
     RadioTransport transport = RadioTransport::Serial;
@@ -33,6 +52,10 @@ struct RadioConfig {
     QString host = QStringLiteral("127.0.0.1");
     int port = 4532;
     int baudRate = 9600;
+    int dataBits = 8;
+    int stopBits = 1;
+    SerialParity parity = SerialParity::None;
+    SerialHandshake handshake = SerialHandshake::None;
     SerialControlState rtsState = SerialControlState::Unchanged;
     SerialControlState dtrState = SerialControlState::Unchanged;
     bool mockDualReceiveSupported = true;
@@ -61,6 +84,7 @@ struct RadioProbeResult {
     bool dualReceive = false;
 };
 
+QVector<RadioModel> availableRadioModels();
 RadioProbeResult probeRadio(const RadioConfig &config, int timeoutMs = 3000);
 
 class RadioWorker final : public QObject {

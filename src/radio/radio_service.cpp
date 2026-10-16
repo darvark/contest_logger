@@ -37,6 +37,28 @@ QString serialControlStateName(SerialControlState state)
     return QStringLiteral("UNSET");
 }
 
+QString serialParityName(SerialParity parity)
+{
+    switch (parity) {
+    case SerialParity::None: return QStringLiteral("None");
+    case SerialParity::Odd: return QStringLiteral("Odd");
+    case SerialParity::Even: return QStringLiteral("Even");
+    case SerialParity::Mark: return QStringLiteral("Mark");
+    case SerialParity::Space: return QStringLiteral("Space");
+    }
+    return QStringLiteral("None");
+}
+
+QString serialHandshakeName(SerialHandshake handshake)
+{
+    switch (handshake) {
+    case SerialHandshake::None: return QStringLiteral("None");
+    case SerialHandshake::XonXoff: return QStringLiteral("XONXOFF");
+    case SerialHandshake::Hardware: return QStringLiteral("Hardware");
+    }
+    return QStringLiteral("None");
+}
+
 class MockBackend final : public RadioWorker::Backend {
 public:
     bool open(const RadioConfig &config, QString *) override
@@ -102,6 +124,23 @@ private:
 };
 
 #ifdef LOGGER_WITH_HAMLIB
+void loadHamlibBackends()
+{
+    static std::once_flag backendsLoaded;
+    std::call_once(backendsLoaded, [] { rig_load_all_backends(); });
+}
+
+int collectRadioModel(const struct rig_caps *caps, rig_ptr_t data)
+{
+    if (caps == nullptr || data == nullptr) {
+        return 1;
+    }
+    auto *models = static_cast<QVector<RadioModel> *>(data);
+    models->append({static_cast<int>(caps->rig_model),
+                    QString::fromLocal8Bit(caps->model_name)});
+    return 1;
+}
+
 QString modeName(rmode_t mode)
 {
     if (mode & RIG_MODE_CW) return QStringLiteral("CW");
@@ -121,8 +160,7 @@ public:
 
     bool open(const RadioConfig &config, QString *error) override
     {
-        static std::once_flag backendsLoaded;
-        std::call_once(backendsLoaded, [] { rig_load_all_backends(); });
+        loadHamlibBackends();
 
         if (config.modelId <= 0) {
             if (error != nullptr) {
@@ -199,6 +237,18 @@ public:
                 || !setConfiguration(QStringLiteral("serial_speed"),
                                      QString::number(config.baudRate), error,
                                      hasSerialRateRange)
+                || !setConfiguration(QStringLiteral("data_bits"),
+                                     QString::number(config.dataBits), error,
+                                     config.dataBits != 8)
+                || !setConfiguration(QStringLiteral("stop_bits"),
+                                     QString::number(config.stopBits), error,
+                                     config.stopBits != 1)
+                || !setConfiguration(QStringLiteral("serial_parity"),
+                                     serialParityName(config.parity), error,
+                                     config.parity != SerialParity::None)
+                || !setConfiguration(QStringLiteral("serial_handshake"),
+                                     serialHandshakeName(config.handshake), error,
+                                     config.handshake != SerialHandshake::None)
                 || (config.rtsState != SerialControlState::Unchanged
                     && !setConfiguration(QStringLiteral("rts_state"),
                                          serialControlStateName(config.rtsState), error))
@@ -373,6 +423,22 @@ private:
 #endif
 
 } // namespace
+
+QVector<RadioModel> availableRadioModels()
+{
+#ifdef LOGGER_WITH_HAMLIB
+    loadHamlibBackends();
+    QVector<RadioModel> models;
+    rig_list_foreach(collectRadioModel, &models);
+    std::sort(models.begin(), models.end(), [](const RadioModel &left,
+                                               const RadioModel &right) {
+        return QString::localeAwareCompare(left.name, right.name) < 0;
+    });
+    return models;
+#else
+    return {};
+#endif
+}
 
 RadioProbeResult probeRadio(const RadioConfig &config, int timeoutMs)
 {

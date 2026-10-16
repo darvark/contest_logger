@@ -199,11 +199,19 @@ public:
 
         auto *hamlibGroup = new QGroupBox(tr("Hamlib radio"), connectionTab);
         auto *hamlibForm = new QFormLayout(hamlibGroup);
-        m_modelId = new QSpinBox(this);
-        m_modelId->setObjectName(QStringLiteral("radioHamlibModelId"));
-        m_modelId->setRange(1, 100000);
-        m_modelId->setValue(config.modelId);
-        hamlibForm->addRow(tr("Hamlib model ID:"), m_modelId);
+        m_model = new QComboBox(this);
+        m_model->setObjectName(QStringLiteral("radioHamlibModel"));
+        for (const RadioModel &model : availableRadioModels()) {
+            m_model->addItem(model.name, model.id);
+        }
+        int modelIndex = m_model->findData(config.modelId);
+        if (modelIndex < 0) {
+            m_model->addItem(tr("Saved model (not in Hamlib catalog)"),
+                             config.modelId);
+            modelIndex = m_model->count() - 1;
+        }
+        m_model->setCurrentIndex(modelIndex);
+        hamlibForm->addRow(tr("Radio model:"), m_model);
 
         m_transport = new QComboBox(this);
         m_transport->setObjectName(QStringLiteral("radioTransport"));
@@ -231,6 +239,40 @@ public:
         int baudIndex = m_baudRate->findData(config.baudRate);
         m_baudRate->setCurrentIndex(baudIndex < 0 ? 3 : baudIndex);
         serialForm->addRow(tr("Baud rate:"), m_baudRate);
+        m_dataBits = new QComboBox(this);
+        m_dataBits->setObjectName(QStringLiteral("radioDataBits"));
+        for (int bits : {5, 6, 7, 8}) {
+            m_dataBits->addItem(QString::number(bits), bits);
+        }
+        m_dataBits->setCurrentIndex(m_dataBits->findData(config.dataBits));
+        serialForm->addRow(tr("Data bits:"), m_dataBits);
+        m_stopBits = new QComboBox(this);
+        m_stopBits->setObjectName(QStringLiteral("radioStopBits"));
+        for (int bits : {1, 2}) {
+            m_stopBits->addItem(QString::number(bits), bits);
+        }
+        m_stopBits->setCurrentIndex(m_stopBits->findData(config.stopBits));
+        serialForm->addRow(tr("Stop bits:"), m_stopBits);
+        m_parity = new QComboBox(this);
+        m_parity->setObjectName(QStringLiteral("radioParity"));
+        m_parity->addItem(tr("None"), static_cast<int>(SerialParity::None));
+        m_parity->addItem(tr("Odd"), static_cast<int>(SerialParity::Odd));
+        m_parity->addItem(tr("Even"), static_cast<int>(SerialParity::Even));
+        m_parity->addItem(tr("Mark"), static_cast<int>(SerialParity::Mark));
+        m_parity->addItem(tr("Space"), static_cast<int>(SerialParity::Space));
+        m_parity->setCurrentIndex(
+            m_parity->findData(static_cast<int>(config.parity)));
+        serialForm->addRow(tr("Parity:"), m_parity);
+        m_handshake = new QComboBox(this);
+        m_handshake->setObjectName(QStringLiteral("radioHandshake"));
+        m_handshake->addItem(tr("None"), static_cast<int>(SerialHandshake::None));
+        m_handshake->addItem(tr("Software (XON/XOFF)"),
+                             static_cast<int>(SerialHandshake::XonXoff));
+        m_handshake->addItem(tr("Hardware (RTS/CTS)"),
+                             static_cast<int>(SerialHandshake::Hardware));
+        m_handshake->setCurrentIndex(
+            m_handshake->findData(static_cast<int>(config.handshake)));
+        serialForm->addRow(tr("Handshake:"), m_handshake);
         m_rtsState = new QComboBox(this);
         m_rtsState->setObjectName(QStringLiteral("radioRtsState"));
         populateSerialControlSelector(m_rtsState, config.rtsState);
@@ -364,11 +406,16 @@ public:
         result.backend = static_cast<RadioBackendType>(m_backend->currentData().toInt());
         result.transport =
             static_cast<RadioTransport>(m_transport->currentData().toInt());
-        result.modelId = m_modelId->value();
+        result.modelId = m_model->currentData().toInt();
         result.devicePath = m_devicePath->text().trimmed();
         result.host = m_host->text().trimmed();
         result.port = m_port->value();
         result.baudRate = m_baudRate->currentData().toInt();
+        result.dataBits = m_dataBits->currentData().toInt();
+        result.stopBits = m_stopBits->currentData().toInt();
+        result.parity = static_cast<SerialParity>(m_parity->currentData().toInt());
+        result.handshake =
+            static_cast<SerialHandshake>(m_handshake->currentData().toInt());
         result.rtsState =
             static_cast<SerialControlState>(m_rtsState->currentData().toInt());
         result.dtrState =
@@ -389,12 +436,16 @@ private:
     }
 
     QComboBox *m_backend = nullptr;
-    QSpinBox *m_modelId = nullptr;
+    QComboBox *m_model = nullptr;
     QComboBox *m_transport = nullptr;
     QLineEdit *m_devicePath = nullptr;
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
     QComboBox *m_baudRate = nullptr;
+    QComboBox *m_dataBits = nullptr;
+    QComboBox *m_stopBits = nullptr;
+    QComboBox *m_parity = nullptr;
+    QComboBox *m_handshake = nullptr;
     QComboBox *m_rtsState = nullptr;
     QComboBox *m_dtrState = nullptr;
     QGroupBox *m_serialGroup = nullptr;
@@ -778,8 +829,12 @@ QFrame[pane="true"] QHeaderView::section {
 }
 QFrame[pane="true"] QTableCornerButton::section { background: #40E0D0; border: none; }
 
-QFrame#bandmapPane, QFrame#bandmapPane QTableWidget { background: #AFEEEE; }
-QFrame#bandmapPane QHeaderView::section { background: #AFEEEE; }
+QFrame#bandmapPane, QFrame#bandmapPane QTableWidget,
+QFrame#radioABandmapPane, QFrame#radioABandmapPane QTableWidget {
+    background: #AFEEEE;
+}
+QFrame#bandmapPane QHeaderView::section,
+QFrame#radioABandmapPane QHeaderView::section { background: #AFEEEE; }
 QFrame#clusterPane, QFrame#clusterPane QTableWidget { background: black; color: white; }
 QFrame#clusterPane QHeaderView::section {
     background: #202020; color: #FFFF00; border-bottom: 1px solid #404040;
@@ -1045,13 +1100,25 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     previousSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Up));
     previousSpotAction->setShortcutContext(Qt::WindowShortcut);
     connect(previousSpotAction, &QAction::triggered, this,
-            [this] { selectAdjacentBandmapRow(m_bandmap, -1); });
+            [this] {
+                QTableWidget *bandmap =
+                    (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
+                        && currentEntryContext() == 0
+                    ? m_radioABandmap : m_bandmap;
+                selectAdjacentBandmapRow(bandmap, -1);
+            });
     auto *nextSpotAction = operatingMenu->addAction(tr("Next bandmap spot"));
     nextSpotAction->setObjectName(QStringLiteral("nextBandmapSpotAction"));
     nextSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Down));
     nextSpotAction->setShortcutContext(Qt::WindowShortcut);
     connect(nextSpotAction, &QAction::triggered, this,
-            [this] { selectAdjacentBandmapRow(m_bandmap, 1); });
+            [this] {
+                QTableWidget *bandmap =
+                    (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
+                        && currentEntryContext() == 0
+                    ? m_radioABandmap : m_bandmap;
+                selectAdjacentBandmapRow(bandmap, 1);
+            });
     operatingMenu->addAction(abortCwAction);
     operatingMenu->addSeparator();
     auto *editKeysMenu = new QMenu(tr("Edit function key message"), operatingMenu);
@@ -1471,7 +1538,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 this, [this, vfo] {
                     updateDupeIndicatorForVfo(vfo);
                     updateEntryHeaders();
-                    if (vfo == currentEntryContext()) {
+                    if (vfo == currentEntryContext() || m_so2vToggle->isChecked()
+                        || m_so2rToggle->isChecked()) {
                         refreshBandmap();
                         refreshScoreSummary();
                     }
@@ -1723,6 +1791,39 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_bandmapDock = createPaneDock(tr("Bandmap"), QStringLiteral("dxBandmapDock"),
                                    bandmapPane);
 
+    auto *radioABandmapPane = createPane(QStringLiteral("radioABandmapPane"));
+    m_radioABandmap = new QTableWidget(0, 5, radioABandmapPane);
+    m_radioABandmap->setObjectName(QStringLiteral("dxBandmapRadioA"));
+    m_radioABandmap->setHorizontalHeaderLabels(
+        {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Comment")});
+    m_radioABandmap->setFont(monoFont(10, true));
+    m_radioABandmap->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_radioABandmap->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_radioABandmap->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_radioABandmap->setShowGrid(false);
+    m_radioABandmap->setWordWrap(false);
+    m_radioABandmap->verticalHeader()->hide();
+    m_radioABandmap->verticalHeader()->setDefaultSectionSize(
+        QFontMetrics(monoFont(10, true)).height() + 2);
+    m_radioABandmap->horizontalHeader()->setHighlightSections(false);
+    m_radioABandmap->horizontalHeader()->setStretchLastSection(true);
+    m_radioABandmap->setFocusPolicy(Qt::StrongFocus);
+    m_radioABandmap->installEventFilter(this);
+    m_radioABandmap->setToolTip(
+        tr("Radio A spots. Enter or double-click to copy the callsign and tune Radio A."));
+    connect(m_radioABandmap, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+                if (const QTableWidgetItem *item = m_radioABandmap->item(row, 0)) {
+                    const int radio = m_so2rToggle->isChecked()
+                        ? 0 : m_activeRadioSelector->currentData().toInt();
+                    activateSpotId(item->data(Qt::UserRole).toLongLong(), radio, 0);
+                }
+            });
+    radioABandmapPane->layout()->addWidget(m_radioABandmap);
+    m_radioABandmapDock = createPaneDock(
+        tr("Bandmap — Radio A"), QStringLiteral("radioABandmapDock"),
+        radioABandmapPane);
+
     // DX cluster announcements (raw, chronological).
     auto *clusterPane = createPane(QStringLiteral("clusterPane"));
     m_clusterLog = new QTableWidget(0, 5, clusterPane);
@@ -1815,6 +1916,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     applyDefaultDockLayout();
     createWindowMenu();
     restoreWindowLayout();
+    m_radioABandmapDock->hide();
     updateFunctionKeyButtons();
 
     statusBar()->showMessage(tr("Database ready"));
@@ -1882,6 +1984,8 @@ void MainWindow::applyDefaultDockLayout()
     addDockWidget(Qt::LeftDockWidgetArea, m_checkCallDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_checkPartialDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_cwDock);
+    addDockWidget(Qt::LeftDockWidgetArea, m_radioABandmapDock);
+    splitDockWidget(m_checkCallDock, m_radioABandmapDock, Qt::Horizontal);
     tabifyDockWidget(m_cwDock, m_contestInfoDock);
     addDockWidget(Qt::RightDockWidgetArea, m_bandmapDock);
     addDockWidget(Qt::RightDockWidgetArea, m_rateDock);
@@ -1889,14 +1993,16 @@ void MainWindow::applyDefaultDockLayout()
     splitDockWidget(m_rateDock, m_summaryDock, Qt::Vertical);
     splitDockWidget(m_summaryDock, m_clusterDock, Qt::Vertical);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_cwDock,
+                              m_radioABandmapDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         dock->setFloating(false);
         dock->show();
     }
+    m_radioABandmapDock->hide();
     m_cwDock->raise();
-    resizeDocks({m_checkCallDock, m_bandmapDock, m_rateDock},
-                {260, 250, 400}, Qt::Horizontal);
+    resizeDocks({m_checkCallDock, m_radioABandmapDock, m_bandmapDock, m_rateDock},
+                {230, 280, 250, 400}, Qt::Horizontal);
     resizeDocks({m_checkCallDock, m_checkPartialDock, m_cwDock},
                 {250, 260, 230}, Qt::Vertical);
     resizeDocks({m_rateDock, m_summaryDock, m_clusterDock},
@@ -1952,6 +2058,7 @@ void MainWindow::resetWindowLayout()
     showNormal();
     resize(1600, 960);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_cwDock,
+                              m_radioABandmapDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         removeDockWidget(dock);
@@ -2615,6 +2722,7 @@ void MainWindow::setSo2vEnabled(bool enabled)
         return;
     }
     m_entryGroups[1]->setVisible(enabled);
+    m_radioABandmapDock->setVisible(enabled || m_so2rToggle->isChecked());
     if (enabled && !snapshot.dualReceiveSupported) {
         showOperatorMessage(tr("SO2V without dual receive: the radio exposes two VFOs but "
                                "only one can be heard at a time."), true);
@@ -2628,6 +2736,7 @@ void MainWindow::setSo2vEnabled(bool enabled)
         setActiveEntryContext(0);
     }
     updateEntryHeaders();
+    refreshBandmap();
     statusBar()->showMessage(
         enabled ? tr("SO2V enabled. VFO A and B have independent QSO entry.")
                 : tr("SO2V disabled."),
@@ -2656,6 +2765,7 @@ void MainWindow::setSo2rEnabled(bool enabled)
                     : (i == 0 ? tr("RX focus A") : tr("RX focus B")));
     }
     m_entryGroups[1]->setVisible(enabled || m_so2vToggle->isChecked());
+    m_radioABandmapDock->setVisible(enabled || m_so2vToggle->isChecked());
     if (!m_entryGroups[1]->isVisible()) {
         setActiveEntryContext(0);
     }
@@ -2670,6 +2780,7 @@ void MainWindow::setSo2rEnabled(bool enabled)
     updateRadioSnapshotForRadio(
         m_activeRadioSelector->currentData().toInt(),
         m_radioSnapshots[m_activeRadioSelector->currentData().toInt()]);
+    refreshBandmap();
 }
 
 void MainWindow::focusVfo(int vfo)
@@ -3401,9 +3512,19 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         return QMainWindow::eventFilter(watched, event);
     }
     const auto *keyEvent = static_cast<QKeyEvent *>(event);
-    if (watched == m_bandmap
+    if ((watched == m_bandmap || watched == m_radioABandmap)
         && (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter)) {
-        activateSpot(m_bandmap->currentRow(), 0);
+        auto *bandmap = static_cast<QTableWidget *>(watched);
+        const QTableWidgetItem *item = bandmap->item(bandmap->currentRow(), 0);
+        if (item != nullptr) {
+            if (bandmap == m_radioABandmap) {
+                const int radio = m_so2rToggle->isChecked()
+                    ? 0 : m_activeRadioSelector->currentData().toInt();
+                activateSpotId(item->data(Qt::UserRole).toLongLong(), radio, 0);
+            } else {
+                activateSpot(bandmap->currentRow(), 0);
+            }
+        }
         return true;
     }
     if (keyEvent->key() != Qt::Key_Space
@@ -4062,6 +4183,14 @@ int MainWindow::currentEntryContext() const
 void MainWindow::setActiveEntryContext(int context)
 {
     m_activeEntryContext = qBound(0, context, 1);
+    if (m_so2vToggle->isChecked() && !m_so2rToggle->isChecked()) {
+        const int radio = m_activeRadioSelector->currentData().toInt();
+        const RadioSnapshot &snapshot = m_radioSnapshots[radio];
+        if (snapshot.state == ConnectionState::Connected
+            && snapshot.dualVfoSupported && snapshot.focusVfo != m_activeEntryContext) {
+            m_radioControllers[radio].setVfoFocus(m_activeEntryContext);
+        }
+    }
     for (int index = 0; index < 2; ++index) {
         m_entryGroups[index]->setProperty("active", index == m_activeEntryContext);
         repolish(m_entryGroups[index]);
@@ -4900,6 +5029,7 @@ void MainWindow::updateRadioSnapshotForRadio(int radio, const RadioSnapshot &sna
         const QSignalBlocker blocker(m_so2vToggle);
         m_so2vToggle->setChecked(false);
         m_entryGroups[1]->hide();
+        m_radioABandmapDock->hide();
     }
 
     for (int context = 0; context < 2; ++context) {
@@ -4981,7 +5111,8 @@ void MainWindow::updateRadioSnapshotForRadio(int radio, const RadioSnapshot &sna
             ? QStringLiteral("color: #c62828;")
             : QString());
     updateEntryHeaders();
-    if (previousSnapshot.frequencyHz != snapshot.frequencyHz) {
+    if (frequencyChanged || previousSnapshot.focusVfo != snapshot.focusVfo
+        || previousSnapshot.state != snapshot.state) {
         refreshBandmap();
     }
 }
@@ -5004,6 +5135,13 @@ RadioConfig MainWindow::radioConfigFromSettings(int radio) const
     config.host = settings.value(QStringLiteral("host"), config.host).toString();
     config.port = settings.value(QStringLiteral("port"), config.port).toInt();
     config.baudRate = settings.value(QStringLiteral("baudRate"), 9600).toInt();
+    config.dataBits = settings.value(QStringLiteral("dataBits"), config.dataBits).toInt();
+    config.stopBits = settings.value(QStringLiteral("stopBits"), config.stopBits).toInt();
+    config.parity = static_cast<SerialParity>(
+        settings.value(QStringLiteral("parity"), static_cast<int>(config.parity)).toInt());
+    config.handshake = static_cast<SerialHandshake>(
+        settings.value(QStringLiteral("handshake"),
+                       static_cast<int>(config.handshake)).toInt());
     config.rtsState = static_cast<SerialControlState>(
         settings.value(QStringLiteral("rtsState"),
                        static_cast<int>(config.rtsState)).toInt());
@@ -5027,6 +5165,13 @@ RadioConfig MainWindow::radioConfigFromSettings(int radio) const
         config.host = settings.value(QStringLiteral("host"), config.host).toString();
         config.port = settings.value(QStringLiteral("port"), config.port).toInt();
         config.baudRate = settings.value(QStringLiteral("baudRate"), 9600).toInt();
+        config.dataBits = settings.value(QStringLiteral("dataBits"), config.dataBits).toInt();
+        config.stopBits = settings.value(QStringLiteral("stopBits"), config.stopBits).toInt();
+        config.parity = static_cast<SerialParity>(
+            settings.value(QStringLiteral("parity"), static_cast<int>(config.parity)).toInt());
+        config.handshake = static_cast<SerialHandshake>(
+            settings.value(QStringLiteral("handshake"),
+                           static_cast<int>(config.handshake)).toInt());
         config.rtsState = static_cast<SerialControlState>(
             settings.value(QStringLiteral("rtsState"),
                            static_cast<int>(config.rtsState)).toInt());
@@ -5054,6 +5199,10 @@ void MainWindow::saveRadioConfig(int radio, const RadioConfig &config)
     settings.setValue(QStringLiteral("host"), config.host);
     settings.setValue(QStringLiteral("port"), config.port);
     settings.setValue(QStringLiteral("baudRate"), config.baudRate);
+    settings.setValue(QStringLiteral("dataBits"), config.dataBits);
+    settings.setValue(QStringLiteral("stopBits"), config.stopBits);
+    settings.setValue(QStringLiteral("parity"), static_cast<int>(config.parity));
+    settings.setValue(QStringLiteral("handshake"), static_cast<int>(config.handshake));
     settings.setValue(QStringLiteral("rtsState"), static_cast<int>(config.rtsState));
     settings.setValue(QStringLiteral("dtrState"), static_cast<int>(config.dtrState));
     settings.setValue(QStringLiteral("timeoutMs"), config.timeoutMs);
@@ -5109,17 +5258,8 @@ void MainWindow::receiveSpot(const Spot &receivedSpot)
 
 void MainWindow::refreshBandmap()
 {
-    if (m_bandmap == nullptr) {
+    if (m_bandmap == nullptr || m_radioABandmap == nullptr) {
         return;
-    }
-    qint64 selectedSpot = -1;
-    if (const QTableWidgetItem *selected = m_bandmap->item(m_bandmap->currentRow(), 0)) {
-        selectedSpot = selected->data(Qt::UserRole).toLongLong();
-    }
-    const int context = currentEntryContext();
-    QString filterBand = m_bandmapBandFilter->currentData().toString();
-    if (filterBand == QStringLiteral("@active")) {
-        filterBand = m_bandSelectors[context]->currentText().trimmed().toLower();
     }
     const ContestDefinition *definition = activeDefinition();
     const QStringList dupeKey = definition != nullptr ? definition->dupeKey : QStringList{};
@@ -5141,146 +5281,184 @@ void MainWindow::refreshBandmap()
                                                   spot.band, mode);
                            });
     };
-
     const QDateTime now = QDateTime::currentDateTimeUtc();
     QVector<Spot> ordered = m_spots.values().toVector();
     std::sort(ordered.begin(), ordered.end(), [](const Spot &left, const Spot &right) {
         return left.timestampUtc > right.timestampUtc;
     });
-    QSet<QString> displayed;
-    QVector<QPair<Spot, bool>> visible;
-    for (const Spot &spot : std::as_const(ordered)) {
-        const qint64 ageSeconds = spot.timestampUtc.secsTo(now);
-        if (ageSeconds < 0 || ageSeconds > 3600) {
-            continue;
-        }
-        if (!filterBand.isEmpty() && spot.band.compare(filterBand, Qt::CaseInsensitive) != 0) {
-            continue;
-        }
-        // Newest spot per callsign and band wins.
-        const QString dedupeKey = spot.callsign.toUpper() + QLatin1Char('|') + spot.band;
-        if (displayed.contains(dedupeKey)) {
-            continue;
-        }
-        displayed.insert(dedupeKey);
-        const bool worked = isWorked(spot);
-        if (worked && m_hideWorkedSpots->isChecked()) {
-            continue;
-        }
-        visible.append({spot, worked});
-    }
     const QComboBox *sortSelector =
         findChild<QComboBox *>(QStringLiteral("bandmapSortSelector"));
     const bool sortByTime = sortSelector != nullptr
         && sortSelector->currentData().toString() == QLatin1String("time");
-    std::sort(visible.begin(), visible.end(), [sortByTime](const auto &left,
-                                                           const auto &right) {
-        if (sortByTime) {
-            if (left.first.timestampUtc != right.first.timestampUtc) {
-                return left.first.timestampUtc > right.first.timestampUtc;
-            }
-            return left.first.frequencyHz < right.first.frequencyHz;
-        }
-        if (left.first.frequencyHz != right.first.frequencyHz) {
-            return left.first.frequencyHz < right.first.frequencyHz;
-        }
-        return left.first.timestampUtc > right.first.timestampUtc;
-    });
 
-    const int radio = m_so2rToggle->isChecked()
-        ? context : m_activeRadioSelector->currentData().toInt();
-    const RadioSnapshot &snapshot = m_radioSnapshots[radio];
-    qint64 radioFrequency = 0;
-    if (snapshot.state == ConnectionState::Connected) {
-        radioFrequency = snapshot.frequencyHz;
-        const int vfoNumber = m_so2rToggle->isChecked() ? snapshot.focusVfo : context;
-        for (const Vfo &vfo : snapshot.vfos) {
-            if (vfo.number == vfoNumber && vfo.frequencyHz > 0) {
-                radioFrequency = vfo.frequencyHz;
+    const auto populate = [this, &ordered, &isWorked, &loggedCalls, &now, sortByTime](
+                              QTableWidget *bandmap, QDockWidget *dock,
+                              int context, int radio, int labelRadio) {
+        qint64 selectedSpot = -1;
+        if (const QTableWidgetItem *selected =
+                bandmap->item(bandmap->currentRow(), 0)) {
+            selectedSpot = selected->data(Qt::UserRole).toLongLong();
+        }
+        QString filterBand = m_bandmapBandFilter->currentData().toString();
+        if (filterBand == QStringLiteral("@active")) {
+            filterBand = m_bandSelectors[context]->currentText().trimmed().toLower();
+        }
+        QSet<QString> displayed;
+        QVector<QPair<Spot, bool>> visible;
+        for (const Spot &spot : std::as_const(ordered)) {
+            const qint64 ageSeconds = spot.timestampUtc.secsTo(now);
+            if (ageSeconds < 0 || ageSeconds > 3600) {
+                continue;
             }
+            if (!filterBand.isEmpty()
+                && spot.band.compare(filterBand, Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+            const QString dedupeKey =
+                spot.callsign.toUpper() + QLatin1Char('|') + spot.band;
+            if (displayed.contains(dedupeKey)) {
+                continue;
+            }
+            displayed.insert(dedupeKey);
+            const bool worked = isWorked(spot);
+            if (worked && m_hideWorkedSpots->isChecked()) {
+                continue;
+            }
+            visible.append({spot, worked});
         }
-    }
-    int nearestRow = -1;
-    qint64 nearestDistance = 3'000;
-    for (int row = 0; row < visible.size(); ++row) {
-        const qint64 distance =
-            qAbs(visible.at(row).first.frequencyHz - radioFrequency);
-        if (radioFrequency > 0 && distance <= nearestDistance) {
-            nearestDistance = distance;
-            nearestRow = row;
-        }
-    }
+        std::sort(visible.begin(), visible.end(), [sortByTime](const auto &left,
+                                                               const auto &right) {
+            if (sortByTime) {
+                if (left.first.timestampUtc != right.first.timestampUtc) {
+                    return left.first.timestampUtc > right.first.timestampUtc;
+                }
+                return left.first.frequencyHz < right.first.frequencyHz;
+            }
+            if (left.first.frequencyHz != right.first.frequencyHz) {
+                return left.first.frequencyHz < right.first.frequencyHz;
+            }
+            return left.first.timestampUtc > right.first.timestampUtc;
+        });
 
-    m_bandmap->setUpdatesEnabled(false);
-    m_bandmap->setRowCount(static_cast<int>(visible.size()));
-    const QFont normal = monoFont(10, true);
-    QFont workedFont = monoFont(10, false);
-    workedFont.setItalic(true);
-    int selectRow = -1;
-    for (int row = 0; row < visible.size(); ++row) {
-        const Spot &spot = visible.at(row).first;
-        const bool worked = visible.at(row).second;
-        const bool newStation = !loggedCalls.contains(spot.callsign.toUpper());
-        const qint64 ageMinutes = spot.timestampUtc.secsTo(now) / 60;
-        const QStringList values{
-            QString::number(static_cast<double>(spot.frequencyHz) / 1000.0, 'f', 1),
-            spot.callsign,
-            QStringLiteral("%1m").arg(ageMinutes),
-            spot.spotter,
-            spot.comment};
-        for (int column = 0; column < values.size(); ++column) {
-            auto *item = new QTableWidgetItem(values.at(column));
-            item->setFont(worked ? workedFont : normal);
-            if (worked) {
-                item->setForeground(QColor(QStringLiteral("#707070")));
-            } else if (column == 1) {
-                item->setForeground(newStation ? QColor(QStringLiteral("#006400"))
-                                               : QColor(Qt::black));
-            } else {
-                item->setForeground(QColor(QStringLiteral("#000080")));
+        const RadioSnapshot &snapshot = m_radioSnapshots[radio];
+        qint64 radioFrequency = 0;
+        if (snapshot.state == ConnectionState::Connected) {
+            radioFrequency = snapshot.frequencyHz;
+            const int vfoNumber = m_so2rToggle->isChecked()
+                ? snapshot.focusVfo : context;
+            for (const Vfo &vfo : snapshot.vfos) {
+                if (vfo.number == vfoNumber && vfo.frequencyHz > 0) {
+                    radioFrequency = vfo.frequencyHz;
+                }
             }
-            if (row == nearestRow) {
-                item->setBackground(QColor(QStringLiteral("#FFA500")));
-            }
-            if (column == 0) {
-                item->setData(Qt::UserRole, spot.id);
-                item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-            }
-            m_bandmap->setItem(row, column, item);
         }
-        if (spot.id == selectedSpot) {
-            selectRow = row;
+        int nearestRow = -1;
+        qint64 nearestDistance = 3'000;
+        for (int row = 0; row < visible.size(); ++row) {
+            const qint64 distance =
+                qAbs(visible.at(row).first.frequencyHz - radioFrequency);
+            if (radioFrequency > 0 && distance <= nearestDistance) {
+                nearestDistance = distance;
+                nearestRow = row;
+            }
         }
+
+        bandmap->setUpdatesEnabled(false);
+        bandmap->setRowCount(static_cast<int>(visible.size()));
+        const QFont normal = monoFont(10, true);
+        QFont workedFont = monoFont(10, false);
+        workedFont.setItalic(true);
+        int selectRow = -1;
+        for (int row = 0; row < visible.size(); ++row) {
+            const Spot &spot = visible.at(row).first;
+            const bool worked = visible.at(row).second;
+            const bool newStation = !loggedCalls.contains(spot.callsign.toUpper());
+            const qint64 ageMinutes = spot.timestampUtc.secsTo(now) / 60;
+            const QStringList values{
+                QString::number(static_cast<double>(spot.frequencyHz) / 1000.0, 'f', 1),
+                spot.callsign,
+                QStringLiteral("%1m").arg(ageMinutes),
+                spot.spotter,
+                spot.comment};
+            for (int column = 0; column < values.size(); ++column) {
+                auto *item = new QTableWidgetItem(values.at(column));
+                item->setFont(worked ? workedFont : normal);
+                if (worked) {
+                    item->setForeground(QColor(QStringLiteral("#707070")));
+                } else if (column == 1) {
+                    item->setForeground(newStation ? QColor(QStringLiteral("#006400"))
+                                                   : QColor(Qt::black));
+                } else {
+                    item->setForeground(QColor(QStringLiteral("#000080")));
+                }
+                if (row == nearestRow) {
+                    item->setBackground(QColor(QStringLiteral("#FFA500")));
+                }
+                if (column == 0) {
+                    item->setData(Qt::UserRole, spot.id);
+                    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                }
+                bandmap->setItem(row, column, item);
+            }
+            if (spot.id == selectedSpot) {
+                selectRow = row;
+            }
+        }
+        bandmap->resizeColumnsToContents();
+        bandmap->setUpdatesEnabled(true);
+        if (selectRow >= 0) {
+            bandmap->setCurrentCell(selectRow, 0);
+        } else if (nearestRow >= 0) {
+            bandmap->scrollToItem(bandmap->item(nearestRow, 0),
+                                  QAbstractItemView::PositionAtCenter);
+        }
+        const QString radioLabel = labelRadio == 0 ? tr("Radio A") : tr("Radio B");
+        dock->setWindowTitle(
+            filterBand.isEmpty()
+                ? tr("Bandmap — %1 — all bands (%2)").arg(radioLabel).arg(visible.size())
+                : tr("Bandmap — %1 — %2 (%3)")
+                      .arg(radioLabel, filterBand).arg(visible.size()));
+    };
+
+    const bool so2v = m_so2vToggle->isChecked();
+    const bool so2r = m_so2rToggle->isChecked();
+    if (so2v || so2r) {
+        const int radioA = so2r ? 0 : m_activeRadioSelector->currentData().toInt();
+        const int radioB = so2r ? 1 : radioA;
+        populate(m_radioABandmap, m_radioABandmapDock, 0, radioA, 0);
+        populate(m_bandmap, m_bandmapDock, 1, radioB, 1);
+    } else {
+        const int radio = m_activeRadioSelector->currentData().toInt();
+        populate(m_bandmap, m_bandmapDock, currentEntryContext(), radio, radio);
     }
-    m_bandmap->resizeColumnsToContents();
-    m_bandmap->setUpdatesEnabled(true);
-    if (selectRow >= 0) {
-        m_bandmap->setCurrentCell(selectRow, 0);
-    } else if (nearestRow >= 0) {
-        m_bandmap->scrollToItem(m_bandmap->item(nearestRow, 0),
-                                QAbstractItemView::PositionAtCenter);
-    }
-    m_bandmapDock->setWindowTitle(
-        filterBand.isEmpty() ? tr("Bandmap — all bands (%1)").arg(visible.size())
-                             : tr("Bandmap — %1 (%2)").arg(filterBand).arg(visible.size()));
 }
 
 void MainWindow::activateSpot(int row, int)
 {
     if (const QTableWidgetItem *idItem = m_bandmap->item(row, 0)) {
-        activateSpotId(idItem->data(Qt::UserRole).toLongLong());
+        if (m_so2vToggle->isChecked() || m_so2rToggle->isChecked()) {
+            const int radio = m_so2rToggle->isChecked()
+                ? 1 : m_activeRadioSelector->currentData().toInt();
+            activateSpotId(idItem->data(Qt::UserRole).toLongLong(), radio, 1);
+        } else {
+            activateSpotId(idItem->data(Qt::UserRole).toLongLong());
+        }
     }
 }
 
-void MainWindow::activateSpotId(qint64 spotId)
+void MainWindow::activateSpotId(qint64 spotId, int radio, int context)
 {
     const auto spot = m_spots.constFind(spotId);
     if (spot == m_spots.cend()) {
         return;
     }
-    const int radio = m_activeRadioSelector->currentData().toInt();
-    const int context = m_so2rToggle->isChecked()
-        ? radio : qBound(0, m_radioSnapshots[radio].focusVfo, 1);
+    if (radio < 0) {
+        radio = m_activeRadioSelector->currentData().toInt();
+    }
+    if (context < 0) {
+        context = m_so2rToggle->isChecked()
+            ? radio : qBound(0, m_radioSnapshots[radio].focusVfo, 1);
+    }
     m_callsignEdits[context]->setText(spot->callsign);
     if (!spot->band.isEmpty()) {
         m_bandSelectors[context]->setCurrentText(spot->band);

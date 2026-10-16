@@ -9,6 +9,7 @@
 #include <QDateEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDockWidget>
 #include <QEvent>
 #include <QFrame>
 #include <QGroupBox>
@@ -227,10 +228,18 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
     QVERIFY(configureRadioB != nullptr);
 
     bool dialogSeen = false;
-    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+    int selectedModelId = 1;
+    const QVector<RadioModel> models = availableRadioModels();
+#ifdef LOGGER_WITH_HAMLIB
+    QVERIFY2(!models.isEmpty(), "Hamlib returned no radio models");
+#endif
+    if (!models.isEmpty()) {
+        selectedModelId = models.constFirst().id;
+    }
+    runWhenModalAppears([&dialogSeen, &selectedModelId](QDialog *dialog) {
         dialogSeen = true;
         auto *backend = dialog->findChild<QComboBox *>(QStringLiteral("radioBackend"));
-        auto *modelId = dialog->findChild<QSpinBox *>(QStringLiteral("radioHamlibModelId"));
+        auto *model = dialog->findChild<QComboBox *>(QStringLiteral("radioHamlibModel"));
         auto *transport = dialog->findChild<QComboBox *>(QStringLiteral("radioTransport"));
         auto *host = dialog->findChild<QLineEdit *>(QStringLiteral("radioTcpHost"));
         auto *port = dialog->findChild<QSpinBox *>(QStringLiteral("radioTcpPort"));
@@ -239,8 +248,12 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
         auto *timeout = dialog->findChild<QSpinBox *>(QStringLiteral("radioTimeout"));
         auto *rtsState = dialog->findChild<QComboBox *>(QStringLiteral("radioRtsState"));
         auto *dtrState = dialog->findChild<QComboBox *>(QStringLiteral("radioDtrState"));
+        auto *dataBits = dialog->findChild<QComboBox *>(QStringLiteral("radioDataBits"));
+        auto *stopBits = dialog->findChild<QComboBox *>(QStringLiteral("radioStopBits"));
+        auto *parity = dialog->findChild<QComboBox *>(QStringLiteral("radioParity"));
+        auto *handshake = dialog->findChild<QComboBox *>(QStringLiteral("radioHandshake"));
         QVERIFY(backend != nullptr);
-        QVERIFY(modelId != nullptr);
+        QVERIFY(model != nullptr);
         QVERIFY(transport != nullptr);
         QVERIFY(host != nullptr);
         QVERIFY(port != nullptr);
@@ -248,14 +261,24 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
         QVERIFY(timeout != nullptr);
         QVERIFY(rtsState != nullptr);
         QVERIFY(dtrState != nullptr);
+        QVERIFY(dataBits != nullptr);
+        QVERIFY(stopBits != nullptr);
+        QVERIFY(parity != nullptr);
+        QVERIFY(handshake != nullptr);
 
         backend->setCurrentIndex(backend->findData(static_cast<int>(RadioBackendType::Hamlib)));
-        modelId->setValue(3073);
+        model->setCurrentIndex(model->findData(selectedModelId));
+        QCOMPARE(model->currentData().toInt(), selectedModelId);
         QVERIFY(dialog->findChild<QGroupBox *>(QStringLiteral("radioSerialGroup"))->isVisible());
         rtsState->setCurrentIndex(
             rtsState->findData(static_cast<int>(SerialControlState::On)));
         dtrState->setCurrentIndex(
             dtrState->findData(static_cast<int>(SerialControlState::Off)));
+        dataBits->setCurrentIndex(dataBits->findData(7));
+        stopBits->setCurrentIndex(stopBits->findData(2));
+        parity->setCurrentIndex(parity->findData(static_cast<int>(SerialParity::Even)));
+        handshake->setCurrentIndex(
+            handshake->findData(static_cast<int>(SerialHandshake::Hardware)));
         transport->setCurrentIndex(
             transport->findData(static_cast<int>(RadioTransport::Tcp)));
         QVERIFY(!dialog->findChild<QGroupBox *>(QStringLiteral("radioSerialGroup"))->isVisible());
@@ -272,7 +295,7 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
     QSettings settings;
     QCOMPARE(settings.value(QStringLiteral("radio/B/backend")).toInt(),
              static_cast<int>(RadioBackendType::Hamlib));
-    QCOMPARE(settings.value(QStringLiteral("radio/B/modelId")).toInt(), 3073);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/modelId")).toInt(), selectedModelId);
     QCOMPARE(settings.value(QStringLiteral("radio/B/transport")).toInt(),
              static_cast<int>(RadioTransport::Tcp));
     QCOMPARE(settings.value(QStringLiteral("radio/B/host")).toString(),
@@ -284,6 +307,12 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
              static_cast<int>(SerialControlState::On));
     QCOMPARE(settings.value(QStringLiteral("radio/B/dtrState")).toInt(),
              static_cast<int>(SerialControlState::Off));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/dataBits")).toInt(), 7);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/stopBits")).toInt(), 2);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/parity")).toInt(),
+             static_cast<int>(SerialParity::Even));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/handshake")).toInt(),
+             static_cast<int>(SerialHandshake::Hardware));
     QVERIFY(!settings.contains(QStringLiteral("radio/A/modelId")));
 }
 
@@ -460,11 +489,25 @@ void MainWindowUiTest::so2vCwTransmissionFollowsRxFocus()
                 && radioStatus->text().contains(QStringLiteral(" MHz ")));
 
     auto *so2v = m_window->findChild<QCheckBox *>(QStringLiteral("so2vToggle"));
-    auto *focusB = m_window->findChild<QPushButton *>(QStringLiteral("focusVfoB"));
+    auto *callsignB = m_window->findChild<QLineEdit *>(QStringLiteral("callsignInputB"));
+    auto *radioABandmap = m_window->findChild<QTableWidget *>(
+        QStringLiteral("dxBandmapRadioA"));
+    auto *radioABandmapDock = m_window->findChild<QDockWidget *>(
+        QStringLiteral("radioABandmapDock"));
+    auto *radioBBandmapDock = m_window->findChild<QDockWidget *>(
+        QStringLiteral("dxBandmapDock"));
     QVERIFY(so2v != nullptr);
-    QVERIFY(focusB != nullptr);
+    QVERIFY(callsignB != nullptr);
+    QVERIFY(radioABandmap != nullptr);
+    QVERIFY(radioABandmapDock != nullptr);
+    QVERIFY(radioBBandmapDock != nullptr);
+    QCOMPARE(m_window->dockWidgetArea(radioABandmapDock), Qt::LeftDockWidgetArea);
+    QCOMPARE(m_window->dockWidgetArea(radioBBandmapDock), Qt::RightDockWidgetArea);
+    QVERIFY(!radioABandmapDock->isVisible());
     so2v->setChecked(true);
-    QTest::mouseClick(focusB, Qt::LeftButton);
+    QTRY_VERIFY(radioABandmapDock->isVisible());
+    QVERIFY(radioBBandmapDock->windowTitle().contains(QStringLiteral("Radio B")));
+    QTest::mouseClick(callsignB, Qt::LeftButton);
 
     m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
     auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));

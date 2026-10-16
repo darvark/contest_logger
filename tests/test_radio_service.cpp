@@ -312,8 +312,16 @@ void RadioServiceTest::connectsAndTunesHamlibDummy()
                 && snapshot.frequencyHz > 0;
         }), 5000);
 
+    controller.setVfoFocus(1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        std::any_of(snapshots.cbegin(), snapshots.cend(), [](const QList<QVariant> &args) {
+            const auto snapshot = qvariant_cast<logger::RadioSnapshot>(args.first());
+            return snapshot.state == logger::ConnectionState::Connected
+                && snapshot.focusVfo == 1;
+        }), 5000);
+
     constexpr qint64 tunedFrequency = 7'025'000;
-    controller.setFrequency(tunedFrequency);
+    controller.setFrequency(tunedFrequency, 1);
     QTRY_VERIFY_WITH_TIMEOUT(
         std::any_of(snapshots.cbegin(), snapshots.cend(), [](const QList<QVariant> &args) {
             return qvariant_cast<logger::RadioSnapshot>(args.first()).frequencyHz
