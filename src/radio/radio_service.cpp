@@ -24,6 +24,19 @@ public:
 
 namespace {
 
+QString serialControlStateName(SerialControlState state)
+{
+    switch (state) {
+    case SerialControlState::Unchanged:
+        return QStringLiteral("UNSET");
+    case SerialControlState::On:
+        return QStringLiteral("ON");
+    case SerialControlState::Off:
+        return QStringLiteral("OFF");
+    }
+    return QStringLiteral("UNSET");
+}
+
 class MockBackend final : public RadioWorker::Backend {
 public:
     bool open(const RadioConfig &config, QString *) override
@@ -186,6 +199,12 @@ public:
                 || !setConfiguration(QStringLiteral("serial_speed"),
                                      QString::number(config.baudRate), error,
                                      hasSerialRateRange)
+                || (config.rtsState != SerialControlState::Unchanged
+                    && !setConfiguration(QStringLiteral("rts_state"),
+                                         serialControlStateName(config.rtsState), error))
+                || (config.dtrState != SerialControlState::Unchanged
+                    && !setConfiguration(QStringLiteral("dtr_state"),
+                                         serialControlStateName(config.dtrState), error))
                 || !setConfiguration(QStringLiteral("timeout"), QString::number(qMax(1, config.timeoutMs)), error)) {
                 close();
                 return false;
@@ -464,9 +483,9 @@ void RadioWorker::connectRadio(const RadioConfig &config)
 
     if (m_pollTimer == nullptr) {
         m_pollTimer = new QTimer(this);
-        m_pollTimer->setInterval(1000);
         connect(m_pollTimer, &QTimer::timeout, this, &RadioWorker::pollRadio);
     }
+    m_pollTimer->setInterval(qBound(100, config.pollIntervalMs, 10000));
     m_pollTimer->start();
 }
 

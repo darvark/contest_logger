@@ -2,20 +2,29 @@ schema_version: 1
 id: iaruhfc
 name: IARU HF Championship
 description: >-
-  Starter profile for report and ITU zone. Enter the station zone in Sent
-  exchange and verify HQ-station multipliers/scoring for the current edition.
+  Rules: https://contests.arrl.org/ContestRules/IARU-HF-Rules.pdf. Non-HQ
+  stations exchange an ITU zone; HQ stations exchange their society
+  abbreviation, while IARU officials exchange AC, R1, R2, or R3. Enter exactly
+  one of the optional sent/received zone or HQ fields. Zone and HQ multipliers
+  are tracked per band. Official QSO points are 1 for the same ITU zone and
+  continent or an HQ/official station, 3 for a different zone on the same
+  continent, and 5 across continents. The current schema cannot compare both
+  stations' zones and continents, so its point total is provisional.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW, SSB]
+cabrillo: {contest: IARU-HF}
 exchange:
   sent:
     - {name: report, label: RST, type: rst, default: "599"}
-    - {name: itu_zone, label: ITU Zone (station), type: integer, min: 1, max: 90}
+    - {name: itu_zone, label: ITU Zone (station), type: integer, required: false, min: 1, max: 90}
+    - {name: hq, label: HQ / official designator (station), type: text, required: false, width: 16}
   received:
     - {name: report, label: RST, type: rst}
-    - {name: itu_zone, label: ITU Zone, type: integer, min: 1, max: 90}
+    - {name: itu_zone, label: ITU Zone, type: integer, required: false, min: 1, max: 90}
+    - {name: hq, label: HQ / official designator, type: text, required: false, width: 16}
 scoring:
   qso_points: 1
   multipliers:
     - {type: exchange, field: itu_zone, per_band: true}
-    - {type: prefix, per_band: true}
+    - {type: exchange, field: hq, per_band: true}
 dupe_key: [callsign, band, mode]

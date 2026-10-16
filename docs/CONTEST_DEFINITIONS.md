@@ -4,6 +4,8 @@ Definicja zawodów to plik YAML opisujący pasma, emisje, wymianę i punktację.
 
 Import własnej definicji: menu plików programu, opcja importu definicji zawodów (pliki `*.yaml`, `*.yml`). Plik jest walidowany; błąd zawiera ścieżkę do niepoprawnego ustawienia (np. `contest.exchange.sent[1].type`).
 
+Nowy log tworzy się oknem **File > New log...** (Ctrl+N): wybór zawodów z listy zainstalowanych definicji (lub przycisk **Import YAML...**), znak stacji, operatorzy, klub, data startu, nazwa logu, kategorie Cabrillo i wymiana nadawana. Pasma i emisje w kategoriach pochodzą z definicji (`bands`, `modes`).
+
 Zasady ogólne:
 
 - Dozwolone są wyłącznie opisane niżej klucze. Nieznany lub zduplikowany klucz powoduje błąd.
@@ -47,8 +49,11 @@ dupe_key: [callsign, band, mode]
 | `exchange` | tak | Wymiana nadawana i odbierana (patrz niżej). |
 | `scoring` | tak | Punktacja i mnożniki. |
 | `dupe_key` | nie | Klucz dubli. Dozwolone: `callsign`, `band`, `mode`. Musi zawierać `callsign`. |
+| `cabrillo` | nie | Mapa z kluczem `contest`: oficjalny identyfikator zawodów w nagłówku Cabrillo (np. `cabrillo: {contest: CQ-WPX-CW}`). Litery, cyfry, `_`, `-`; zapisywany wielkimi literami. Bez tego klucza eksport używa `id` wielkimi literami. |
 
 Emisje w Cabrillo: SSB/USB/LSB są eksportowane jako `PH`, RTTY jako `RY`, DATA/FT8/FT4/PSK jako `DG`; CW, FM, AM bez zmian. Inne emisje blokują eksport Cabrillo.
+
+Nagłówek Cabrillo 3.0 jest uzupełniany automatycznie: `CONTEST` z `cabrillo.contest`, `CALLSIGN`, `LOCATION`, `CLUB`, `OPERATORS`, `SOAPBOX` i `CATEGORY-*` z właściwości logu (okno New log / Log properties), a `NAME`, `EMAIL`, `ADDRESS*` i `GRID-LOCATOR` z ustawień stacji (Operator and station). `CLAIMED-SCORE` jest liczony z punktacji definicji, a `CREATED-BY` zawiera wersję programu. Brakujące kategorie są wyznaczane z QSO: pasmo (jedno pasmo albo `ALL`), emisja (jedna emisja albo `MIXED`) oraz moc z ustawień stacji (`HIGH`/`LOW`/`QRP`). Dla `SINGLE-OP` domyślnie są to `NON-ASSISTED`, `ONE` i `OPERATORS` równe znakowi stacji. QSO są eksportowane chronologicznie, a QSO bez częstotliwości z radia dostają dolną krawędź pasma (np. `1800` dla 160m).
 
 ## Wymiana (`exchange`)
 
@@ -65,6 +70,7 @@ Sekcja zawiera dwie niepuste listy pól (maks. 32 każda):
 | `type` | wszystkie | Wymagane. Typ pola (patrz niżej). |
 | `label` | wszystkie | Etykieta w interfejsie. Domyślnie równa `name`. |
 | `required` | wszystkie | `true` (domyślnie) lub `false`. Pole opcjonalne puste nie trafia do logu. |
+| `required_when` | tylko `received` | Warunek, przy którym pole jest wymagane; gdy nie pasuje, pole jest opcjonalne. |
 | `default` | tylko `sent`, nie generowane | Wartość domyślna; musi spełniać regułę pola. |
 | `generated` | tylko `sent` typu `serial` | Numer jest nadawany automatycznie. |
 | `width` | wszystkie | Maksymalna liczba znaków (0-32). Dla `serial` uzupełnia zerami z przodu (`001`). |
@@ -94,26 +100,80 @@ Sekcja zawiera dwie niepuste listy pól (maks. 32 każda):
 
 - Jeśli wymiana nadawana jest obowiązkowa w danych zawodach (np. DOK, strefa, moc), nie ustawiaj `required: false`, bo puste pole nie trafi do tabeli QSO ani do Cabrillo.
 - Kolejność pól w `sent` i `received` to kolejność w tabeli QSO i w Cabrillo.
+- `required_when` określa warunek wymagalności, nie ukrywa pola w formularzu.
+  Dopuszczalne klucze warunku opisano w sekcji punktacji.
 
 ## Punktacja (`scoring`)
 
 | Klucz | Domyślnie | Opis |
 |---|---|---|
 | `qso_points` | `1` | Punkty za QSO (>= 0). |
+| `qso_point_rules` | brak | Reguły warunkowe punktów; pierwsza pasująca reguła wygrywa. Bez dopasowania używane jest `qso_points`. |
 | `serial_start` | `1` | Pierwszy numer generowanego numeru seryjnego (>= 1). |
 | `multipliers` | brak | Lista mnożników. |
 
 Wynik końcowy = suma punktów x liczba mnożników (bez mnożników: suma punktów).
 
+### Warunki wymiany i punktacji
+
+Warunki zapisuje się jako mapę `klucz: wartość`; wszystkie podane warunki muszą
+pasować (AND). Klucze są porównywane bez względu na wielkość liter, `band`
+normalizowany do małych liter, a wartości wymiany i metadane CTY do wielkich
+liter.
+
+| Klucz | Znaczenie |
+|---|---|
+| `band`, `mode` | Pasmo lub emisja QSO. |
+| `continent` | Kontynent rozpoznany przez `wl_cty.dat`. |
+| `dxcc`, `country` | Nazwa encji DXCC z `wl_cty.dat` (`country` jest aliasem `dxcc`, nie niezależnym katalogiem państw). |
+| `cq_zone`, `itu_zone` | Strefa rozpoznana przez `wl_cty.dat`. |
+| `exchange.<name>`, `received.<name>` | Wartość odebranej wymiany z pola `<name>`. |
+
+`required_when` dla pola odebranej wymiany używa tego samego formatu. Gdy
+warunek pasuje, pole jest wymagane; gdy nie pasuje, pole jest opcjonalne.
+Nieznane klucze i odwołania do nieistniejących pól są odrzucane przy imporcie
+definicji.
+
+```yaml
+exchange:
+  sent:
+    - {name: report, type: rst, default: "599"}
+  received:
+    - {name: report, type: rst}
+    - name: state
+      label: State
+      type: text
+      required: false
+      required_when:
+        continent: NA
+scoring:
+  qso_points: 1
+  qso_point_rules:
+    - points: 5
+      when: {continent: NA, band: 20m}
+    - points: 3
+      when: {country: United States}
+```
+
+W przykładzie pole `state` jest wymagane dla korespondentów z Ameryki
+Północnej. QSO z NA na 20 m dostaje 5 punktów; w przeciwnym razie dopasowanie
+encją `United States` daje 3; QSO bez pasującej reguły dostaje wartość bazową.
+Reguły są oceniane od góry, dlatego bardziej szczegółowe warunki umieszczaj
+przed ogólnymi. Warunki geograficzne wymagają załadowanego `wl_cty.dat`;
+gdy metadane CTY są niedostępne, reguła nie dopasowuje się.
+
 ### Mnożniki
 
 | Opcja | Opis |
 |---|---|
-| `type` | `exchange` lub `prefix`. |
+| `type` | `exchange`, `prefix` lub `dxcc`. |
 | `field` | Tylko dla `exchange`: nazwa pola z `received`, którego wartość jest mnożnikiem (np. strefa, DOK). Wymagane. |
 | `per_band` | `true` – mnożnik liczony osobno na każdym paśmie; domyślnie `false`. |
 
 Typ `prefix` używa prefiksu znaku (reguły WPX, np. `SP9`). Nie można zdefiniować dwóch identycznych mnożników.
+Typ `dxcc` używa nazwy encji rozpoznanej z `wl_cty.dat`; wymaga danych CTY
+dostarczonych przez resolver aplikacji. Przykład SPDX używa go do mnożnika
+DXCC/pasmo w profilu stacji polskiej.
 
 ## Dublety (`dupe_key`)
 

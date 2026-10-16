@@ -33,7 +33,7 @@ public:
         m_pending = false;
     }
 
-    bool sendText(const QString &text, QString *error) override
+    bool sendText(const QString &text, int, QString *error) override
     {
         if (!m_connected || text.trimmed().isEmpty()) {
             if (error != nullptr) {
@@ -131,8 +131,15 @@ public:
         m_socket.reset();
     }
 
-    bool sendText(const QString &text, QString *error) override
+    bool sendText(const QString &text, int transmitVfo, QString *error) override
     {
+        if (transmitVfo != 0) {
+            if (error != nullptr) {
+                *error = QStringLiteral(
+                    "cwdaemon cannot select a transmit VFO; VFO B transmission is disabled.");
+            }
+            return false;
+        }
         if (!m_connected || text.trimmed().isEmpty()) {
             if (error != nullptr) {
                 *error = QStringLiteral("cwdaemon is not configured or message is empty.");
@@ -278,7 +285,17 @@ public:
             if (!setConf(QStringLiteral("rig_pathname"), config.radio.devicePath,
                          error)
                 || !setConf(QStringLiteral("serial_speed"),
-                            QString::number(config.radio.baudRate), error)) {
+                            QString::number(config.radio.baudRate), error)
+                || (config.radio.rtsState != SerialControlState::Unchanged
+                    && !setConf(QStringLiteral("rts_state"),
+                                config.radio.rtsState == SerialControlState::On
+                                    ? QStringLiteral("ON") : QStringLiteral("OFF"),
+                                error))
+                || (config.radio.dtrState != SerialControlState::Unchanged
+                    && !setConf(QStringLiteral("dtr_state"),
+                                config.radio.dtrState == SerialControlState::On
+                                    ? QStringLiteral("ON") : QStringLiteral("OFF"),
+                                error))) {
                 disconnect();
                 return false;
             }
@@ -301,7 +318,7 @@ public:
             return;
         }
         if (m_open) {
-            rig_stop_morse(m_rig, RIG_VFO_CURR);
+            rig_stop_morse(m_rig, m_transmitVfo);
             rig_close(m_rig);
             m_open = false;
         }
@@ -309,7 +326,7 @@ public:
         m_rig = nullptr;
     }
 
-    bool sendText(const QString &text, QString *error) override
+    bool sendText(const QString &text, int transmitVfo, QString *error) override
     {
         if (!m_open || text.trimmed().isEmpty()) {
             if (error != nullptr) {
@@ -318,7 +335,14 @@ public:
             return false;
         }
         const QByteArray bytes = text.toUtf8();
-        const int result = rig_send_morse(m_rig, RIG_VFO_CURR, bytes.constData());
+        if (transmitVfo < 0 || transmitVfo > 1) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Hamlib transmit VFO must be A or B.");
+            }
+            return false;
+        }
+        m_transmitVfo = transmitVfo == 0 ? RIG_VFO_A : RIG_VFO_B;
+        const int result = rig_send_morse(m_rig, m_transmitVfo, bytes.constData());
         return check(result, error);
     }
 
@@ -330,7 +354,7 @@ public:
             }
             return false;
         }
-        return check(rig_stop_morse(m_rig, RIG_VFO_CURR), error);
+        return check(rig_stop_morse(m_rig, m_transmitVfo), error);
     }
 
     bool setWpm(int wpm, QString *error) override
@@ -349,7 +373,7 @@ public:
         }
         value_t value{};
         value.i = wpm;
-        return check(rig_set_level(m_rig, RIG_VFO_CURR, RIG_LEVEL_KEYSPD, value),
+        return check(rig_set_level(m_rig, m_transmitVfo, RIG_LEVEL_KEYSPD, value),
                      error);
     }
 
@@ -378,6 +402,7 @@ private:
 
     RIG *m_rig = nullptr;
     bool m_open = false;
+    vfo_t m_transmitVfo = RIG_VFO_A;
 };
 #endif
 
@@ -489,7 +514,7 @@ void CwKeyerWorker::disconnectKeyer()
     publishStatus(tr("CW keyer disconnected."));
 }
 
-void CwKeyerWorker::enqueueMessage(const QString &text)
+void CwKeyerWorker::enqueueMessage(const QString &text, int transmitVfo)
 {
     const QString message = text.trimmed();
     if (message.isEmpty()) {
@@ -500,11 +525,15 @@ void CwKeyerWorker::enqueueMessage(const QString &text)
         publishStatus(tr("Connect a CW keyer before sending."));
         return;
     }
+    if (transmitVfo < 0 || transmitVfo > 1) {
+        publishStatus(tr("CW transmit VFO must be A or B."));
+        return;
+    }
     if (m_queue.size() >= 100) {
         publishStatus(tr("CW queue is full (100 messages maximum)."));
         return;
     }
-    m_queue.append(message);
+    m_queue.append({message, transmitVfo});
     if (!m_transmitting && !m_queueTimer->isActive()) {
         sendNextMessage();
     } else {
@@ -561,9 +590,10 @@ void CwKeyerWorker::sendNextMessage()
         publishStatus();
         return;
     }
-    const QString message = m_queue.takeFirst();
+    const QueuedMessage queued = m_queue.takeFirst();
+    const QString &message = queued.text;
     QString error;
-    if (!m_keyer->sendText(message, &error)) {
+    if (!m_keyer->sendText(message, queued.transmitVfo, &error)) {
         m_transmitting = false;
         m_lastError = error;
         m_queue.clear();
@@ -571,6 +601,7 @@ void CwKeyerWorker::sendNextMessage()
         return;
     }
     m_transmitting = true;
+    m_transmittingVfo = queued.transmitVfo;
     m_timedOut = false;
     publishStatus(tr("Sending CW."));
     const int estimate = estimatedDurationMs(message);
@@ -642,6 +673,7 @@ void CwKeyerWorker::publishStatus(const QString &message)
     status.queuedMessages = m_queue.size();
     status.wpm = m_config.wpm;
     status.transmitting = m_transmitting;
+    status.transmitVfo = m_transmittingVfo;
     status.completionTimedOut = m_timedOut;
     if (m_keyer != nullptr) {
         status.completionConfirmed = m_keyer->supportsCompletion();
@@ -702,9 +734,9 @@ void CwKeyerController::disconnectKeyer()
     emit disconnectRequested();
 }
 
-void CwKeyerController::enqueueMessage(const QString &text)
+void CwKeyerController::enqueueMessage(const QString &text, int transmitVfo)
 {
-    emit enqueueRequested(text);
+    emit enqueueRequested(text, transmitVfo);
 }
 
 void CwKeyerController::abortTransmission()

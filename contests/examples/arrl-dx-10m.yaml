@@ -1,18 +1,28 @@
 schema_version: 1
 id: arrl-dx-10m
 name: ARRL 10-Meter Contest
-description: Starter profile; configure the applicable state/province or power exchange.
+description: >-
+  2026 rules: https://www.arrl.org/files/file/Contest%20Rules%20PDFs/2026/10%20Meter%20Rules%20v%202_0%20-%202026.pdf.
+  Exchange depends on station location: W/VE and Mexican stations send a
+  state/province, DX stations a serial, and maritime mobile stations an ITU
+  region. CW QSOs score 4 points and SSB QSOs 2. The free-text exchange handles
+  the alternatives, but the current scorer cannot split multipliers by mode or
+  classify state/province, DXCC, and maritime-region multipliers.
 bands: [10m]
 modes: [CW, SSB]
+cabrillo: {contest: ARRL-10}
 exchange:
   sent:
     - {name: report, label: RST, type: rst, default: "599"}
-    - {name: exchange, label: State/province or power (station), type: text}
+    - {name: exchange, label: "State/province, serial, or ITU region (station)", type: text}
   received:
     - {name: report, label: RST, type: rst}
-    - {name: exchange, label: State/province or power, type: text}
+    - {name: exchange, label: "State/province, serial, or ITU region", type: text}
 scoring:
   qso_points: 1
+  qso_point_rules:
+    - {points: 4, when: {mode: CW}}
+    - {points: 2, when: {mode: SSB}}
   multipliers:
     - {type: exchange, field: exchange, per_band: false}
 dupe_key: [callsign, band, mode]

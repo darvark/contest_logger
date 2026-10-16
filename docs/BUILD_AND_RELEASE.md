@@ -30,28 +30,26 @@ Hamlib at build time; the `rigctld` test is skipped when the utility is not on
 
 ## Windows build and package
 
-Use Visual Studio 2022 C++ tools, Qt 6 (MSVC 2022 64-bit), CMake, and vcpkg.
-Install yaml-cpp and configure/build/test/package from PowerShell:
+Use Visual Studio 2022 x64 C++ tools, Qt 6 (MSVC 2022 64-bit), CMake, and
+vcpkg. Hamlib's vcpkg port does not support the MSVC `x64-windows` triplet, so
+obtain a Windows Hamlib package containing its headers, DLL, and `.def` file.
+The script creates an MSVC import library from that definition file, installs
+`yaml-cpp` with vcpkg, requires Hamlib at configure time, builds/tests, deploys
+Qt and runtime DLL dependencies, checks the Hamlib DLL, and creates the ZIP:
 
 ```powershell
-vcpkg install yaml-cpp:x64-windows-static
-cmake -S . -B build `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DVCPKG_TARGET_TRIPLET=x64-windows-static `
-  -DLOGGER_ENABLE_HAMLIB=OFF `
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-cmake --install build --config Release --prefix package
-windeployqt --release --compiler-runtime package\bin\contest_logger.exe
-Compress-Archive -Path package\* -DestinationPath ContestLogger-windows-x64.zip
+.\tools\package-windows.ps1 `
+  -VcpkgRoot "$env:VCPKG_ROOT" `
+  -HamlibRoot "C:\Hamlib" `
+  -QtRoot "C:\Qt\6.8.0\msvc2022_64"
 ```
 
-The GitHub Actions workflow runs the same Linux/Windows build and test matrix,
-publishes test results, and stores installable archives as workflow artifacts.
-The Windows CI profile omits Hamlib because a supported prebuilt Hamlib runtime
-is not part of the project dependency setup; hardware CAT on Windows still
-requires a matching Hamlib build and deployment of its runtime DLLs.
+For a build without Hamlib, set `LOGGER_ENABLE_HAMLIB=OFF` and leave
+`LOGGER_REQUIRE_HAMLIB=OFF`. Release packaging must use the script above:
+`LOGGER_REQUIRE_HAMLIB=ON` prevents a silently degraded build, and the installed
+package is checked for the Hamlib runtime DLL. Run the package on the actual
+target Windows machine before release; successful compilation/package creation
+does not verify COM-port access or radio firmware compatibility.
 
 ## Hamlib CAT configuration
 
@@ -86,17 +84,20 @@ the duplicate key. Field types are `rst`, `serial`, `integer`, `text`, `grid`,
 
 The loader rejects malformed YAML, unknown keys, duplicate fields, invalid
 regular expressions, unsupported field types, and values outside configured
-limits. Start with one of the bundled definitions and run
-`ctest --test-dir build --output-on-failure` after changing contest rules.
-Prefix/DXCC resolution is not inferred automatically; callers must provide
-resolved multiplier values.
+limits. Conditional received fields and ordered `qso_point_rules` can use band,
+mode, received exchange values, or CTY metadata. Geographic conditions depend
+on the application supplying resolved values; prefix/DXCC multiplier values
+are likewise not inferred automatically by the contest engine. Start with one
+of the bundled definitions and run `ctest --test-dir build --output-on-failure`
+after changing contest rules.
 
 Bundled starter profiles cover CQ WW CW/SSB, CQ WPX CW/SSB, IARU HF, SP DX,
 WAG, ARRL DX CW/SSB/10m, EU DX, and EU HF Championship. They are not certified
-implementations of every sponsor rule: conditional exchanges, country scoring,
-and annual rule changes require operator review. Enter station-specific sent
-exchange values in the QSO form; they persist per contest and entry context.
-Standard RST values follow the selected mode (voice 59, CW/digital 599).
+implementations of every sponsor rule; verify profile conditions, point
+values, and annual rule changes against the current sponsor rules. Enter
+station-specific sent exchange values in the QSO form; they persist per contest
+and entry context. Standard RST values follow the selected mode (voice 59,
+CW/digital 599).
 
 ## Main window layout
 
@@ -174,4 +175,21 @@ radio firmware, Windows sleep/resume behavior, or external PTT/audio switching.
 Before field use, test each supported platform with the target transceiver and
 USB/serial adapter, both direct CAT and `rigctld`, cluster loss/reconnect, and
 system suspend/resume. Record radio model, firmware, Hamlib version, transport,
-and results for any hardware-specific issue.
+and results for any hardware-specific issue. Software-side SO2V routing binds
+each queued CW message to its selected transmit VFO; Hamlib receives explicit
+VFO A/B, while cwdaemon refuses VFO B because its protocol cannot select the
+transmit VFO. This does not replace an RF-safety test on the target radio.
+
+Use this record for every supported radio/platform combination; do not mark a
+combination supported based only on Hamlib Dummy or `rigctld`:
+
+| Platform / version | Radio / firmware | CAT transport / Hamlib | CAT tune & mode | SO2V focus-to-TX A/B | CW provider / VFO | Disconnect / reconnect | Suspend / resume | Result / evidence |
+|---|---|---|---|---|---|---|---|---|
+| Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+
+For SO2V, verify independently that switching RX focus changes the radio's TX
+VFO, that a queued message remains on the VFO selected when it was queued, and
+that abort/disconnect never redirects transmission to the other VFO. Record
+actual RF/PTT observation and test setup. Mark failures and unsupported
+combinations explicitly rather than inferring compatibility from another
+model using the same Hamlib backend.

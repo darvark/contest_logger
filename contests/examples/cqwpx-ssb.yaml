@@ -1,9 +1,16 @@
 schema_version: 1
 id: cqwpx-ssb
 name: CQ WPX Contest — SSB
-description: Starter SSB profile; prefix resolution and sponsor-specific scoring need verification.
+description: >-
+  2026 rules: https://cqwpx.com/rules/. Exchange is RS plus serial; each
+  distinct WPX prefix is a multiplier once across the entire contest, not once
+  per band. QSO points are 3/6 across continents, 1/2 on the same continent in
+  different countries, and 1 within the same country; values are for 10/15/20m
+  then 160/80/40m, with a North America exception of 2/4. The current schema
+  cannot compare both stations' locations, so its base point is provisional.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [SSB]
+cabrillo: {contest: CQ-WPX-SSB}
 exchange:
   sent:
     - {name: report, label: RS, type: rst, default: "59"}
@@ -14,5 +21,5 @@ exchange:
 scoring:
   qso_points: 1
   multipliers:
-    - {type: prefix, per_band: true}
+    - {type: prefix, per_band: false}
 dupe_key: [callsign, band, mode]

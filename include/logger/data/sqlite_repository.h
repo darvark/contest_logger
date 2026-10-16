@@ -25,6 +25,11 @@ public:
     // Always inserts a new log; the code gets a numeric suffix when the id is taken.
     qint64 createContestLog(const ContestDefinition &definition, const QString &yaml,
                             const QString &name, QString *error = nullptr);
+    // Uses name, stationCallsign, startsAtUtc and properties from log.
+    qint64 createContestLog(const ContestDefinition &definition, const QString &yaml,
+                            const Contest &log, QString *error = nullptr);
+    // Updates name, stationCallsign, startsAtUtc and properties of an existing log.
+    bool updateContestLog(const Contest &log, QString *error = nullptr);
     bool saveQso(Qso &qso, QString *error = nullptr);
     bool updateQso(const Qso &qso, QString *error = nullptr);
     std::optional<Qso> qsoById(qint64 id, QString *error = nullptr) const;

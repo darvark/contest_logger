@@ -2,10 +2,15 @@ schema_version: 1
 id: arrl-dx-ssb
 name: ARRL International DX Contest — SSB
 description: >-
-  Starter free-text profile. State/province versus power exchange depends on
-  station location; configure the station exchange and verify current rules.
+  Rules: https://contests.arrl.org/ContestRules/DX-Rules.pdf. Every valid QSO
+  scores 3 points. W/VE stations send state/province and use DXCC entities as
+  per-band multipliers; DX stations send power and use states/provinces as
+  per-band multipliers. The free-text exchange fits either exchange, but this
+  schema can score exchange multipliers only, so the profile is accurate only
+  for DX entrants; W/VE DXCC multipliers are not represented.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [SSB]
+cabrillo: {contest: ARRL-DX-SSB}
 exchange:
   sent:
     - {name: report, label: RS, type: rst, default: "59"}
@@ -14,7 +19,7 @@ exchange:
     - {name: report, label: RS, type: rst}
     - {name: exchange, label: State/province or power, type: text}
 scoring:
-  qso_points: 1
+  qso_points: 3
   multipliers:
     - {type: exchange, field: exchange, per_band: true}
 dupe_key: [callsign, band, mode]

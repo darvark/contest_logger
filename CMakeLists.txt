@@ -22,6 +22,13 @@ if(LOGGER_ENABLE_HAMLIB)
     find_path(HAMLIB_INCLUDE_DIR hamlib/rig.h)
     find_library(HAMLIB_LIBRARY NAMES hamlib)
 endif()
+option(LOGGER_REQUIRE_HAMLIB
+    "Fail configuration unless Hamlib is available" OFF)
+if(LOGGER_REQUIRE_HAMLIB AND NOT (HAMLIB_INCLUDE_DIR AND HAMLIB_LIBRARY))
+    message(FATAL_ERROR
+        "LOGGER_REQUIRE_HAMLIB is ON, but Hamlib headers/library were not found. "
+        "Set HAMLIB_INCLUDE_DIR and HAMLIB_LIBRARY or install Hamlib with vcpkg.")
+endif()
 
 add_library(logger_core
     include/logger/cluster/dx_cluster_service.h
@@ -33,6 +40,7 @@ add_library(logger_core
     include/logger/radio/radio_service.h
     include/logger/radio/band_plan.h
     include/logger/ui/operator_dialog.h
+    include/logger/ui/new_log_dialog.h
     src/contest/contest_definition_loader.cpp
     src/contest/contest_engine.cpp
     src/cw/cw_keyer_service.cpp
@@ -43,6 +51,7 @@ add_library(logger_core
     src/radio/radio_service.cpp
     src/radio/band_plan.cpp
     src/ui/operator_dialog.cpp
+    src/ui/new_log_dialog.cpp
 )
 target_include_directories(logger_core PUBLIC include)
 target_link_libraries(logger_core
@@ -65,20 +74,63 @@ add_library(logger_ui STATIC
     resources/contests.qrc
 )
 target_link_libraries(logger_ui PUBLIC logger_core)
+target_compile_definitions(logger_ui PRIVATE
+    CONTEST_LOGGER_VERSION="${PROJECT_VERSION}")
 
 add_executable(contest_logger
     src/main.cpp
 )
 target_link_libraries(contest_logger PRIVATE logger_ui)
 
-install(TARGETS contest_logger
-    RUNTIME DESTINATION bin
-)
+option(CONTEST_LOGGER_BUILD_DOC_TOOLS
+    "Build the tool that regenerates documentation screenshots" OFF)
+if(CONTEST_LOGGER_BUILD_DOC_TOOLS)
+    add_executable(doc_screenshots tools/doc_screenshots.cpp)
+    target_link_libraries(doc_screenshots PRIVATE logger_ui)
+endif()
+
+if(WIN32)
+    set(_contest_logger_runtime_dirs)
+    if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+        list(APPEND _contest_logger_runtime_dirs
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+    endif()
+    if(HAMLIB_RUNTIME_DIR)
+        list(APPEND _contest_logger_runtime_dirs "${HAMLIB_RUNTIME_DIR}")
+    endif()
+    install(TARGETS contest_logger
+        RUNTIME DESTINATION bin
+        RUNTIME_DEPENDENCY_SET contest_logger_runtime
+    )
+    if(_contest_logger_runtime_dirs)
+        install(RUNTIME_DEPENDENCY_SET contest_logger_runtime
+            RUNTIME DESTINATION bin
+            DIRECTORIES ${_contest_logger_runtime_dirs}
+            PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-"
+            POST_EXCLUDE_REGEXES
+                ".*[/\\\\]Windows[/\\\\]System32[/\\\\].*"
+        )
+    else()
+        install(RUNTIME_DEPENDENCY_SET contest_logger_runtime
+            RUNTIME DESTINATION bin
+            PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-"
+            POST_EXCLUDE_REGEXES
+                ".*[/\\\\]Windows[/\\\\]System32[/\\\\].*"
+        )
+    endif()
+else()
+    install(TARGETS contest_logger
+        RUNTIME DESTINATION bin
+    )
+endif()
 install(DIRECTORY contests/examples/
     DESTINATION share/contest-logger/contests
 )
 install(FILES README.md TODO.md
     DESTINATION share/doc/contest-logger
+)
+install(DIRECTORY docs/
+    DESTINATION share/doc/contest-logger/docs
 )
 
 set(CPACK_PACKAGE_NAME "ContestLogger")

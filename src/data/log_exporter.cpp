@@ -2,8 +2,12 @@
 
 #include "logger/contest/contest_engine.h"
 
+#include <QHash>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
+
+#include <algorithm>
 
 namespace logger {
 namespace {
@@ -173,17 +177,200 @@ QString exportContestCode(const Contest &contest, const ContestDefinition *defin
         .trimmed().toUpper();
 }
 
-QByteArray cabrillo(const Contest &contest, const ContestDefinition *definition,
-                    const QVector<Qso> &qsos, const Station &station)
+QString cabrilloContestName(const Contest &contest, const ContestDefinition *definition)
 {
-    QStringList lines{
-        QStringLiteral("START-OF-LOG: 3.0"),
-        QStringLiteral("CALLSIGN: %1").arg(station.callsign.trimmed().toUpper()),
-        QStringLiteral("CONTEST: %1").arg(exportContestCode(contest, definition))
-    };
-    if (!station.operatorName.trimmed().isEmpty()) {
-        lines.append(QStringLiteral("OPERATORS: %1").arg(station.operatorName.trimmed()));
+    if (definition != nullptr && !definition->cabrilloContest.trimmed().isEmpty()) {
+        return definition->cabrilloContest.trimmed().toUpper();
     }
+    return exportContestCode(contest, definition);
+}
+
+QString cabrilloBand(const QString &band)
+{
+    static const QHash<QString, QString> microwave{
+        {QStringLiteral("1.25M"), QStringLiteral("222")},
+        {QStringLiteral("70CM"), QStringLiteral("432")},
+        {QStringLiteral("33CM"), QStringLiteral("902")},
+        {QStringLiteral("23CM"), QStringLiteral("1.2G")},
+        {QStringLiteral("13CM"), QStringLiteral("2.3G")},
+        {QStringLiteral("9CM"), QStringLiteral("3.4G")},
+        {QStringLiteral("6CM"), QStringLiteral("5.7G")},
+        {QStringLiteral("3CM"), QStringLiteral("10G")}};
+    const QString normalized = band.trimmed().toUpper();
+    return microwave.value(normalized, normalized);
+}
+
+QString bandFrequencyKhz(const QString &band)
+{
+    // Lower band edges used when no rig frequency was recorded with the QSO.
+    static const QHash<QString, QString> edges{
+        {QStringLiteral("160m"), QStringLiteral("1800")},
+        {QStringLiteral("80m"), QStringLiteral("3500")},
+        {QStringLiteral("60m"), QStringLiteral("5351")},
+        {QStringLiteral("40m"), QStringLiteral("7000")},
+        {QStringLiteral("30m"), QStringLiteral("10100")},
+        {QStringLiteral("20m"), QStringLiteral("14000")},
+        {QStringLiteral("17m"), QStringLiteral("18068")},
+        {QStringLiteral("15m"), QStringLiteral("21000")},
+        {QStringLiteral("12m"), QStringLiteral("24890")},
+        {QStringLiteral("10m"), QStringLiteral("28000")},
+        {QStringLiteral("6m"), QStringLiteral("50")},
+        {QStringLiteral("4m"), QStringLiteral("70")},
+        {QStringLiteral("2m"), QStringLiteral("144")},
+        {QStringLiteral("1.25m"), QStringLiteral("222")},
+        {QStringLiteral("70cm"), QStringLiteral("432")},
+        {QStringLiteral("33cm"), QStringLiteral("902")},
+        {QStringLiteral("23cm"), QStringLiteral("1.2G")}};
+    const QString normalized = band.trimmed().toLower();
+    return edges.value(normalized,
+                       QString(normalized).remove(QLatin1Char('m')));
+}
+
+QString categoryModeFor(const QString &mode)
+{
+    const QString cabrillo = cabrilloMode(mode);
+    if (cabrillo == QStringLiteral("PH") || cabrillo == QStringLiteral("AM")) {
+        return QStringLiteral("SSB");
+    }
+    if (cabrillo == QStringLiteral("RY")) {
+        return QStringLiteral("RTTY");
+    }
+    if (cabrillo == QStringLiteral("DG")) {
+        return QStringLiteral("DIGI");
+    }
+    return cabrillo;
+}
+
+QStringList textLines(const QString &text)
+{
+    QStringList lines;
+    for (const QString &line : text.split(QLatin1Char('\n'))) {
+        if (!line.trimmed().isEmpty()) {
+            lines.append(line.trimmed());
+        }
+    }
+    return lines;
+}
+
+QStringList cabrilloHeader(const Contest &contest, const ContestDefinition *definition,
+                           const QVector<Qso> &qsos, const Station &station,
+                           const LogExportOptions &options)
+{
+    const QMap<QString, QString> &properties = contest.properties;
+    const auto property = [&properties](const QString &tag) {
+        return properties.value(tag).trimmed();
+    };
+    const QString callsign = station.callsign.trimmed().toUpper();
+    QStringList operators = property(QStringLiteral("OPERATORS")).toUpper()
+        .split(QRegularExpression(QStringLiteral("[\\s,]+")), Qt::SkipEmptyParts);
+    operators.removeDuplicates();
+
+    QString categoryOperator = property(QStringLiteral("CATEGORY-OPERATOR")).toUpper();
+    if (categoryOperator.isEmpty()) {
+        categoryOperator = operators.size() > 1 ? QStringLiteral("MULTI-OP")
+                                                : QStringLiteral("SINGLE-OP");
+    }
+    if (operators.isEmpty() && categoryOperator == QStringLiteral("SINGLE-OP")) {
+        operators.append(callsign);
+    }
+    QString categoryBand = cabrilloBand(property(QStringLiteral("CATEGORY-BAND")));
+    if (categoryBand.isEmpty()) {
+        QSet<QString> bands;
+        for (const Qso &qso : qsos) {
+            bands.insert(cabrilloBand(qso.band));
+        }
+        categoryBand = bands.size() == 1 ? *bands.cbegin() : QStringLiteral("ALL");
+    }
+    QString categoryMode = property(QStringLiteral("CATEGORY-MODE")).toUpper();
+    if (categoryMode.isEmpty()) {
+        QSet<QString> modes;
+        for (const Qso &qso : qsos) {
+            modes.insert(categoryModeFor(qso.mode));
+        }
+        categoryMode = modes.size() == 1 ? *modes.cbegin() : QStringLiteral("MIXED");
+    }
+    QString categoryPower = property(QStringLiteral("CATEGORY-POWER")).toUpper();
+    if (categoryPower.isEmpty()) {
+        const QString configured = station.powerClass.trimmed().toUpper();
+        if (configured == QStringLiteral("HIGH") || configured == QStringLiteral("LOW")
+            || configured == QStringLiteral("QRP")) {
+            categoryPower = configured;
+        }
+    }
+    QString categoryAssisted = property(QStringLiteral("CATEGORY-ASSISTED")).toUpper();
+    if (categoryAssisted.isEmpty() && categoryOperator != QStringLiteral("CHECKLOG")) {
+        categoryAssisted = QStringLiteral("NON-ASSISTED");
+    }
+    QString categoryTransmitter =
+        property(QStringLiteral("CATEGORY-TRANSMITTER")).toUpper();
+    if (categoryTransmitter.isEmpty() && categoryOperator == QStringLiteral("SINGLE-OP")) {
+        categoryTransmitter = QStringLiteral("ONE");
+    }
+
+    qint64 claimedScore = 0;
+    if (options.claimedScore.has_value()) {
+        claimedScore = *options.claimedScore;
+    } else if (definition != nullptr) {
+        claimedScore = ContestEngine().score(*definition, qsos).finalScore;
+    } else {
+        for (const Qso &qso : qsos) {
+            claimedScore += qso.points;
+        }
+    }
+
+    QStringList lines{QStringLiteral("START-OF-LOG: 3.0")};
+    const auto add = [&lines](const QString &tag, const QString &value) {
+        if (!value.trimmed().isEmpty()) {
+            lines.append(QStringLiteral("%1: %2").arg(tag, value.trimmed()));
+        }
+    };
+    add(QStringLiteral("CREATED-BY"), options.createdBy.trimmed().isEmpty()
+                                          ? QStringLiteral("Contest Logger")
+                                          : options.createdBy);
+    add(QStringLiteral("CONTEST"), cabrilloContestName(contest, definition));
+    add(QStringLiteral("CALLSIGN"), callsign);
+    add(QStringLiteral("LOCATION"), property(QStringLiteral("LOCATION")).toUpper());
+    add(QStringLiteral("CATEGORY-OPERATOR"), categoryOperator);
+    add(QStringLiteral("CATEGORY-ASSISTED"), categoryAssisted);
+    add(QStringLiteral("CATEGORY-BAND"), categoryBand);
+    add(QStringLiteral("CATEGORY-MODE"), categoryMode);
+    add(QStringLiteral("CATEGORY-POWER"), categoryPower);
+    add(QStringLiteral("CATEGORY-STATION"),
+        property(QStringLiteral("CATEGORY-STATION")).toUpper());
+    add(QStringLiteral("CATEGORY-TRANSMITTER"), categoryTransmitter);
+    add(QStringLiteral("CATEGORY-TIME"), property(QStringLiteral("CATEGORY-TIME")).toUpper());
+    add(QStringLiteral("CATEGORY-OVERLAY"),
+        property(QStringLiteral("CATEGORY-OVERLAY")).toUpper());
+    add(QStringLiteral("GRID-LOCATOR"), station.grid.trimmed().toUpper());
+    add(QStringLiteral("CLAIMED-SCORE"), QString::number(claimedScore));
+    add(QStringLiteral("CLUB"), property(QStringLiteral("CLUB")));
+    add(QStringLiteral("NAME"), station.operatorName);
+    add(QStringLiteral("EMAIL"), station.email);
+    for (const QString &line : textLines(station.address).mid(0, 6)) {
+        add(QStringLiteral("ADDRESS"), line);
+    }
+    add(QStringLiteral("ADDRESS-CITY"), station.city);
+    add(QStringLiteral("ADDRESS-STATE-PROVINCE"), station.stateProvince);
+    add(QStringLiteral("ADDRESS-POSTALCODE"), station.postalCode);
+    add(QStringLiteral("ADDRESS-COUNTRY"), station.country);
+    add(QStringLiteral("OPERATORS"), operators.join(QLatin1Char(' ')));
+    for (const QString &line : textLines(property(QStringLiteral("SOAPBOX")))) {
+        add(QStringLiteral("SOAPBOX"), line);
+    }
+    return lines;
+}
+
+QByteArray cabrillo(const Contest &contest, const ContestDefinition *definition,
+                    QVector<Qso> qsos, const Station &station,
+                    const LogExportOptions &options)
+{
+    std::stable_sort(qsos.begin(), qsos.end(), [](const Qso &left, const Qso &right) {
+        if (left.timestampUtc != right.timestampUtc) {
+            return left.timestampUtc < right.timestampUtc;
+        }
+        return left.id < right.id;
+    });
+    QStringList lines = cabrilloHeader(contest, definition, qsos, station, options);
     for (const Qso &qso : qsos) {
         const QVector<ExchangeFieldDefinition> *sentOrder =
             definition == nullptr ? nullptr : &definition->sentExchange;
@@ -197,7 +384,7 @@ QByteArray cabrillo(const Contest &contest, const ContestDefinition *definition,
         const QString time = qso.timestampUtc.toUTC().toString(QStringLiteral("hhmm"));
         const QString frequencyKhz = qso.frequencyHz > 0
             ? QString::number(qso.frequencyHz / 1000)
-            : QString(qso.band).remove(QLatin1Char('m'), Qt::CaseInsensitive);
+            : bandFrequencyKhz(qso.band);
         lines.append(QStringLiteral("QSO: %1 %2 %3 %4 %5 %6 %7 %8 %9 %10")
                          .arg(frequencyKhz, cabrilloMode(qso.mode), date, time,
                               station.callsign.trimmed().toUpper(),
@@ -386,6 +573,16 @@ bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
                             const QVector<Qso> &qsos, const Station &station,
                             QString *error)
 {
+    return writeFile(filePath, format, contest, definition, qsos, station,
+                     LogExportOptions{}, error);
+}
+
+bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
+                            const Contest &contest,
+                            const ContestDefinition *definition,
+                            const QVector<Qso> &qsos, const Station &station,
+                            const LogExportOptions &options, QString *error)
+{
     setError(error, {});
     if (!validate(format, contest, definition, qsos, error)) {
         return false;
@@ -400,7 +597,7 @@ bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
         return false;
     }
     const QByteArray contents = format == LogExportFormat::Cabrillo
-        ? cabrillo(contest, definition, qsos, station)
+        ? cabrillo(contest, definition, qsos, station, options)
         : adif(contest, definition, qsos, station);
     QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly)) {

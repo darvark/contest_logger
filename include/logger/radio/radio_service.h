@@ -19,6 +19,12 @@ enum class RadioTransport {
     Tcp
 };
 
+enum class SerialControlState {
+    Unchanged,
+    On,
+    Off
+};
+
 struct RadioConfig {
     RadioBackendType backend = RadioBackendType::Hamlib;
     RadioTransport transport = RadioTransport::Serial;
@@ -27,8 +33,11 @@ struct RadioConfig {
     QString host = QStringLiteral("127.0.0.1");
     int port = 4532;
     int baudRate = 9600;
+    SerialControlState rtsState = SerialControlState::Unchanged;
+    SerialControlState dtrState = SerialControlState::Unchanged;
     bool mockDualReceiveSupported = true;
     int timeoutMs = 3000;
+    int pollIntervalMs = 1000;
 };
 
 struct RadioSnapshot {

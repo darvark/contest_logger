@@ -32,6 +32,8 @@ struct ExchangeFieldDefinition {
     int minimum = 0;
     int maximum = 0;
     QStringList values;
+    QMap<QString, QString> requiredWhen;
+    bool hasRequiredWhen = false;
 };
 
 struct MultiplierDefinition {
@@ -40,17 +42,25 @@ struct MultiplierDefinition {
     bool perBand = false;
 };
 
+struct QsoPointsRule {
+    int points = 0;
+    QMap<QString, QString> when;
+};
+
 struct ContestDefinition {
     int schemaVersion = 1;
     QString id;
     QString name;
     QString description;
+    // Official Cabrillo CONTEST: identifier; empty means the uppercased id.
+    QString cabrilloContest;
     QStringList bands;
     QStringList modes;
     QVector<ExchangeFieldDefinition> sentExchange;
     QVector<ExchangeFieldDefinition> receivedExchange;
     int serialStart = 1;
     int qsoPoints = 1;
+    QVector<QsoPointsRule> qsoPointRules;
     QVector<MultiplierDefinition> multipliers;
     QStringList dupeKey{QStringLiteral("callsign"),
                         QStringLiteral("band"),

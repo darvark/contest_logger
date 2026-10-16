@@ -1,18 +1,26 @@
 schema_version: 1
 id: spdx
 name: SP DX Contest
-description: Starter serial-exchange profile; confirm annual band and point rules.
+description: >-
+  2026 rules: https://spdxcontest.pzk.org.pl/2026/rules.php. Profile for
+  stations in Poland: send RST plus the one-letter voivodeship and receive RST
+  plus the other station's QSO number. Score 1 point for EU QSOs and 3 for
+  QSOs outside Europe; each DXCC entity is a multiplier per band. Requires
+  wl_cty.dat to distinguish EU from DX and resolve DXCC multipliers.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW, SSB]
+cabrillo: {contest: SPDX}
 exchange:
   sent:
     - {name: report, label: RST, type: rst, default: "599"}
-    - {name: serial, label: Serial, type: serial, generated: true, width: 3}
+    - {name: province, label: SP voivodeship (one letter), type: text, pattern: "^[A-Z]$", width: 1}
   received:
     - {name: report, label: RST, type: rst}
-    - {name: serial, label: Serial, type: integer, min: 1, max: 999999}
+    - {name: serial, label: QSO number, type: integer, min: 1, max: 999999}
 scoring:
-  qso_points: 1
+  qso_points: 3
+  qso_point_rules:
+    - {points: 1, when: {continent: EU}}
   multipliers:
-    - {type: prefix, per_band: false}
+    - {type: dxcc, per_band: true}
 dupe_key: [callsign, band, mode]

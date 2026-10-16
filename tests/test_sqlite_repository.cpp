@@ -80,6 +80,7 @@ private slots:
     void appliesSchemaMigrationOnce();
     void migratesExistingVersionOneDatabase();
     void savesContestDefinition();
+    void createsAndUpdatesLogProperties();
     void updatesQsoAndPersistsExchangeFields();
     void loadsAllQsosForDupeChecking();
     void savesAndReadsSpot();
@@ -162,7 +163,7 @@ void SqliteRepositoryTest::appliesSchemaMigrationOnce()
     QSqlQuery query(database.database());
     QVERIFY(query.exec(QStringLiteral("SELECT MAX(version) FROM schema_migrations")));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 5);
+    QCOMPARE(query.value(0).toInt(), 6);
     query.finish();
 
     QVERIFY2(database.repository().initialize(&error), qPrintable(error));
@@ -342,6 +343,61 @@ void SqliteRepositoryTest::savesContestDefinition()
     QVERIFY(found != contests.cend());
     QCOMPARE(found->name, definition.name);
     QCOMPARE(database.repository().contestDefinitionYaml(found->id, &error), yaml);
+}
+
+void SqliteRepositoryTest::createsAndUpdatesLogProperties()
+{
+    TestDatabase database;
+    auto &repository = database.repository();
+    QString error;
+    QVERIFY2(repository.initialize(&error), qPrintable(error));
+    logger::ContestDefinition definition;
+    definition.id = QStringLiteral("props");
+    definition.name = QStringLiteral("Props Contest");
+    logger::Contest log;
+    log.name = QStringLiteral("SP9ABC Props 2026");
+    log.stationCallsign = QStringLiteral("sp9abc");
+    log.startsAtUtc = QDateTime::fromString(QStringLiteral("2026-11-28T00:00:00Z"),
+                                            Qt::ISODate);
+    log.properties = {{QStringLiteral("CATEGORY-POWER"), QStringLiteral("LOW")}};
+
+    const qint64 firstId = repository.createContestLog(
+        definition, QStringLiteral("id: props\n"), log, &error);
+    QVERIFY2(firstId > 0, qPrintable(error));
+    const qint64 secondId = repository.createContestLog(
+        definition, QStringLiteral("id: props\n"), log, &error);
+    QVERIFY2(secondId > 0, qPrintable(error));
+
+    const auto find = [&repository, &error](qint64 id) {
+        const auto contests = repository.contests(&error);
+        const auto found = std::find_if(
+            contests.cbegin(), contests.cend(),
+            [id](const logger::Contest &contest) { return contest.id == id; });
+        return found == contests.cend() ? logger::Contest{} : *found;
+    };
+    logger::Contest stored = find(firstId);
+    QCOMPARE(stored.code, QStringLiteral("PROPS"));
+    QCOMPARE(find(secondId).code, QStringLiteral("PROPS-2"));
+    QCOMPARE(stored.stationCallsign, QStringLiteral("SP9ABC"));
+    QVERIFY(stored.startsAtUtc.has_value());
+    QCOMPARE(*stored.startsAtUtc, *log.startsAtUtc);
+    QCOMPARE(stored.properties.value(QStringLiteral("CATEGORY-POWER")),
+             QStringLiteral("LOW"));
+
+    stored.name = QStringLiteral("Renamed");
+    stored.stationCallsign = QStringLiteral("SN9X");
+    stored.properties = {{QStringLiteral("OPERATORS"), QStringLiteral("SP9ABC SP9XYZ")}};
+    QVERIFY2(repository.updateContestLog(stored, &error), qPrintable(error));
+    const logger::Contest updated = find(firstId);
+    QCOMPARE(updated.name, QStringLiteral("Renamed"));
+    QCOMPARE(updated.stationCallsign, QStringLiteral("SN9X"));
+    QVERIFY(!updated.properties.contains(QStringLiteral("CATEGORY-POWER")));
+    QCOMPARE(updated.properties.value(QStringLiteral("OPERATORS")),
+             QStringLiteral("SP9ABC SP9XYZ"));
+
+    logger::Contest missing = updated;
+    missing.id = 999999;
+    QVERIFY(!repository.updateContestLog(missing, &error));
 }
 
 void SqliteRepositoryTest::prunesRetainedSpots()

@@ -19,6 +19,56 @@ QString normalized(const QString &value)
     return value.trimmed().toUpper();
 }
 
+QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
+                                      const QMap<QString, QString> &exchange,
+                                      const QMap<QString, QString> &resolved)
+{
+    QMap<QString, QString> facts;
+    for (auto it = resolved.cbegin(); it != resolved.cend(); ++it) {
+        facts.insert(it.key().toLower(), normalized(it.value()));
+    }
+    facts.insert(QStringLiteral("band"), band.trimmed().toLower());
+    facts.insert(QStringLiteral("mode"), normalized(mode));
+    for (auto it = exchange.cbegin(); it != exchange.cend(); ++it) {
+        const QString key = it.key().toLower();
+        const QString value = normalized(it.value());
+        facts.insert(QStringLiteral("exchange.%1").arg(key), value);
+        facts.insert(QStringLiteral("received.%1").arg(key), value);
+    }
+    if (facts.contains(QStringLiteral("dxcc"))) {
+        facts.insert(QStringLiteral("country"), facts.value(QStringLiteral("dxcc")));
+    }
+    return facts;
+}
+
+bool conditionMatches(const QMap<QString, QString> &condition,
+                      const QMap<QString, QString> &facts)
+{
+    for (auto it = condition.cbegin(); it != condition.cend(); ++it) {
+        if (normalized(facts.value(it.key())) != normalized(it.value())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QMap<QString, QString> receivedFieldsFor(
+    const Qso &qso, const ContestDefinition &definition);
+
+int pointsForQso(const ContestDefinition &definition, const Qso &qso,
+                 const QMap<QString, QString> &resolved)
+{
+    const QMap<QString, QString> exchange =
+        receivedFieldsFor(qso, definition);
+    const auto facts = conditionFacts(qso.band, qso.mode, exchange, resolved);
+    for (const QsoPointsRule &rule : definition.qsoPointRules) {
+        if (conditionMatches(rule.when, facts)) {
+            return rule.points;
+        }
+    }
+    return definition.qsoPoints;
+}
+
 QString expectedPattern(const ExchangeFieldDefinition &field)
 {
     if (!field.pattern.isEmpty()) {
@@ -271,11 +321,12 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
     for (const Qso &qso : ordered) {
         ++result.totalQsos;
         ++result.perBand[qso.band.trimmed().toLower()].qsos;
-        const int points = qso.points > 0 ? qso.points : definition.qsoPoints;
-        result.totalPoints += points;
-        result.perBand[qso.band.trimmed().toLower()].points += points;
         const QMap<QString, QString> resolved = resolver ? resolver(qso)
                                                           : QMap<QString, QString>{};
+        const int points = qso.points > 0
+            ? qso.points : pointsForQso(definition, qso, resolved);
+        result.totalPoints += points;
+        result.perBand[qso.band.trimmed().toLower()].points += points;
         const MultiplierResolver currentResolver = [&resolved](const Qso &) {
             return resolved;
         };
@@ -440,11 +491,19 @@ ContestEvaluationResult ContestEngine::evaluate(
         }
     }
 
+    const auto fieldConditionFacts = conditionFacts(
+        normalizedBand, normalizedMode, normalizedReceived,
+        context.resolvedMultiplierValues);
     for (const ExchangeFieldDefinition &field : definition.receivedExchange) {
         const QString rawValue = normalizedReceived.value(field.name);
+        ExchangeFieldDefinition validationField = field;
+        if (field.hasRequiredWhen) {
+            validationField.required = conditionMatches(field.requiredWhen,
+                                                        fieldConditionFacts);
+        }
         QString issue;
         QString checkedValue;
-        if (!validateField(field, rawValue, checkedValue, issue)) {
+        if (!validateField(validationField, rawValue, checkedValue, issue)) {
             addIssue(result, QStringLiteral("received.%1").arg(field.name), issue);
         } else if (!checkedValue.isEmpty()) {
             result.receivedExchange.insert(field.name, checkedValue);
@@ -456,7 +515,16 @@ ContestEvaluationResult ContestEngine::evaluate(
         return result;
     }
 
+    const auto facts = conditionFacts(normalizedBand, normalizedMode,
+                                      result.receivedExchange,
+                                      context.resolvedMultiplierValues);
     result.points = definition.qsoPoints;
+    for (const QsoPointsRule &rule : definition.qsoPointRules) {
+        if (conditionMatches(rule.when, facts)) {
+            result.points = rule.points;
+            break;
+        }
+    }
     for (const MultiplierDefinition &multiplier : definition.multipliers) {
         const QString value = multiplierValue(
             multiplier, result.receivedExchange, context, normalizedCall);

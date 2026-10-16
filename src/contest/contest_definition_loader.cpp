@@ -242,6 +242,72 @@ bool defaultValueIsValid(const ExchangeFieldDefinition &field)
     return false;
 }
 
+bool parseConditionMap(const YAML::Node &node, const QString &path,
+                       QMap<QString, QString> &conditions, QString *error)
+{
+    if (!node.IsMap() || node.size() == 0 || node.size() > 16) {
+        setError(error, QStringLiteral("%1 must be a non-empty mapping with at most 16 conditions.")
+                            .arg(path));
+        return false;
+    }
+    for (const auto &entry : node) {
+        if (!entry.first.IsScalar() || !entry.second.IsScalar()) {
+            setError(error, QStringLiteral("%1 keys and values must be strings.")
+                                .arg(path));
+            return false;
+        }
+        const QString key =
+            QString::fromStdString(entry.first.as<std::string>()).trimmed().toLower();
+        const QString value =
+            QString::fromStdString(entry.second.as<std::string>()).trimmed();
+        if (key.isEmpty() || value.isEmpty() || conditions.contains(key)) {
+            setError(error, QStringLiteral("%1 contains an empty or duplicate condition.")
+                                .arg(path));
+            return false;
+        }
+        conditions.insert(key, value);
+    }
+    return true;
+}
+
+bool validateConditionKeys(const QMap<QString, QString> &conditions,
+                           const QVector<ExchangeFieldDefinition> &receivedFields,
+                           const QString &path, QString *error)
+{
+    const QSet<QString> builtIn{
+        QStringLiteral("band"), QStringLiteral("mode"),
+        QStringLiteral("country"), QStringLiteral("dxcc"),
+        QStringLiteral("continent"), QStringLiteral("cq_zone"),
+        QStringLiteral("itu_zone")
+    };
+    for (auto it = conditions.cbegin(); it != conditions.cend(); ++it) {
+        if (builtIn.contains(it.key())) {
+            continue;
+        }
+        QString fieldName;
+        if (it.key().startsWith(QStringLiteral("exchange."))) {
+            fieldName = it.key().mid(QStringLiteral("exchange.").size());
+        } else if (it.key().startsWith(QStringLiteral("received."))) {
+            fieldName = it.key().mid(QStringLiteral("received.").size());
+        } else {
+            setError(error, QStringLiteral("%1 has unsupported condition '%2'.")
+                                .arg(path, it.key()));
+            return false;
+        }
+        const bool exists = std::any_of(
+            receivedFields.cbegin(), receivedFields.cend(),
+            [&fieldName](const ExchangeFieldDefinition &field) {
+                return field.name == fieldName;
+            });
+        if (!exists) {
+            setError(error, QStringLiteral("%1 references unknown received field '%2'.")
+                                .arg(path, fieldName));
+            return false;
+        }
+    }
+    return true;
+}
+
 bool parseFields(const YAML::Node &node, const QString &path, bool isSent,
                  QVector<ExchangeFieldDefinition> &fields, QString *error)
 {
@@ -264,7 +330,7 @@ bool parseFields(const YAML::Node &node, const QString &path, bool isSent,
                         QStringLiteral("generated"), QStringLiteral("default"),
                         QStringLiteral("pattern"), QStringLiteral("width"),
                         QStringLiteral("min"), QStringLiteral("max"),
-                        QStringLiteral("values")},
+                        QStringLiteral("values"), QStringLiteral("required_when")},
                        itemPath, error)) {
             return false;
         }
@@ -314,6 +380,19 @@ bool parseFields(const YAML::Node &node, const QString &path, bool isSent,
             || !optionalBool(item, QStringLiteral("generated"), itemPath,
                              false, field.generated, error)) {
             return false;
+        }
+        if (item["required_when"]) {
+            if (isSent) {
+                setError(error, QStringLiteral("%1.required_when is only supported for received fields.")
+                                    .arg(itemPath));
+                return false;
+            }
+            if (!parseConditionMap(item["required_when"],
+                                   itemPath + QStringLiteral(".required_when"),
+                                   field.requiredWhen, error)) {
+                return false;
+            }
+            field.hasRequiredWhen = true;
         }
 
         if (field.width < 0 || field.width > 32
@@ -386,7 +465,7 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                     QStringLiteral("name"), QStringLiteral("description"),
                     QStringLiteral("bands"), QStringLiteral("modes"),
                     QStringLiteral("exchange"), QStringLiteral("scoring"),
-                    QStringLiteral("dupe_key")},
+                    QStringLiteral("dupe_key"), QStringLiteral("cabrillo")},
                    QStringLiteral("contest"), error)) {
         return false;
     }
@@ -428,6 +507,25 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
         band = band.toLower();
     }
 
+    const YAML::Node cabrillo = root["cabrillo"];
+    if (cabrillo) {
+        if (!checkKeys(cabrillo, {QStringLiteral("contest")},
+                       QStringLiteral("contest.cabrillo"), error)
+            || !optionalString(cabrillo, QStringLiteral("contest"),
+                               QStringLiteral("contest.cabrillo"),
+                               definition.cabrilloContest, error)) {
+            return false;
+        }
+        definition.cabrilloContest = definition.cabrilloContest.trimmed().toUpper();
+        if (!definition.cabrilloContest.isEmpty()
+            && !QRegularExpression(QStringLiteral("^[A-Z0-9][A-Z0-9_-]*$"))
+                    .match(definition.cabrilloContest).hasMatch()) {
+            setError(error, QStringLiteral(
+                                "contest.cabrillo.contest must use letters, digits, '_' or '-'."));
+            return false;
+        }
+    }
+
     const YAML::Node exchange = root["exchange"];
     if (!exchange || !checkKeys(exchange,
                                 {QStringLiteral("sent"), QStringLiteral("received")},
@@ -439,12 +537,23 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                         false, definition.receivedExchange, error)) {
         return false;
     }
+    for (const ExchangeFieldDefinition &field : definition.receivedExchange) {
+        if (field.hasRequiredWhen
+            && !validateConditionKeys(
+                field.requiredWhen, definition.receivedExchange,
+                QStringLiteral("contest.exchange.received.%1.required_when")
+                    .arg(field.name),
+                error)) {
+            return false;
+        }
+    }
 
     const YAML::Node scoring = root["scoring"];
     if (!scoring || !checkKeys(scoring,
                                {QStringLiteral("qso_points"),
                                 QStringLiteral("serial_start"),
-                                QStringLiteral("multipliers")},
+                                QStringLiteral("multipliers"),
+                                QStringLiteral("qso_point_rules")},
                                QStringLiteral("contest.scoring"), error)
         || !optionalInt(scoring, QStringLiteral("qso_points"),
                         QStringLiteral("contest.scoring"), 1,
@@ -458,6 +567,41 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
         setError(error, QStringLiteral(
                             "contest.scoring.qso_points must be non-negative and serial_start must be positive."));
         return false;
+    }
+
+    const YAML::Node pointRules = scoring["qso_point_rules"];
+    if (pointRules) {
+        if (!pointRules.IsSequence() || pointRules.size() > 64) {
+            setError(error, QStringLiteral(
+                                "contest.scoring.qso_point_rules must be a list of at most 64 rules."));
+            return false;
+        }
+        for (std::size_t index = 0; index < pointRules.size(); ++index) {
+            const YAML::Node item = pointRules[index];
+            const QString itemPath =
+                QStringLiteral("contest.scoring.qso_point_rules[%1]").arg(index);
+            if (!checkKeys(item, {QStringLiteral("points"), QStringLiteral("when")},
+                           itemPath, error)) {
+                return false;
+            }
+            QsoPointsRule rule;
+            if (!optionalInt(item, QStringLiteral("points"), itemPath, -1,
+                             rule.points, error)
+                || rule.points < 0
+                || !parseConditionMap(item["when"],
+                                      itemPath + QStringLiteral(".when"),
+                                      rule.when, error)
+                || !validateConditionKeys(rule.when, definition.receivedExchange,
+                                          itemPath + QStringLiteral(".when"),
+                                          error)) {
+                if (error != nullptr && error->isEmpty()) {
+                    setError(error, QStringLiteral("%1.points must be non-negative.")
+                                        .arg(itemPath));
+                }
+                return false;
+            }
+            definition.qsoPointRules.append(std::move(rule));
+        }
     }
 
     const YAML::Node multipliers = scoring["multipliers"];
@@ -500,12 +644,15 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                                         .arg(itemPath, multiplier.field));
                     return false;
                 }
-            } else if (multiplier.type != QStringLiteral("prefix")) {
-                setError(error, QStringLiteral("%1.type must be 'exchange' or 'prefix'.")
+            } else if (multiplier.type != QStringLiteral("prefix")
+                       && multiplier.type != QStringLiteral("dxcc")) {
+                setError(error, QStringLiteral(
+                                    "%1.type must be 'exchange', 'prefix', or 'dxcc'.")
                                     .arg(itemPath));
                 return false;
             } else if (item["field"]) {
-                setError(error, QStringLiteral("%1.field is only valid for exchange multipliers.")
+                setError(error, QStringLiteral(
+                                    "%1.field is only valid for exchange multipliers.")
                                     .arg(itemPath));
                 return false;
             }

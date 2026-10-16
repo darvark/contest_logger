@@ -2,9 +2,11 @@
 
 #include "logger/contest/contest_engine.h"
 #include "logger/radio/band_plan.h"
+#include "logger/ui/new_log_dialog.h"
 #include "logger/ui/operator_dialog.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QDateTime>
 #include <QDateTimeEdit>
@@ -30,6 +32,7 @@
 #include <QEvent>
 #include <QFormLayout>
 #include <QFont>
+#include <QGroupBox>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -44,6 +47,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
@@ -55,6 +59,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
+#include <QTabWidget>
 #include <QTimeZone>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -87,6 +92,18 @@ QNetworkRequest supportDataRequest(const QUrl &url)
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     return request;
+}
+
+void populateSerialControlSelector(QComboBox *selector, SerialControlState state)
+{
+    selector->addItem(QObject::tr("Unchanged"),
+                      static_cast<int>(SerialControlState::Unchanged));
+    selector->addItem(QObject::tr("On"),
+                      static_cast<int>(SerialControlState::On));
+    selector->addItem(QObject::tr("Off"),
+                      static_cast<int>(SerialControlState::Off));
+    const int index = selector->findData(static_cast<int>(state));
+    selector->setCurrentIndex(index < 0 ? 0 : index);
 }
 
 QString networkReplyError(const QNetworkReply *reply)
@@ -168,48 +185,110 @@ public:
     {
         setWindowTitle(tr("%1 CAT configuration").arg(radioName));
         auto *layout = new QVBoxLayout(this);
+        auto *tabs = new QTabWidget(this);
+        auto *connectionTab = new QWidget(tabs);
+        auto *connectionLayout = new QVBoxLayout(connectionTab);
         auto *form = new QFormLayout;
         m_backend = new QComboBox(this);
+        m_backend->setObjectName(QStringLiteral("radioBackend"));
         m_backend->addItem(tr("Hamlib"), static_cast<int>(RadioBackendType::Hamlib));
         m_backend->addItem(tr("Mock radio (testing)"),
                            static_cast<int>(RadioBackendType::Mock));
         m_backend->setCurrentIndex(m_backend->findData(static_cast<int>(config.backend)));
         form->addRow(tr("Backend:"), m_backend);
 
+        auto *hamlibGroup = new QGroupBox(tr("Hamlib radio"), connectionTab);
+        auto *hamlibForm = new QFormLayout(hamlibGroup);
         m_modelId = new QSpinBox(this);
+        m_modelId->setObjectName(QStringLiteral("radioHamlibModelId"));
         m_modelId->setRange(1, 100000);
         m_modelId->setValue(config.modelId);
-        form->addRow(tr("Hamlib model ID:"), m_modelId);
+        hamlibForm->addRow(tr("Hamlib model ID:"), m_modelId);
 
         m_transport = new QComboBox(this);
+        m_transport->setObjectName(QStringLiteral("radioTransport"));
         m_transport->addItem(tr("Serial port"),
                              static_cast<int>(RadioTransport::Serial));
         m_transport->addItem(tr("TCP / rigctld"),
                              static_cast<int>(RadioTransport::Tcp));
         m_transport->setCurrentIndex(
             m_transport->findData(static_cast<int>(config.transport)));
-        form->addRow(tr("Transport:"), m_transport);
+        hamlibForm->addRow(tr("Transport:"), m_transport);
+        connectionLayout->addLayout(form);
+        connectionLayout->addWidget(hamlibGroup);
 
+        m_serialGroup = new QGroupBox(tr("Serial CAT connection"), connectionTab);
+        m_serialGroup->setObjectName(QStringLiteral("radioSerialGroup"));
+        auto *serialForm = new QFormLayout(m_serialGroup);
         m_devicePath = new QLineEdit(config.devicePath, this);
-        form->addRow(tr("Serial device:"), m_devicePath);
-        m_host = new QLineEdit(config.host, this);
-        form->addRow(tr("Host:"), m_host);
-        m_port = new QSpinBox(this);
-        m_port->setRange(1, 65535);
-        m_port->setValue(config.port);
-        form->addRow(tr("TCP port:"), m_port);
+        m_devicePath->setObjectName(QStringLiteral("radioSerialDevice"));
+        serialForm->addRow(tr("Serial device:"), m_devicePath);
         m_baudRate = new QComboBox(this);
+        m_baudRate->setObjectName(QStringLiteral("radioBaudRate"));
         for (int rate : {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}) {
             m_baudRate->addItem(QString::number(rate), rate);
         }
         int baudIndex = m_baudRate->findData(config.baudRate);
         m_baudRate->setCurrentIndex(baudIndex < 0 ? 3 : baudIndex);
-        form->addRow(tr("Baud rate:"), m_baudRate);
+        serialForm->addRow(tr("Baud rate:"), m_baudRate);
+        m_rtsState = new QComboBox(this);
+        m_rtsState->setObjectName(QStringLiteral("radioRtsState"));
+        populateSerialControlSelector(m_rtsState, config.rtsState);
+        serialForm->addRow(tr("RTS:"), m_rtsState);
+        m_dtrState = new QComboBox(this);
+        m_dtrState->setObjectName(QStringLiteral("radioDtrState"));
+        populateSerialControlSelector(m_dtrState, config.dtrState);
+        serialForm->addRow(tr("DTR:"), m_dtrState);
+        connectionLayout->addWidget(m_serialGroup);
+
+        m_tcpGroup = new QGroupBox(tr("TCP / rigctld connection"), connectionTab);
+        m_tcpGroup->setObjectName(QStringLiteral("radioTcpGroup"));
+        auto *tcpForm = new QFormLayout(m_tcpGroup);
+        m_host = new QLineEdit(config.host, this);
+        m_host->setObjectName(QStringLiteral("radioTcpHost"));
+        tcpForm->addRow(tr("Host:"), m_host);
+        m_port = new QSpinBox(this);
+        m_port->setObjectName(QStringLiteral("radioTcpPort"));
+        m_port->setRange(1, 65535);
+        m_port->setValue(config.port);
+        tcpForm->addRow(tr("TCP port:"), m_port);
+        connectionLayout->addWidget(m_tcpGroup);
+
         m_autoConnect = new QCheckBox(tr("Connect automatically at startup"), this);
         m_autoConnect->setObjectName(QStringLiteral("radioAutoConnect"));
         m_autoConnect->setChecked(autoConnect);
-        form->addRow(QString(), m_autoConnect);
-        layout->addLayout(form);
+        connectionLayout->addWidget(m_autoConnect);
+        connectionLayout->addStretch();
+        tabs->addTab(connectionTab, tr("Connection"));
+
+        auto *advancedTab = new QWidget(tabs);
+        auto *advancedLayout = new QVBoxLayout(advancedTab);
+        auto *advancedGroup = new QGroupBox(tr("CAT communication"), advancedTab);
+        auto *advancedForm = new QFormLayout(advancedGroup);
+        m_pollInterval = new QComboBox(advancedGroup);
+        m_pollInterval->setObjectName(QStringLiteral("radioPollInterval"));
+        for (int interval : {250, 500, 1000, 2000, 5000}) {
+            m_pollInterval->addItem(
+                tr("%1 ms").arg(interval), interval);
+        }
+        int pollIndex = m_pollInterval->findData(config.pollIntervalMs);
+        m_pollInterval->setCurrentIndex(pollIndex < 0 ? 2 : pollIndex);
+        advancedForm->addRow(tr("Polling interval:"), m_pollInterval);
+        m_timeout = new QSpinBox(advancedGroup);
+        m_timeout->setObjectName(QStringLiteral("radioTimeout"));
+        m_timeout->setRange(100, 30000);
+        m_timeout->setSingleStep(100);
+        m_timeout->setSuffix(tr(" ms"));
+        m_timeout->setValue(config.timeoutMs);
+        advancedForm->addRow(tr("Connection timeout:"), m_timeout);
+        advancedLayout->addWidget(advancedGroup);
+        advancedLayout->addStretch();
+        tabs->addTab(advancedTab, tr("Advanced"));
+        layout->addWidget(tabs);
+
+        updateTransportFields();
+        connect(m_transport, &QComboBox::currentIndexChanged,
+                this, [this] { updateTransportFields(); });
 
         m_result = new QLabel(tr("Use Test to check the settings without keeping the "
                                  "connection open."), this);
@@ -258,7 +337,9 @@ public:
         m_result->setText(tr("Testing…"));
         QApplication::setOverrideCursor(Qt::WaitCursor);
         QApplication::processEvents();
-        const RadioProbeResult result = probeRadio(config());
+        const RadioConfig radioConfig = config();
+        const RadioProbeResult result =
+            probeRadio(radioConfig, radioConfig.timeoutMs);
         QApplication::restoreOverrideCursor();
         if (!result.ok) {
             m_result->setStyleSheet(QStringLiteral("color: #c62828; font-weight: bold;"));
@@ -288,10 +369,25 @@ public:
         result.host = m_host->text().trimmed();
         result.port = m_port->value();
         result.baudRate = m_baudRate->currentData().toInt();
+        result.rtsState =
+            static_cast<SerialControlState>(m_rtsState->currentData().toInt());
+        result.dtrState =
+            static_cast<SerialControlState>(m_dtrState->currentData().toInt());
+        result.timeoutMs = m_timeout->value();
+        result.pollIntervalMs = m_pollInterval->currentData().toInt();
         return result;
     }
 
 private:
+    void updateTransportFields()
+    {
+        const bool serial =
+            m_transport->currentData().toInt()
+            == static_cast<int>(RadioTransport::Serial);
+        m_serialGroup->setVisible(serial);
+        m_tcpGroup->setVisible(!serial);
+    }
+
     QComboBox *m_backend = nullptr;
     QSpinBox *m_modelId = nullptr;
     QComboBox *m_transport = nullptr;
@@ -299,6 +395,12 @@ private:
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
     QComboBox *m_baudRate = nullptr;
+    QComboBox *m_rtsState = nullptr;
+    QComboBox *m_dtrState = nullptr;
+    QGroupBox *m_serialGroup = nullptr;
+    QGroupBox *m_tcpGroup = nullptr;
+    QComboBox *m_pollInterval = nullptr;
+    QSpinBox *m_timeout = nullptr;
     QCheckBox *m_autoConnect = nullptr;
     QLabel *m_result = nullptr;
     Action m_action = Action::Save;
@@ -351,6 +453,7 @@ public:
         auto *layout = new QVBoxLayout(this);
         auto *form = new QFormLayout;
         m_type = new QComboBox(this);
+        m_type->setObjectName(QStringLiteral("cwKeyerProvider"));
         m_type->addItem(tr("Hamlib radio"), static_cast<int>(CwKeyerType::Hamlib));
         m_type->addItem(tr("cwdaemon (UDP)"), static_cast<int>(CwKeyerType::Cwdaemon));
         m_type->addItem(tr("Mock (testing)"), static_cast<int>(CwKeyerType::Mock));
@@ -370,6 +473,7 @@ public:
         m_modelId->setValue(config.radio.modelId);
         form->addRow(tr("Hamlib model ID:"), m_modelId);
         m_transport = new QComboBox(this);
+        m_transport->setObjectName(QStringLiteral("cwHamlibTransport"));
         m_transport->addItem(tr("Serial"), static_cast<int>(RadioTransport::Serial));
         m_transport->addItem(tr("TCP / rigctld"), static_cast<int>(RadioTransport::Tcp));
         m_transport->setCurrentIndex(
@@ -382,11 +486,24 @@ public:
         m_baud->setSingleStep(1200);
         m_baud->setValue(config.radio.baudRate);
         form->addRow(tr("Baud rate:"), m_baud);
+        m_rtsState = new QComboBox(this);
+        m_rtsState->setObjectName(QStringLiteral("cwHamlibRtsState"));
+        populateSerialControlSelector(m_rtsState, config.radio.rtsState);
+        form->addRow(tr("Hamlib serial RTS:"), m_rtsState);
+        m_dtrState = new QComboBox(this);
+        m_dtrState->setObjectName(QStringLiteral("cwHamlibDtrState"));
+        populateSerialControlSelector(m_dtrState, config.radio.dtrState);
+        form->addRow(tr("Hamlib serial DTR:"), m_dtrState);
         m_wpm = new QSpinBox(this);
         m_wpm->setRange(5, 80);
         m_wpm->setValue(config.wpm);
         form->addRow(tr("Speed (WPM):"), m_wpm);
         layout->addLayout(form);
+        updateSerialControlVisibility(form);
+        connect(m_type, &QComboBox::currentIndexChanged,
+                this, [this, form] { updateSerialControlVisibility(form); });
+        connect(m_transport, &QComboBox::currentIndexChanged,
+                this, [this, form] { updateSerialControlVisibility(form); });
         auto *note = new QLabel(
             tr("Hamlib opens its configured rig connection. Use rigctld if CAT "
                "already owns the radio's serial port. cwdaemon uses UDP port 6789 "
@@ -417,10 +534,30 @@ public:
         result.radio.port = m_port->value();
         result.radio.devicePath = m_device->text().trimmed();
         result.radio.baudRate = m_baud->value();
+        result.radio.rtsState =
+            static_cast<SerialControlState>(m_rtsState->currentData().toInt());
+        result.radio.dtrState =
+            static_cast<SerialControlState>(m_dtrState->currentData().toInt());
         return result;
     }
 
 private:
+    void updateSerialControlVisibility(QFormLayout *form)
+    {
+        const bool visible =
+            m_type->currentData().toInt() == static_cast<int>(CwKeyerType::Hamlib)
+            && m_transport->currentData().toInt()
+                == static_cast<int>(RadioTransport::Serial);
+        m_rtsState->setVisible(visible);
+        m_dtrState->setVisible(visible);
+        if (QWidget *label = form->labelForField(m_rtsState)) {
+            label->setVisible(visible);
+        }
+        if (QWidget *label = form->labelForField(m_dtrState)) {
+            label->setVisible(visible);
+        }
+    }
+
     QComboBox *m_type = nullptr;
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
@@ -428,6 +565,8 @@ private:
     QComboBox *m_transport = nullptr;
     QLineEdit *m_device = nullptr;
     QSpinBox *m_baud = nullptr;
+    QComboBox *m_rtsState = nullptr;
+    QComboBox *m_dtrState = nullptr;
     QSpinBox *m_wpm = nullptr;
 };
 
@@ -486,6 +625,12 @@ CwKeyerConfig cwKeyerConfigFromSettings(const QSettings &settings, int radioInde
             QStringLiteral("cw/hamlib/devicePath"), config.radio.devicePath).toString();
         config.radio.baudRate = settings.value(
             QStringLiteral("cw/hamlib/baudRate"), config.radio.baudRate).toInt();
+        config.radio.rtsState = static_cast<SerialControlState>(
+            settings.value(QStringLiteral("cw/hamlib/rtsState"),
+                          static_cast<int>(config.radio.rtsState)).toInt());
+        config.radio.dtrState = static_cast<SerialControlState>(
+            settings.value(QStringLiteral("cw/hamlib/dtrState"),
+                          static_cast<int>(config.radio.dtrState)).toInt());
         config.radio.host = settings.value(
             QStringLiteral("cw/hamlib/host"), config.radio.host).toString();
         config.radio.port = settings.value(
@@ -759,20 +904,58 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
 
     auto *fileMenu = menuBar()->addMenu(tr("&File"));
     auto *newLogAction = fileMenu->addAction(tr("&New log..."));
+    newLogAction->setObjectName(QStringLiteral("newLogAction"));
     newLogAction->setShortcut(QKeySequence::New);
-    connect(newLogAction, &QAction::triggered,
-            this, [this] { importContestDefinition(true); });
+    connect(newLogAction, &QAction::triggered, this, &MainWindow::createNewLog);
+    auto *logPropertiesAction = fileMenu->addAction(tr("Log &properties..."));
+    logPropertiesAction->setObjectName(QStringLiteral("logPropertiesAction"));
+    connect(logPropertiesAction, &QAction::triggered,
+            this, &MainWindow::editLogProperties);
     fileMenu->addSeparator();
     auto *contestMenu = menuBar()->addMenu(tr("&Contest"));
     auto *importAction = contestMenu->addAction(tr("&Import YAML definition..."));
     connect(importAction, &QAction::triggered,
-            this, [this] { importContestDefinition(false); });
+            this, &MainWindow::importContestDefinition);
     auto *operatingMenu = menuBar()->addMenu(tr("O&perating"));
+    auto *runModeMenu = operatingMenu->addMenu(tr("Operating mode"));
+    auto *runModeGroup = new QActionGroup(runModeMenu);
+    runModeGroup->setExclusive(true);
+    for (int mode = 0; mode < 2; ++mode) {
+        auto *action = runModeMenu->addAction(mode == 0 ? tr("Run") : tr("Search & Pounce"));
+        action->setCheckable(true);
+        action->setData(mode);
+        action->setObjectName(mode == 0 ? QStringLiteral("runModeAction")
+                                        : QStringLiteral("searchAndPounceAction"));
+        runModeGroup->addAction(action);
+        connect(action, &QAction::triggered, this,
+                [this, mode] { setRunMode(mode); });
+    }
+    m_esmAction = operatingMenu->addAction(tr("Enter Sends Message (ESM)"));
+    m_esmAction->setObjectName(QStringLiteral("esmAction"));
+    m_esmAction->setCheckable(true);
+    m_esmAction->setChecked(QSettings().value(QStringLiteral("operating/esmEnabled"),
+                                               false).toBool());
+    connect(m_esmAction, &QAction::toggled, this, [](bool enabled) {
+        QSettings().setValue(QStringLiteral("operating/esmEnabled"), enabled);
+    });
+    m_autoCqAction = operatingMenu->addAction(tr("Auto CQ (F1 repeat)"));
+    m_autoCqAction->setObjectName(QStringLiteral("autoCqAction"));
+    m_autoCqAction->setCheckable(true);
+    connect(m_autoCqAction, &QAction::toggled,
+            this, &MainWindow::setAutoCqEnabled);
+    const int savedRunMode =
+        qBound(0, QSettings().value(QStringLiteral("operating/runMode"), 0).toInt(), 1);
+    runModeGroup->actions().at(savedRunMode)->setChecked(true);
     auto *radioMenu = menuBar()->addMenu(tr("&Radio"));
     auto *settingsMenu = menuBar()->addMenu(tr("&Options"));
     auto *operatorAction = settingsMenu->addAction(tr("&Operator and station..."));
     connect(operatorAction, &QAction::triggered,
             this, &MainWindow::configureOperator);
+    auto *functionKeysAction =
+        settingsMenu->addAction(tr("CW function key messages..."));
+    functionKeysAction->setObjectName(QStringLiteral("configureFunctionKeysAction"));
+    connect(functionKeysAction, &QAction::triggered,
+            this, &MainWindow::configureFunctionKeys);
     auto *radioAction = radioMenu->addAction(tr("Radio A CAT settings..."));
     connect(radioAction, &QAction::triggered, this, &MainWindow::configureRadio);
     auto *radioBAction = radioMenu->addAction(tr("Radio B CAT settings..."));
@@ -1100,6 +1283,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 updateRadioSnapshotForRadio(radio, m_radioSnapshots[radio]);
             });
     toolbar->addWidget(m_activeRadioSelector);
+    toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr(" Mode: "), toolbar));
+    m_runModeSelector = new QComboBox(toolbar);
+    m_runModeSelector->setObjectName(QStringLiteral("runModeSelector"));
+    m_runModeSelector->addItem(tr("Run"), 0);
+    m_runModeSelector->addItem(tr("Search & Pounce"), 1);
+    m_runModeSelector->setCurrentIndex(m_runModeSelector->findData(savedRunMode));
+    connect(m_runModeSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) { setRunMode(m_runModeSelector->currentData().toInt()); });
+    toolbar->addWidget(m_runModeSelector);
     m_so2vToggle = new QCheckBox(tr("SO2V (dual VFO)"), toolbar);
     m_so2vToggle->setObjectName(QStringLiteral("so2vToggle"));
     m_so2vToggle->setToolTip(tr("Two VFOs of one connected radio, independent QSO entry."));
@@ -1262,11 +1455,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         entryContexts->addWidget(entryPanel, 1);
 
         connect(m_callsignEdits[vfo], &QLineEdit::returnPressed,
-                this, [this, vfo] { logQsoForVfo(vfo); });
+                this, [this, vfo] { handleEntryEnter(vfo, true); });
         connect(logButton, &QPushButton::clicked,
                 this, [this, vfo] { logQsoForVfo(vfo); });
         connect(m_callsignEdits[vfo], &QLineEdit::textChanged,
-                this, [this, vfo] { updateCallLookup(vfo); });
+                this, [this, vfo](const QString &text) {
+                    if (!text.isEmpty()) {
+                        stopAutoCq();
+                    }
+                    updateCallLookup(vfo);
+                });
         connect(m_callsignEdits[vfo], &QLineEdit::textChanged,
                 this, [this, vfo] { updateDupeIndicatorForVfo(vfo); });
         connect(m_bandSelectors[vfo], &QComboBox::currentTextChanged,
@@ -1280,6 +1478,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 });
         connect(m_modeSelectors[vfo], &QComboBox::currentTextChanged,
                 this, [this, vfo] {
+                    if (m_modeSelectors[vfo]->currentText().compare(
+                            QStringLiteral("CW"), Qt::CaseInsensitive) != 0) {
+                        stopAutoCq();
+                    }
                     updateDupeIndicatorForVfo(vfo);
                     updateSentReportForMode(vfo);
                     updateEntryHeaders();
@@ -1302,6 +1504,21 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         m_messageLine->clear();
         m_messageLine->setProperty("alert", false);
         repolish(m_messageLine);
+    });
+    m_autoCqTimer = new QTimer(this);
+    m_autoCqTimer->setSingleShot(true);
+    m_autoCqTimer->setInterval(5000);
+    connect(m_autoCqTimer, &QTimer::timeout, this, [this] {
+        const int context = currentEntryContext();
+        if (!m_autoCqEnabled || m_runModeSelector->currentData().toInt() != 0
+            || m_modeSelectors[context]->currentText().compare(
+                   QStringLiteral("CW"), Qt::CaseInsensitive) != 0
+            || !m_callsignEdits[context]->text().trimmed().isEmpty()
+            || m_cwStatus.state != ConnectionState::Connected
+            || m_cwStatus.transmitting || m_cwStatus.queuedMessages != 0) {
+            return;
+        }
+        sendFunctionKeyForContext(0, context);
     });
 
     auto *functionKeyBar = new QFrame(central);
@@ -1763,15 +1980,39 @@ void MainWindow::configureOperator()
         return;
     }
 
-    m_station = updated;
+    m_defaultStation = updated;
     QSettings settings;
     settings.beginGroup(QStringLiteral("station"));
-    settings.setValue(QStringLiteral("callsign"), m_station.callsign);
-    settings.setValue(QStringLiteral("operatorName"), m_station.operatorName);
-    settings.setValue(QStringLiteral("grid"), m_station.grid);
-    settings.setValue(QStringLiteral("powerClass"), m_station.powerClass);
+    settings.setValue(QStringLiteral("callsign"), m_defaultStation.callsign);
+    settings.setValue(QStringLiteral("operatorName"), m_defaultStation.operatorName);
+    settings.setValue(QStringLiteral("grid"), m_defaultStation.grid);
+    settings.setValue(QStringLiteral("powerClass"), m_defaultStation.powerClass);
+    settings.setValue(QStringLiteral("email"), m_defaultStation.email);
+    settings.setValue(QStringLiteral("address"), m_defaultStation.address);
+    settings.setValue(QStringLiteral("city"), m_defaultStation.city);
+    settings.setValue(QStringLiteral("stateProvince"), m_defaultStation.stateProvince);
+    settings.setValue(QStringLiteral("postalCode"), m_defaultStation.postalCode);
+    settings.setValue(QStringLiteral("country"), m_defaultStation.country);
     settings.endGroup();
-    updateStationLabel();
+    // The dialog shows the active log's callsign, so an edit there applies to the log.
+    const Contest *contest = activeContest();
+    if (contest != nullptr && !contest->stationCallsign.isEmpty()
+        && contest->stationCallsign != updated.callsign) {
+        Contest log = *contest;
+        log.stationCallsign = updated.callsign;
+        QString error;
+        if (!m_repository.updateContestLog(log, &error)) {
+            QMessageBox::critical(this, tr("Unable to save log callsign"), error);
+        } else {
+            const qint64 contestId = log.id;
+            for (Contest &stored : m_contests) {
+                if (stored.id == contestId) {
+                    stored.stationCallsign = updated.callsign;
+                }
+            }
+        }
+    }
+    applyActiveLogStation();
     statusBar()->showMessage(tr("Station settings saved"), 3000);
 }
 
@@ -1844,8 +2085,24 @@ void MainWindow::exportCurrentLog(LogExportFormat format)
         return;
     }
     const auto definition = m_definitions.constFind(contestId);
-    const ContestDefinition *definitionPtr = definition == m_definitions.cend()
-        ? nullptr : &definition.value();
+    std::optional<ContestDefinition> exportDefinition;
+    if (definition != m_definitions.cend()) {
+        exportDefinition = definition.value();
+        // Logs created before a built-in definition gained its Cabrillo name keep old YAML.
+        if (exportDefinition->cabrilloContest.isEmpty()) {
+            exportDefinition->cabrilloContest =
+                m_builtInCabrilloContests.value(exportDefinition->id);
+        }
+    }
+    const ContestDefinition *definitionPtr =
+        exportDefinition.has_value() ? &*exportDefinition : nullptr;
+    LogExportOptions options;
+    options.createdBy = QStringLiteral("Contest Logger %1")
+                            .arg(QStringLiteral(CONTEST_LOGGER_VERSION));
+    if (definitionPtr != nullptr) {
+        options.claimedScore =
+            ContestEngine().score(*definitionPtr, qsos, multiplierResolver()).finalScore;
+    }
     const QString suggestedName = QStringLiteral("%1.%2")
         .arg(contestIt->code.toLower(), format == LogExportFormat::Cabrillo
                                              ? QStringLiteral("log")
@@ -1862,7 +2119,7 @@ void MainWindow::exportCurrentLog(LogExportFormat format)
         return;
     }
     if (!LogExporter::writeFile(path, format, *contestIt, definitionPtr,
-                                qsos, m_station, &error)) {
+                                qsos, m_station, options, &error)) {
         QMessageBox::critical(this, tr("Export validation or write failed"), error);
         return;
     }
@@ -1940,6 +2197,10 @@ void MainWindow::configureCwKeyer()
                       static_cast<int>(config.radio.transport));
     settings.setValue(QStringLiteral("cw/hamlib/devicePath"), config.radio.devicePath);
     settings.setValue(QStringLiteral("cw/hamlib/baudRate"), config.radio.baudRate);
+    settings.setValue(QStringLiteral("cw/hamlib/rtsState"),
+                      static_cast<int>(config.radio.rtsState));
+    settings.setValue(QStringLiteral("cw/hamlib/dtrState"),
+                      static_cast<int>(config.radio.dtrState));
     settings.setValue(QStringLiteral("cw/hamlib/host"), config.radio.host);
     settings.setValue(QStringLiteral("cw/hamlib/port"), config.radio.port);
     m_cwWpmSpin->setValue(config.wpm);
@@ -1975,6 +2236,17 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
         return false;
     }
     context = qBound(0, context, 1);
+    const int transmitVfo = qBound(0, m_radioSnapshots[radio].focusVfo, 1);
+    const CwKeyerType keyerType = static_cast<CwKeyerType>(
+        QSettings().value(QStringLiteral("cw/type"),
+                          static_cast<int>(CwKeyerType::Mock)).toInt());
+    if (transmitVfo == 1 && keyerType == CwKeyerType::Cwdaemon) {
+        if (problem != nullptr) {
+            *problem = tr("cwdaemon cannot select a transmit VFO. Select VFO A or use "
+                          "a Hamlib keyer for VFO B transmission.");
+        }
+        return false;
+    }
     QStringList sentValues;
     if (const ContestDefinition *definition = activeDefinition()) {
         const int nextSerial = ContestEngine().nextSerialNumber(*definition, m_logQsos);
@@ -2015,16 +2287,24 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
         }
         return false;
     }
-    m_cwKeyerController.enqueueMessage(message);
+    m_cwKeyerController.enqueueMessage(message, transmitVfo);
     return true;
 }
 
 void MainWindow::sendFunctionKey(int index)
 {
-    if (index < 0 || index >= 8) {
-        return;
+    if (index != 0) {
+        stopAutoCq();
     }
-    const int context = currentEntryContext();
+    sendFunctionKeyForContext(index, currentEntryContext());
+}
+
+bool MainWindow::sendFunctionKeyForContext(int index, int context)
+{
+    if (index < 0 || index >= 8) {
+        return false;
+    }
+    context = qBound(0, context, 1);
     const QString mode = m_modeSelectors[context]->currentText().trimmed().toUpper();
     const QString label = functionKeyLabel(index);
     if (mode != QStringLiteral("CW")) {
@@ -2032,15 +2312,117 @@ void MainWindow::sendFunctionKey(int index)
             tr("F%1 %2: function-key messages are sent in CW only (entry mode is %3)")
                 .arg(index + 1).arg(label, mode.isEmpty() ? tr("unset") : mode),
             true);
-        return;
+        return false;
     }
     QString problem;
     if (!sendCwTemplate(functionKeyText(index), context, &problem)) {
         showOperatorMessage(tr("F%1 %2 not sent: %3").arg(index + 1).arg(label, problem),
                             true);
-        return;
+        return false;
     }
     statusBar()->showMessage(tr("F%1 %2 sent").arg(index + 1).arg(label), 2000);
+    return true;
+}
+
+void MainWindow::handleEntryEnter(int vfo, bool callsignField)
+{
+    vfo = qBound(0, vfo, 1);
+    const bool esmEnabled = m_esmAction->isChecked()
+        && m_modeSelectors[vfo]->currentText().compare(
+               QStringLiteral("CW"), Qt::CaseInsensitive) == 0;
+    if (!esmEnabled) {
+        logQsoForVfo(vfo);
+        return;
+    }
+
+    stopAutoCq();
+    if (callsignField) {
+        if (m_callsignEdits[vfo]->text().trimmed().isEmpty()) {
+            return;
+        }
+        if (!sendFunctionKeyForContext(4, vfo)) {
+            return;
+        }
+        const ContestDefinition *definition = activeDefinition();
+        if (definition == nullptr) {
+            return;
+        }
+        for (const ExchangeFieldDefinition &field : definition->receivedExchange) {
+            if (QLineEdit *edit = m_exchangeEdits[vfo].value(field.name, nullptr)) {
+                edit->setFocus(Qt::TabFocusReason);
+                edit->selectAll();
+                return;
+            }
+        }
+        return;
+    }
+
+    if (m_callsignEdits[vfo]->text().trimmed().isEmpty()) {
+        logQsoForVfo(vfo);
+        return;
+    }
+    logQsoForVfo(vfo);
+    if (m_callsignEdits[vfo]->text().isEmpty()) {
+        sendFunctionKeyForContext(2, vfo);
+    }
+}
+
+void MainWindow::setRunMode(int mode)
+{
+    mode = qBound(0, mode, 1);
+    QSettings().setValue(QStringLiteral("operating/runMode"), mode);
+    {
+        const QSignalBlocker blocker(m_runModeSelector);
+        m_runModeSelector->setCurrentIndex(m_runModeSelector->findData(mode));
+    }
+    const QString actionName = mode == 0 ? QStringLiteral("runModeAction")
+                                         : QStringLiteral("searchAndPounceAction");
+    if (QAction *action = findChild<QAction *>(actionName)) {
+        action->setChecked(true);
+    }
+    if (mode != 0) {
+        stopAutoCq();
+    }
+}
+
+void MainWindow::setAutoCqEnabled(bool enabled)
+{
+    if (!enabled) {
+        m_autoCqEnabled = false;
+        m_autoCqTimer->stop();
+        return;
+    }
+    const int context = currentEntryContext();
+    if (m_runModeSelector->currentData().toInt() != 0
+        || m_modeSelectors[context]->currentText().compare(
+               QStringLiteral("CW"), Qt::CaseInsensitive) != 0
+        || !m_callsignEdits[context]->text().trimmed().isEmpty()
+        || m_cwStatus.state != ConnectionState::Connected
+        || m_cwConfiguredRadio != m_cwRadioSelector->currentData().toInt()) {
+        showOperatorMessage(
+            tr("Auto CQ requires Run mode, CW, an empty callsign field, and a ready keyer "
+               "configured for the selected radio."),
+            true);
+        const QSignalBlocker blocker(m_autoCqAction);
+        m_autoCqAction->setChecked(false);
+        m_autoCqEnabled = false;
+        return;
+    }
+    m_autoCqEnabled = true;
+    if (!sendFunctionKeyForContext(0, context)) {
+        stopAutoCq();
+    }
+}
+
+void MainWindow::stopAutoCq()
+{
+    if (!m_autoCqEnabled && !m_autoCqAction->isChecked()) {
+        return;
+    }
+    m_autoCqEnabled = false;
+    m_autoCqTimer->stop();
+    const QSignalBlocker blocker(m_autoCqAction);
+    m_autoCqAction->setChecked(false);
 }
 
 void MainWindow::editFunctionKey(int index)
@@ -2070,6 +2452,83 @@ void MainWindow::editFunctionKey(int index)
     updateFunctionKeyButtons();
 }
 
+void MainWindow::configureFunctionKeys()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("CW function key messages"));
+    dialog.setMinimumWidth(760);
+
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *help = new QLabel(
+        tr("Define the label and CW message for each key. Supported macros: "
+           "{CALL}, {MYCALL}, {SENT}, and sent exchange fields such as {SERIAL}."),
+        &dialog);
+    help->setWordWrap(true);
+    layout->addWidget(help);
+
+    auto *grid = new QGridLayout;
+    grid->addWidget(new QLabel(tr("Key"), &dialog), 0, 0);
+    grid->addWidget(new QLabel(tr("Button label"), &dialog), 0, 1);
+    grid->addWidget(new QLabel(tr("CW message"), &dialog), 0, 2);
+
+    QLineEdit *labels[8]{};
+    QPlainTextEdit *messages[8]{};
+    for (int key = 0; key < 8; ++key) {
+        auto *keyLabel = new QLabel(QStringLiteral("F%1").arg(key + 1), &dialog);
+        labels[key] = new QLineEdit(functionKeyLabel(key), &dialog);
+        labels[key]->setObjectName(QStringLiteral("functionKeyLabel%1").arg(key + 1));
+        messages[key] = new QPlainTextEdit(functionKeyText(key), &dialog);
+        messages[key]->setObjectName(QStringLiteral("functionKeyMessage%1").arg(key + 1));
+        messages[key]->setTabChangesFocus(true);
+        messages[key]->setFixedHeight(48);
+        grid->addWidget(keyLabel, key + 1, 0);
+        grid->addWidget(labels[key], key + 1, 1);
+        grid->addWidget(messages[key], key + 1, 2);
+    }
+    grid->setColumnStretch(2, 1);
+    layout->addLayout(grid);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    auto *resetButton = buttons->addButton(tr("Restore defaults"),
+                                           QDialogButtonBox::ResetRole);
+    connect(resetButton, &QPushButton::clicked, &dialog, [&] {
+        for (int key = 0; key < 8; ++key) {
+            labels[key]->setText(QString::fromLatin1(kFunctionKeyDefaults[key].label));
+            messages[key]->setPlainText(QString::fromLatin1(kFunctionKeyDefaults[key].text));
+        }
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        for (int key = 0; key < 8; ++key) {
+            if (labels[key]->text().trimmed().isEmpty()
+                || messages[key]->toPlainText().trimmed().isEmpty()) {
+                QMessageBox::warning(
+                    &dialog, tr("Invalid function key message"),
+                    tr("F%1 needs both a button label and a non-empty CW message.")
+                        .arg(key + 1));
+                return;
+            }
+        }
+
+        QSettings settings;
+        for (int key = 0; key < 8; ++key) {
+            const QString group =
+                QStringLiteral("cw/functionKeys/F%1/").arg(key + 1);
+            settings.setValue(group + QStringLiteral("label"),
+                              labels[key]->text().trimmed());
+            settings.setValue(group + QStringLiteral("text"),
+                              messages[key]->toPlainText().trimmed());
+        }
+        updateFunctionKeyButtons();
+        dialog.accept();
+    });
+    layout->addWidget(buttons);
+
+    dialog.resize(900, 620);
+    dialog.exec();
+}
+
 void MainWindow::updateFunctionKeyButtons()
 {
     for (int key = 0; key < 8; ++key) {
@@ -2085,6 +2544,7 @@ void MainWindow::updateFunctionKeyButtons()
 
 void MainWindow::abortCwTransmission()
 {
+    stopAutoCq();
     m_cwKeyerController.abortTransmission();
 }
 
@@ -2097,6 +2557,7 @@ void MainWindow::setCwWpm(int wpm)
 
 void MainWindow::updateCwStatus(const CwKeyerStatus &status)
 {
+    m_cwStatus = status;
     QString state;
     switch (status.state) {
     case ConnectionState::Disconnected: state = tr("Disconnected"); break;
@@ -2106,7 +2567,7 @@ void MainWindow::updateCwStatus(const CwKeyerStatus &status)
     case ConnectionState::Unsupported: state = tr("Unsupported"); break;
     }
     m_cwStatusLabel->setText(
-        tr("CW: %1 — %2 — %3 WPM — queue %4%5")
+        tr("CW: %1 — %2 — %3 WPM — queue %4%5%6")
             .arg(state,
                  status.message.isEmpty() ? tr("Idle") : status.message)
             .arg(status.wpm)
@@ -2115,6 +2576,9 @@ void MainWindow::updateCwStatus(const CwKeyerStatus &status)
                      ? QStringLiteral(" — %1").arg(status.completionTimedOut
                                                        ? tr("NO COMPLETION — queue stopped")
                                                        : status.pacing)
+                     : QString())
+            .arg(status.transmitting
+                     ? tr(" — TX VFO %1").arg(status.transmitVfo == 0 ? 'A' : 'B')
                      : QString()));
     m_cwStatusLabel->setToolTip(
         tr("Completion is confirmed when the keyer reports end of transmission "
@@ -2123,6 +2587,16 @@ void MainWindow::updateCwStatus(const CwKeyerStatus &status)
         status.state == ConnectionState::Error || status.completionTimedOut
             ? QStringLiteral("color: #c62828;")
             : QString());
+    if (!m_autoCqEnabled) {
+        return;
+    }
+    if (status.state != ConnectionState::Connected) {
+        stopAutoCq();
+    } else if (status.transmitting || status.queuedMessages > 0) {
+        m_autoCqTimer->stop();
+    } else if (!m_autoCqTimer->isActive()) {
+        m_autoCqTimer->start();
+    }
 }
 
 void MainWindow::setSo2vEnabled(bool enabled)
@@ -2232,6 +2706,7 @@ void MainWindow::focusVfo(int vfo)
 void MainWindow::selectContest(int index)
 {
     if (index < 0 || index >= m_contests.size()) {
+        applyActiveLogStation();
         m_activeContestLabel->setText(tr("No log is available."));
         rebuildQsoForm();
         refreshRecentQsos();
@@ -2242,6 +2717,7 @@ void MainWindow::selectContest(int index)
     const Contest &contest = m_contests.at(index);
     QSettings settings;
     settings.setValue(QStringLiteral("session/activeContestId"), contest.id);
+    applyActiveLogStation();
     const auto definition = m_definitions.constFind(contest.id);
     if (definition == m_definitions.cend()) {
         m_activeContestLabel->setText(
@@ -2353,11 +2829,161 @@ void MainWindow::selectContest(int index)
     statusBar()->showMessage(tr("Active log: %1").arg(contest.name), 3000);
 }
 
-void MainWindow::importContestDefinition(bool newLog)
+void MainWindow::createNewLog()
+{
+    QVector<NewLogContestOption> options;
+    QHash<QString, int> optionIndexById;
+    for (const Contest &contest : m_contests) {
+        const auto definition = m_definitions.constFind(contest.id);
+        if (definition == m_definitions.cend()) {
+            continue;
+        }
+        const QString id = definition->id.toUpper();
+        const bool templateRow = contest.code.compare(id, Qt::CaseInsensitive) == 0;
+        const auto existing = optionIndexById.constFind(id);
+        if (existing != optionIndexById.cend() && !templateRow) {
+            continue;
+        }
+        QString error;
+        const QString yaml = m_repository.contestDefinitionYaml(contest.id, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to load contest definition"), error);
+            return;
+        }
+        NewLogContestOption option{definition.value(), yaml, tr("installed")};
+        if (existing != optionIndexById.cend()) {
+            options[existing.value()] = std::move(option);
+        } else {
+            optionIndexById.insert(id, static_cast<int>(options.size()));
+            options.append(std::move(option));
+        }
+    }
+
+    NewLogDialog dialog(options, m_defaultStation, logNames(), this);
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedOption() == nullptr) {
+        return;
+    }
+    const NewLogContestOption selected = *dialog.selectedOption();
+    const Contest log = dialog.log();
+    QString error;
+    const qint64 newId =
+        m_repository.createContestLog(selected.definition, selected.yaml, log, &error);
+    if (newId <= 0) {
+        QMessageBox::critical(this, tr("Unable to create log"), error);
+        return;
+    }
+    saveSentExchangeValues(newId, dialog.sentExchange());
+    QSettings().setValue(QStringLiteral("session/activeContestId"), newId);
+    loadContests();
+    const int created = m_contestSelector->findData(newId);
+    if (created >= 0 && m_contestSelector->currentIndex() != created) {
+        m_contestSelector->setCurrentIndex(created);
+    }
+    statusBar()->showMessage(
+        tr("New log created: %1 (%2)").arg(log.name, log.stationCallsign), 5000);
+}
+
+void MainWindow::editLogProperties()
+{
+    const Contest *contest = activeContest();
+    if (contest == nullptr) {
+        QMessageBox::warning(this, tr("No log selected"),
+                             tr("Select a log before editing its properties."));
+        return;
+    }
+    NewLogContestOption option;
+    QMap<QString, QString> sentValues;
+    const auto definition = m_definitions.constFind(contest->id);
+    QSettings settings;
+    if (definition != m_definitions.cend()) {
+        option.definition = definition.value();
+        option.source = contest->code;
+        for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+            sentValues.insert(
+                field.name,
+                settings.value(QStringLiteral("contest/sentExchange/%1/%2/vfo0")
+                                   .arg(contest->id)
+                                   .arg(field.name),
+                               field.defaultValue).toString());
+        }
+    } else {
+        option.definition.id = contest->code;
+        option.definition.name = contest->name;
+        option.definition.description = contest->description;
+        option.source = contest->code;
+    }
+    Contest current = *contest;
+    if (current.stationCallsign.isEmpty()) {
+        current.stationCallsign = m_station.callsign;
+    }
+    NewLogDialog dialog(option, current, sentValues, logNames(contest->id), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    Contest updated = dialog.log();
+    updated.id = contest->id;
+    QString error;
+    if (!m_repository.updateContestLog(updated, &error)) {
+        QMessageBox::critical(this, tr("Unable to save log properties"), error);
+        return;
+    }
+    saveSentExchangeValues(updated.id, dialog.sentExchange());
+    loadContests();
+    statusBar()->showMessage(tr("Log properties saved: %1").arg(updated.name), 5000);
+}
+
+void MainWindow::saveSentExchangeValues(qint64 contestId,
+                                        const QMap<QString, QString> &values)
+{
+    QSettings settings;
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        for (int vfo = 0; vfo < 2; ++vfo) {
+            settings.setValue(QStringLiteral("contest/sentExchange/%1/%2/vfo%3")
+                                  .arg(contestId)
+                                  .arg(it.key())
+                                  .arg(vfo),
+                              it.value());
+        }
+    }
+}
+
+QStringList MainWindow::logNames(qint64 excludedId) const
+{
+    QStringList names;
+    for (const Contest &contest : m_contests) {
+        if (contest.id != excludedId) {
+            names.append(contest.name);
+        }
+    }
+    return names;
+}
+
+const Contest *MainWindow::activeContest() const
+{
+    if (m_contestSelector == nullptr || m_contestSelector->currentIndex() < 0) {
+        return nullptr;
+    }
+    const qint64 contestId = m_contestSelector->currentData().toLongLong();
+    const auto contest = std::find_if(
+        m_contests.cbegin(), m_contests.cend(),
+        [contestId](const Contest &candidate) { return candidate.id == contestId; });
+    return contest == m_contests.cend() ? nullptr : &*contest;
+}
+
+void MainWindow::applyActiveLogStation()
+{
+    m_station = m_defaultStation;
+    const Contest *contest = activeContest();
+    if (contest != nullptr && !contest->stationCallsign.isEmpty()) {
+        m_station.callsign = contest->stationCallsign;
+    }
+    updateStationLabel();
+}
+
+void MainWindow::importContestDefinition()
 {
     const QString filePath = QFileDialog::getOpenFileName(
-        this, newLog ? tr("New log: select contest definition")
-                     : tr("Import contest definition"), {},
+        this, tr("Import contest definition"), {},
         tr("Contest definitions (*.yaml *.yml);;All files (*)"));
     if (filePath.isEmpty()) {
         return;
@@ -2385,40 +3011,6 @@ void MainWindow::importContestDefinition(bool newLog)
         return;
     }
     const QString code = definition.id.toUpper();
-    if (newLog) {
-        QString suggested = definition.name;
-        const QVector<Contest> existingLogs = m_contests;
-        const auto nameTaken = [&existingLogs](const QString &candidate) {
-            return std::any_of(existingLogs.cbegin(), existingLogs.cend(),
-                               [&candidate](const Contest &contest) {
-                                   return contest.name.compare(
-                                       candidate, Qt::CaseInsensitive) == 0;
-                               });
-        };
-        for (int number = 2; nameTaken(suggested); ++number) {
-            suggested = QStringLiteral("%1 (%2)").arg(definition.name).arg(number);
-        }
-        bool accepted = false;
-        const QString logName = QInputDialog::getText(
-            this, tr("New log"), tr("Log name:"), QLineEdit::Normal, suggested,
-            &accepted).trimmed();
-        if (!accepted || logName.isEmpty()) {
-            return;
-        }
-        const qint64 newId =
-            m_repository.createContestLog(definition, yaml, logName, &error);
-        if (newId <= 0) {
-            QMessageBox::critical(this, tr("Unable to create log"), error);
-            return;
-        }
-        loadContests();
-        const int created = m_contestSelector->findData(newId);
-        if (created >= 0) {
-            m_contestSelector->setCurrentIndex(created);
-        }
-        statusBar()->showMessage(tr("New log created: %1").arg(logName), 5000);
-        return;
-    }
     if (installedCodes.contains(code)
         && QMessageBox::question(
                this, tr("Replace contest definition?"),
@@ -2925,6 +3517,9 @@ void MainWindow::loadBuiltInDefinitions()
             QMessageBox::critical(this, tr("Invalid built-in definition"), error);
             continue;
         }
+        if (!definition.cabrilloContest.isEmpty()) {
+            m_builtInCabrilloContests.insert(definition.id, definition.cabrilloContest);
+        }
         if (installedCodes.contains(definition.id.toUpper())) {
             continue;
         }
@@ -2938,11 +3533,20 @@ void MainWindow::loadOperator()
 {
     QSettings settings;
     settings.beginGroup(QStringLiteral("station"));
-    m_station.callsign = settings.value(QStringLiteral("callsign")).toString();
-    m_station.operatorName = settings.value(QStringLiteral("operatorName")).toString();
-    m_station.grid = settings.value(QStringLiteral("grid")).toString();
-    m_station.powerClass = settings.value(QStringLiteral("powerClass")).toString();
+    m_defaultStation.callsign = settings.value(QStringLiteral("callsign")).toString();
+    m_defaultStation.operatorName =
+        settings.value(QStringLiteral("operatorName")).toString();
+    m_defaultStation.grid = settings.value(QStringLiteral("grid")).toString();
+    m_defaultStation.powerClass = settings.value(QStringLiteral("powerClass")).toString();
+    m_defaultStation.email = settings.value(QStringLiteral("email")).toString();
+    m_defaultStation.address = settings.value(QStringLiteral("address")).toString();
+    m_defaultStation.city = settings.value(QStringLiteral("city")).toString();
+    m_defaultStation.stateProvince =
+        settings.value(QStringLiteral("stateProvince")).toString();
+    m_defaultStation.postalCode = settings.value(QStringLiteral("postalCode")).toString();
+    m_defaultStation.country = settings.value(QStringLiteral("country")).toString();
     settings.endGroup();
+    m_station = m_defaultStation;
 }
 
 void MainWindow::loadContests()
@@ -3123,7 +3727,7 @@ void MainWindow::rebuildQsoForm(int vfo)
             field.width > 0 && field.width <= 3 ? 0 : 1);
         m_exchangeEdits[vfo].insert(field.name, edit);
         connect(edit, &QLineEdit::returnPressed,
-                this, [this, vfo] { logQsoForVfo(vfo); });
+                this, [this, vfo] { handleEntryEnter(vfo, false); });
         connect(edit, &QLineEdit::textChanged,
                 this, [this, vfo] { updateDupeIndicatorForVfo(vfo); });
     }
@@ -4259,9 +4863,32 @@ void MainWindow::updateDupeIndicatorForVfo(int vfo)
 void MainWindow::updateRadioSnapshotForRadio(int radio, const RadioSnapshot &snapshot)
 {
     radio = qBound(0, radio, 1);
-    const qint64 previousFrequency = m_radioSnapshots[radio].frequencyHz;
+    const RadioSnapshot previousSnapshot = m_radioSnapshots[radio];
     m_radioSnapshots[radio] = snapshot;
     m_radioSnapshotTimes[radio] = QDateTime::currentDateTimeUtc();
+    bool frequencyChanged = false;
+    if (previousSnapshot.state == ConnectionState::Connected
+        && snapshot.state == ConnectionState::Connected) {
+        if (!previousSnapshot.vfos.isEmpty() && !snapshot.vfos.isEmpty()) {
+            for (const Vfo &vfo : snapshot.vfos) {
+                const auto previousVfo = std::find_if(
+                    previousSnapshot.vfos.cbegin(), previousSnapshot.vfos.cend(),
+                    [&vfo](const Vfo &candidate) { return candidate.number == vfo.number; });
+                if (previousVfo != previousSnapshot.vfos.cend()
+                    && previousVfo->frequencyHz > 0 && vfo.frequencyHz > 0
+                    && previousVfo->frequencyHz != vfo.frequencyHz) {
+                    frequencyChanged = true;
+                    break;
+                }
+            }
+        } else if (previousSnapshot.focusVfo == snapshot.focusVfo
+                   && previousSnapshot.frequencyHz > 0 && snapshot.frequencyHz > 0) {
+            frequencyChanged = previousSnapshot.frequencyHz != snapshot.frequencyHz;
+        }
+    }
+    if (frequencyChanged && m_runModeSelector->currentData().toInt() == 0) {
+        setRunMode(1);
+    }
     if (snapshot.state != ConnectionState::Connected) {
         m_lastRadioModes[0].clear();
         m_lastRadioModes[1].clear();
@@ -4354,7 +4981,7 @@ void MainWindow::updateRadioSnapshotForRadio(int radio, const RadioSnapshot &sna
             ? QStringLiteral("color: #c62828;")
             : QString());
     updateEntryHeaders();
-    if (previousFrequency != snapshot.frequencyHz) {
+    if (previousSnapshot.frequencyHz != snapshot.frequencyHz) {
         refreshBandmap();
     }
 }
@@ -4377,6 +5004,15 @@ RadioConfig MainWindow::radioConfigFromSettings(int radio) const
     config.host = settings.value(QStringLiteral("host"), config.host).toString();
     config.port = settings.value(QStringLiteral("port"), config.port).toInt();
     config.baudRate = settings.value(QStringLiteral("baudRate"), 9600).toInt();
+    config.rtsState = static_cast<SerialControlState>(
+        settings.value(QStringLiteral("rtsState"),
+                       static_cast<int>(config.rtsState)).toInt());
+    config.dtrState = static_cast<SerialControlState>(
+        settings.value(QStringLiteral("dtrState"),
+                       static_cast<int>(config.dtrState)).toInt());
+    config.timeoutMs = settings.value(QStringLiteral("timeoutMs"), config.timeoutMs).toInt();
+    config.pollIntervalMs =
+        settings.value(QStringLiteral("pollIntervalMs"), config.pollIntervalMs).toInt();
     settings.endGroup();
     if (radio == 0 && !hasDedicatedSettings) {
         settings.beginGroup(QStringLiteral("radio"));
@@ -4391,6 +5027,16 @@ RadioConfig MainWindow::radioConfigFromSettings(int radio) const
         config.host = settings.value(QStringLiteral("host"), config.host).toString();
         config.port = settings.value(QStringLiteral("port"), config.port).toInt();
         config.baudRate = settings.value(QStringLiteral("baudRate"), 9600).toInt();
+        config.rtsState = static_cast<SerialControlState>(
+            settings.value(QStringLiteral("rtsState"),
+                           static_cast<int>(config.rtsState)).toInt());
+        config.dtrState = static_cast<SerialControlState>(
+            settings.value(QStringLiteral("dtrState"),
+                           static_cast<int>(config.dtrState)).toInt());
+        config.timeoutMs =
+            settings.value(QStringLiteral("timeoutMs"), config.timeoutMs).toInt();
+        config.pollIntervalMs =
+            settings.value(QStringLiteral("pollIntervalMs"), config.pollIntervalMs).toInt();
         settings.endGroup();
     }
     return config;
@@ -4408,6 +5054,10 @@ void MainWindow::saveRadioConfig(int radio, const RadioConfig &config)
     settings.setValue(QStringLiteral("host"), config.host);
     settings.setValue(QStringLiteral("port"), config.port);
     settings.setValue(QStringLiteral("baudRate"), config.baudRate);
+    settings.setValue(QStringLiteral("rtsState"), static_cast<int>(config.rtsState));
+    settings.setValue(QStringLiteral("dtrState"), static_cast<int>(config.dtrState));
+    settings.setValue(QStringLiteral("timeoutMs"), config.timeoutMs);
+    settings.setValue(QStringLiteral("pollIntervalMs"), config.pollIntervalMs);
     settings.endGroup();
 }
 

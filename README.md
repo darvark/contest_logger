@@ -6,6 +6,9 @@ operator settings, YAML contest definitions, exchange validation, dupe checks,
 serial numbering, QSO points, multiplier tracking, live QSO entry, and
 asynchronous CAT radio monitoring.
 
+**User guide (Polish, with screenshots, configuration reference, keyboard
+shortcuts and known limitations): [docs/USER_GUIDE.md](./docs/USER_GUIDE.md).**
+
 ## Requirements
 
 - CMake 3.21 or newer
@@ -102,8 +105,8 @@ per contest and entry context. Standard RST defaults follow the selected mode
 
 ## Callsign support data
 
-Use **File > Import support data** to load call-history CSV/TXT, `master.cpy`,
-and standard `wl_cty.dat`. Imports are validated, file paths are saved in
+Use **File > Support data** to load call-history CSV/TXT, `master.cpy`,
+and standard `wl_cty.dat` (or download Master.SCP / wl_cty.dat). Imports are validated, file paths are saved in
 application settings, and the files are reloaded at startup. Call-history and
 master callsigns feed the **Check partial** window (there is no completion
 popup in the entry line) and call history suggests matching exchange fields.
@@ -127,6 +130,19 @@ are bundled into the application and installed automatically when missing.
 Use **Contest > Import YAML definition...** to add another definition;
 selecting a contest previews its bands, modes, exchanges, points, serial start,
 multipliers, and duplicate key.
+
+**File > New log...** (Ctrl+N) opens a DXLog-style window: pick the contest
+from the searchable list of installed definitions (or **Import YAML...**),
+enter the station callsign, operators, club, location, soapbox, start date and log name
+(suggested as `CALL Contest YEAR`), choose the Cabrillo categories
+(operator, assisted, band, mode, power, station, transmitter, time, overlay)
+and fill the sent exchange. The log keeps its own callsign, which overrides
+the global station callsign while the log is active. **File > Log
+properties...** edits the same data for the active log. On export the full Cabrillo 3.0 header is filled in: the official
+contest ID (`cabrillo: {contest: ...}` in the definition), log categories
+(missing ones are derived from the QSOs and station power), claimed score,
+CREATED-BY, and name/e-mail/address/grid from **Operator and station**
+settings.
 
 ## Current UI and tests
 
@@ -159,8 +175,9 @@ points/exchange text are recalculated. QSO exchange fields are retained as
 structured maps in SQLite; older text-only exchanges are migrated.
 
 Keyboard: **F1–F8** send the CW messages of the focused entry panel (CW mode
-only; edit them under **Operating > Edit function key**), **Esc** or
-**Ctrl+Esc** aborts CW, **Alt+W** wipes the entry, and **Ctrl+Tab** switches
+only; configure them under **Options > CW function key messages...** or edit
+one key under **Operating > Edit function key message**), **Esc** or
+**Ctrl+Esc** aborts CW, **Ctrl+W** wipes the entry, and **Ctrl+Tab** switches
 between entry panels A/B.
 
 Radio CAT settings support a Hamlib model ID, serial device and baud rate, or a
@@ -253,7 +270,9 @@ beside the restored copy. See [docs/BUILD_AND_RELEASE.md](./docs/BUILD_AND_RELEA
 for export limitations, platform build/package instructions, Hamlib setup,
 YAML contest schema, and the hardware integration test matrix.
 
-GitHub Actions builds and tests Linux and Windows profiles and publishes
-platform archives. Windows CI disables Hamlib; packaging Hamlib's Windows
-runtime and all hardware-specific testing require a target setup and are
-documented separately.
+Use `tools/package-windows.ps1` to build and package a Windows release with
+Hamlib; provide a Windows Hamlib package with headers, DLL, and `.def` file.
+The script creates the MSVC import library, installs `yaml-cpp` via vcpkg,
+requires Hamlib at CMake configure time, and verifies that the runtime DLL is
+included. Actual COM-port/radio behavior still requires testing with target
+hardware, as documented separately.

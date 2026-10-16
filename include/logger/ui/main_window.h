@@ -46,6 +46,7 @@ protected:
 
 private slots:
     void configureOperator();
+    void configureFunctionKeys();
     void configureRadio();
     void configureRadioB();
     void exportCabrillo();
@@ -54,7 +55,9 @@ private slots:
     void configureDxCluster();
     void configureCwKeyer();
     void selectContest(int index);
-    void importContestDefinition(bool newLog = false);
+    void createNewLog();
+    void editLogProperties();
+    void importContestDefinition();
     void importCallHistory();
     void importMasterCpy();
     void importCtyDat();
@@ -71,6 +74,10 @@ private slots:
     void activateSpotId(qint64 spotId);
     void queueCwMessage();
     void abortCwTransmission();
+    void handleEntryEnter(int vfo, bool callsignField);
+    void setRunMode(int mode);
+    void setAutoCqEnabled(bool enabled);
+    void stopAutoCq();
     void setCwWpm(int wpm);
     void updateCwStatus(const logger::CwKeyerStatus &status);
     void setSo2vEnabled(bool enabled);
@@ -84,6 +91,11 @@ private:
     void loadBuiltInDefinitions();
     void loadOperator();
     void loadContests();
+    const Contest *activeContest() const;
+    void applyActiveLogStation();
+    QStringList logNames(qint64 excludedId = 0) const;
+    void saveSentExchangeValues(qint64 contestId,
+                                const QMap<QString, QString> &values);
     void updateStationLabel();
     void rebuildQsoForm();
     void rebuildQsoForm(int vfo);
@@ -114,6 +126,7 @@ private:
     void updateEntryHeaders();
     void showOperatorMessage(const QString &message, bool alert = false);
     bool sendCwTemplate(QString message, int context, QString *problem);
+    bool sendFunctionKeyForContext(int index, int context);
     void sendFunctionKey(int index);
     void editFunctionKey(int index);
     void updateFunctionKeyButtons();
@@ -126,6 +139,9 @@ private:
     RadioController m_radioControllers[2];
     DxClusterController m_dxClusterController;
     CwKeyerController m_cwKeyerController;
+    // Global station settings; m_station is the effective station of the active log.
+    Station m_defaultStation;
+    QHash<QString, QString> m_builtInCabrilloContests;
     Station m_station;
     QVector<Contest> m_contests;
     QHash<qint64, ContestDefinition> m_definitions;
@@ -133,6 +149,7 @@ private:
     QCheckBox *m_so2vToggle = nullptr;
     QCheckBox *m_so2rToggle = nullptr;
     QComboBox *m_activeRadioSelector = nullptr;
+    QComboBox *m_runModeSelector = nullptr;
     QLabel *m_stationLabel = nullptr;
     QLabel *m_activeContestLabel = nullptr;
     QLabel *m_radioLabel = nullptr;
@@ -155,7 +172,12 @@ private:
     QPushButton *m_functionKeyButtons[8]{};
     QTimer *m_clockTimer = nullptr;
     QTimer *m_messageTimer = nullptr;
+    QTimer *m_autoCqTimer = nullptr;
     QAction *m_functionKeyActions[8]{};
+    QAction *m_esmAction = nullptr;
+    QAction *m_autoCqAction = nullptr;
+    CwKeyerStatus m_cwStatus;
+    bool m_autoCqEnabled = false;
     qint64 m_scoreTotal = 0;
     QTableWidget *m_recentQsos = nullptr;
     QVector<Qso> m_logQsos;

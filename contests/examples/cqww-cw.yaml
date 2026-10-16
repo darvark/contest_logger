@@ -2,10 +2,16 @@ schema_version: 1
 id: cqww-cw
 name: CQ WW DX Contest — CW
 description: >-
-  Starter CW exchange profile. Enter the station CQ zone in Sent exchange;
-  official DXCC scoring is not inferred automatically.
+  2026 rules: https://cqww.com/rules/. Exchange is RST plus CQ Zone. QSO points
+  are 3 across continents, 1 on the same continent in different countries, 2
+  between different countries in North America, and 0 within the same country.
+  Both CQ Zone and country are multipliers per band. This profile tracks zones;
+  country multipliers are not supported (a callsign prefix is not a country).
+  QSO-point rules need both stations' locations and cannot be fully represented
+  by the current schema, so the configured base point is provisional.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW]
+cabrillo: {contest: CQ-WW-CW}
 exchange:
   sent:
     - {name: report, label: RST, type: rst, default: "599"}
@@ -17,5 +23,4 @@ scoring:
   qso_points: 1
   multipliers:
     - {type: exchange, field: zone, per_band: true}
-    - {type: prefix, per_band: true}
 dupe_key: [callsign, band, mode]

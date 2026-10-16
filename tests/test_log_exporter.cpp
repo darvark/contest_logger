@@ -70,6 +70,8 @@ class LogExporterTest final : public QObject {
 
 private slots:
     void writesValidatedCabrilloAtomically();
+    void writesCabrilloCategoriesFromLogProperties();
+    void writesCompleteCabrilloV3Header();
     void writesAdifWithByteLengths();
     void exportsLegacyExchangeStrings();
     void rejectsInvalidLogWithoutReplacingFile();
@@ -96,6 +98,113 @@ void LogExporterTest::writesValidatedCabrilloAtomically()
     QVERIFY(contents.contains(
         "QSO: 14025 CW 2026-10-15 1000 K1TEST 599 001 W1AW 599 027\n"));
     QVERIFY(contents.endsWith("END-OF-LOG:\n"));
+}
+
+void LogExporterTest::writesCabrilloCategoriesFromLogProperties()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("categories.log"));
+    logger::Station station;
+    station.callsign = QStringLiteral("K1TEST");
+    station.operatorName = QStringLiteral("Ignored Name");
+    logger::Contest log = contest();
+    log.properties = {
+        {QStringLiteral("CATEGORY-OPERATOR"), QStringLiteral("SINGLE-OP")},
+        {QStringLiteral("CATEGORY-POWER"), QStringLiteral("LOW")},
+        {QStringLiteral("OPERATORS"), QStringLiteral("k1test w1aw")}
+    };
+    const logger::ContestDefinition contestDefinition = definition();
+    QString error;
+    QVERIFY2(logger::LogExporter::writeFile(
+                 path, logger::LogExportFormat::Cabrillo, log,
+                 &contestDefinition, {qso()}, station, &error),
+             qPrintable(error));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray contents = file.readAll();
+    QVERIFY(contents.contains("CALLSIGN: K1TEST\n"));
+    QVERIFY(contents.contains("OPERATORS: K1TEST W1AW\n"));
+    QVERIFY(contents.contains("NAME: Ignored Name\n"));
+    QVERIFY(!contents.contains("OPERATORS: Ignored Name"));
+    QVERIFY(contents.contains("CATEGORY-OPERATOR: SINGLE-OP\n"));
+    QVERIFY(contents.contains("CATEGORY-POWER: LOW\n"));
+    QVERIFY(contents.contains("CATEGORY-BAND: 20M\n"));
+    QVERIFY(contents.contains("CATEGORY-MODE: CW\n"));
+}
+
+void LogExporterTest::writesCompleteCabrilloV3Header()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("header.log"));
+    logger::Station station;
+    station.callsign = QStringLiteral("SN6U");
+    station.operatorName = QStringLiteral("Jan Kowalski");
+    station.grid = QStringLiteral("jo81");
+    station.powerClass = QStringLiteral("low");
+    station.email = QStringLiteral("sn6u@example.com");
+    station.address = QStringLiteral("ul. Radiowa 1\nskr. 7");
+    station.city = QStringLiteral("Wroclaw");
+    station.postalCode = QStringLiteral("50-001");
+    station.country = QStringLiteral("Poland");
+    logger::Contest log = contest();
+    log.properties = {
+        {QStringLiteral("LOCATION"), QStringLiteral("DX")},
+        {QStringLiteral("CLUB"), QStringLiteral("SP DX Club")},
+        {QStringLiteral("SOAPBOX"), QStringLiteral("Great conditions")}
+    };
+    logger::ContestDefinition contestDefinition = definition();
+    contestDefinition.cabrilloContest = QStringLiteral("CQ-WPX-CW");
+    contestDefinition.bands.append(QStringLiteral("160m"));
+    logger::Qso later = qso();
+    later.id = 2;
+    later.callsign = QStringLiteral("K3LR");
+    later.band = QStringLiteral("160m");
+    later.frequencyHz = 0;
+    later.timestampUtc = later.timestampUtc.addSecs(60);
+    later.sentExchangeFields[QStringLiteral("serial")] = QStringLiteral("002");
+    logger::Qso earlier = qso();
+    earlier.id = 1;
+    logger::LogExportOptions options;
+    options.claimedScore = 1234;
+    options.createdBy = QStringLiteral("Contest Logger 9.9");
+    QString error;
+    QVERIFY2(logger::LogExporter::writeFile(
+                 path, logger::LogExportFormat::Cabrillo, log, &contestDefinition,
+                 {later, earlier}, station, options, &error),
+             qPrintable(error));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QString contents = QString::fromUtf8(file.readAll());
+    const QStringList expectedHeader{
+        QStringLiteral("START-OF-LOG: 3.0"),
+        QStringLiteral("CREATED-BY: Contest Logger 9.9"),
+        QStringLiteral("CONTEST: CQ-WPX-CW"),
+        QStringLiteral("CALLSIGN: SN6U"),
+        QStringLiteral("LOCATION: DX"),
+        QStringLiteral("CATEGORY-OPERATOR: SINGLE-OP"),
+        QStringLiteral("CATEGORY-ASSISTED: NON-ASSISTED"),
+        QStringLiteral("CATEGORY-BAND: ALL"),
+        QStringLiteral("CATEGORY-MODE: CW"),
+        QStringLiteral("CATEGORY-POWER: LOW"),
+        QStringLiteral("CATEGORY-TRANSMITTER: ONE"),
+        QStringLiteral("GRID-LOCATOR: JO81"),
+        QStringLiteral("CLAIMED-SCORE: 1234"),
+        QStringLiteral("CLUB: SP DX Club"),
+        QStringLiteral("NAME: Jan Kowalski"),
+        QStringLiteral("EMAIL: sn6u@example.com"),
+        QStringLiteral("ADDRESS: ul. Radiowa 1"),
+        QStringLiteral("ADDRESS: skr. 7"),
+        QStringLiteral("ADDRESS-CITY: Wroclaw"),
+        QStringLiteral("ADDRESS-POSTALCODE: 50-001"),
+        QStringLiteral("ADDRESS-COUNTRY: Poland"),
+        QStringLiteral("OPERATORS: SN6U"),
+        QStringLiteral("SOAPBOX: Great conditions"),
+        QStringLiteral("QSO: 14025 CW 2026-10-15 1000 SN6U 599 001 W1AW 599 027"),
+        QStringLiteral("QSO: 1800 CW 2026-10-15 1001 SN6U 599 002 K3LR 599 027"),
+        QStringLiteral("END-OF-LOG:")};
+    QCOMPARE(contents.split(QLatin1Char('\n'), Qt::SkipEmptyParts), expectedHeader);
 }
 
 void LogExporterTest::writesAdifWithByteLengths()

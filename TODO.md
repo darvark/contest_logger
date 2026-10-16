@@ -97,12 +97,15 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
   logowania Enterem, błędów walidacji, duplikatów, edycji i odświeżania widoku.
   *Zrobione:* `ui_tests` (Qt offscreen): Enter, błędy walidacji, dupe, edycja,
   odświeżanie tabeli i numeracja serial.
-- [ ] **Przetestować CAT na wielu platformach.** Test mock nie weryfikuje Hamlib,
-  urządzeń szeregowych ani TCP/rigctld. Dodać test integracyjny z Hamlib Dummy
-  lub rigctld, a w CI sprawdzać konfigurację/build/testy na Linuxie i Windowsie;
-  potwierdzić pakowanie Hamlib dla obu platform.
-  *Częściowo:* testy Hamlib Dummy i `rigctld` (CI instaluje hamlib-utils na
-  Linuxie). Pakowanie Hamlib dla Windows nadal wymaga weryfikacji.
+- [x] **Dodać programowe testy CAT bez sprzętu.** Testy integracyjne używają
+  Hamlib Dummy i lokalnego `rigctld`; CI buduje i testuje na Linuxie i Windowsie.
+- [x] **Dodać ścieżkę pakowania Windows z Hamlib.** `tools/package-windows.ps1`
+  przyjmuje pakiet Hamlib z nagłówkami/DLL/`.def`, tworzy import library MSVC,
+  instaluje `yaml-cpp` przez vcpkg, wymaga Hamlib przy konfiguracji CMake,
+  pakuje zależności runtime i sprawdza obecność DLL.
+- [ ] **Zweryfikować CAT i pakowanie Hamlib na docelowych platformach.**
+  Skrypt Windows nie został uruchomiony na docelowym Windowsie. Dummy/`rigctld`
+  nie sprawdzają fizycznych portów szeregowych ani firmware.
 - [x] **Przetestować integrację DX cluster z różnymi serwerami.** Testy parsera
   i reconnectu nie zastępują testu z lokalnym symulatorem Telnet obejmującego
   negocjację opcji, podzielone pakiety, prompt logowania, rozłączenie i ponowne
@@ -120,7 +123,8 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
 - [x] **CW keyer:** abstrakcja keyera, kolejka wiadomości, przerwanie nadawania
   i prędkość; Hamlib tylko dla obsługiwanych radii/backendów, z mockiem i
   alternatywnym providerem. Zaimplementowano Hamlib, cwdaemon/UDP i mock,
-  WPM oraz anulowanie kolejki.
+  WPM oraz anulowanie kolejki. Wiadomość wiąże się z jawnym VFO, Hamlib
+  otrzymuje A/B, a cwdaemon blokuje VFO B, którego nie potrafi wybrać.
 - [x] **SO2V:** model dwóch VFO, niezależne częstotliwości, dwa konteksty
   wprowadzania QSO, wybór RX focus oraz blokada aktywacji dla radia bez
   wykrytego dual-VFO. Mock CAT umożliwia testowanie bez sprzętu.
@@ -131,13 +135,14 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
   ograniczenia trybu zamiast sugerować pełne SO2V.
   *Zrobione:* `dualReceiveSupported`/`probeRadio()`; przy braku dual-RX SO2V jest
   dozwolone, ale oznaczone „SO2V, no dual RX” i z ostrzeżeniem.
-- [ ] **Zdefiniować trasowanie TX/keyera w SO2V.** RX focus wybiera kontekst
-  formularza, natomiast Hamlib CW używa `RIG_VFO_CURR` na osobnym połączeniu.
-  Określić, który VFO/radio nadaje, synchronizować go z keyerem lub pokazać
-  jednoznaczny TX focus; przetestować, że zmiana RX focus nie powoduje
-  niezamierzonego nadawania na niewłaściwym VFO.
-  *Częściowo:* nagłówek kontekstu pokazuje jawny „◀ TX” (fokus VFO = VFO
-  nadawczy). Potwierdzenie braku nadawania na niewłaściwym VFO wymaga sprzętu.
+- [x] **Wdrożyć programowe trasowanie TX/keyera w SO2V.** TX podąża za fokusem
+  RX; każda wiadomość kolejkowana jest powiązana z docelowym VFO, Hamlib
+  dostaje jawnie VFO A/B, a cwdaemon blokuje nadawanie na VFO B, którego jego
+  protokół nie potrafi wybrać. Nagłówek wskazuje aktywny TX; testy sprawdzają
+  wybór i zachowanie VFO w kolejce.
+- [ ] **Zweryfikować trasowanie TX/keyera w SO2V na sprzęcie.** Potwierdzić
+  rzeczywisty tor RF/PTT, brak nadawania na niezamierzonym VFO i zgodność
+  modeli; testy programowe nie zastępują tej weryfikacji.
 - [ ] **(wymaga sprzętu) Przeprowadzić testy sprzętowe i macierz modeli.** Potwierdzić SO2V,
   strojenie spota, logowanie z obu kontekstów i trasowanie CW na radiu
   referencyjnym z dual-RX; osobno sprawdzić radio z dwoma przełączanymi VFO,
@@ -162,12 +167,21 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
 - [x] **Układ operatorski inspirowany DXLog:** centralne formularze QSO,
   dolny dock logu, prawa zakładkowa przestrzeń bandmapy/CW/informacji contestu,
   menu Window do zarządzania panelami i zapamiętywanie geometrii/układu.
-- [ ] **(wymaga sprzętu) Walidacja sprzętowa/release:** sprawdzić serial, `rigctld`, suspend/resume
-  i pakiet Hamlib na fizycznych konfiguracjach Windows/Linux; obecne CI używa
-  mock/local-network tests, a Windows package nie zawiera Hamlib.
+- [ ] **(wymaga sprzętu) Walidacja sprzętowa/release:** sprawdzić serial,
+  `rigctld`, suspend/resume i pakiet Hamlib na fizycznych konfiguracjach
+  Windows/Linux; skrypt pakujący Hamlib dla Windows jest dodany, ale nie był
+  uruchamiany na docelowym systemie.
 
 ## Etap 9 — dodatki
 
+- [x] **Podstawowe narzędzia operatorskie Run/S&P, ESM i Auto CQ.** Zmiana
+  częstotliwości radia podczas Run przełącza tryb na Search & Pounce (również
+  w obrębie tego samego pasma); tryb można też wybrać z menu/paska i jest
+  zapamiętywany. ESM w CW
+  wysyła F5 po Enter w Call, a po poprawnym zapisie QSO wysyła F3. Auto CQ
+  powtarza F1 wyłącznie w trybie Run/CW i zatrzymuje się po wpisaniu znaku,
+  zmianie trybu/emisji, przerwaniu lub utracie keyera. Sekwencje ESM są
+  podstawowe i nie konfigurowalne per contest.
 - [x] **Nawigacja spotów:** Up/Down wybiera spot, Enter/przycisk stroi aktywne
   radio i kopiuje callsign; dwuklik pozostaje obsługiwany.
 - [x] **Pliki pomocnicze callsign:** import CSV/TXT call history, `master.cpy`
@@ -178,7 +192,16 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
 - [x] **Nawigacja wymiany:** Space przechodzi callsign → pola odbieranej wymiany
   → callsign; pola wymiany wysyłanej można edytować i są pamiętane per contest
   oraz kontekst wejściowy.
-- [ ] **Zweryfikować reguły contestów:** profile są startowe; rozbudować silnik
-  o warunkowe wymiany, punktację per kraj/pasmo i aktualne reguły sponsorów.
-  *Częściowo:* CTY jest używane do mnożników DXCC/stref/kontynentów; warunkowe
-  wymiany i punktacja per kraj/pasmo wymagają dalszej pracy z regulaminami.
+- [x] **Dodać deklaratywne reguły warunkowych wymian i punktacji.**
+  `required_when` warunkuje wymagalność odebranego pola, a
+  `scoring.qso_point_rules` ustala punkty według pasma, emisji, metadanych CTY
+  (DXCC/kraj, kontynent, strefy) i odebranych pól. Format jest opisany w
+  `docs/CONTEST_DEFINITIONS.md` i objęty testami.
+- [x] **Dopracować profile według wskazanych regulaminów.** Uzupełniono
+  wymiany, punkty ARRL 10 m, mnożniki CQ WPX i warunki wymian IARU; źródła oraz
+  ograniczenia punktacji są opisane w odpowiednich profilach. SPDX 2026 ma
+  osobne YAML dla stacji polskich i zagranicznych, punktację oraz mnożniki
+  per regulamin i jawne wskazanie potrzeby CTY dla DXCC.
+- [ ] **Dokończyć punktację i mnożniki reguł sponsorów.** Silnik musi umieć
+  porównywać lokalizacje obu korespondentów, liczyć DXCC/kraje i mnożniki
+  osobno dla emisji oraz obsługiwać alternatywne wymiany zależne od stacji.

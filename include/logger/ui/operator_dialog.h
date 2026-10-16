@@ -5,6 +5,7 @@
 #include <QDialog>
 
 class QLineEdit;
+class QPlainTextEdit;
 
 namespace logger {
 
@@ -20,6 +21,12 @@ private:
     QLineEdit *m_operatorName = nullptr;
     QLineEdit *m_grid = nullptr;
     QLineEdit *m_powerClass = nullptr;
+    QLineEdit *m_email = nullptr;
+    QPlainTextEdit *m_address = nullptr;
+    QLineEdit *m_city = nullptr;
+    QLineEdit *m_stateProvince = nullptr;
+    QLineEdit *m_postalCode = nullptr;
+    QLineEdit *m_country = nullptr;
 };
 
 } // namespace logger

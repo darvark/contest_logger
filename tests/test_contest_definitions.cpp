@@ -82,9 +82,12 @@ class ContestDefinitionTest final : public QObject {
 
 private slots:
     void loadsValidDefinition();
+    void loadsCabrilloContestName();
     void rejectsMalformedYamlWithLocation();
     void rejectsDuplicateExchangeFields();
     void loadsBundledExamples();
+    void loadsCtyMultiplierType();
+    void scoresSpdxProfiles();
     void rejectsInvalidReceivedExchange();
     void rejectsUndefinedReceivedExchangeFields();
     void detectsDuplicateCalls();
@@ -95,6 +98,8 @@ private slots:
     void generatesNextSerialFromStoredValues();
     void calculatesWpxPrefixes();
     void exposesCallsignValidation();
+    void validatesConditionalExchangeAndQsoPointRules();
+    void rejectsUnknownConditionalRuleFields();
 };
 
 void ContestDefinitionTest::loadsValidDefinition()
@@ -108,6 +113,30 @@ void ContestDefinitionTest::loadsValidDefinition()
     QCOMPARE(definition.serialStart, 7);
     QCOMPARE(definition.qsoPoints, 2);
     QCOMPARE(definition.multipliers.size(), 1);
+    QVERIFY(definition.cabrilloContest.isEmpty());
+}
+
+void ContestDefinitionTest::loadsCabrilloContestName()
+{
+    QString yaml = SerialContestYaml;
+    yaml.replace(QStringLiteral("modes: [CW]\n"),
+                 QStringLiteral("modes: [CW]\ncabrillo: {contest: cq-wpx-cw}\n"));
+    QCOMPARE(loadDefinition(yaml).cabrilloContest, QStringLiteral("CQ-WPX-CW"));
+
+    logger::ContestDefinition definition;
+    QString error;
+    QString invalid = SerialContestYaml;
+    invalid.replace(QStringLiteral("modes: [CW]\n"),
+                    QStringLiteral("modes: [CW]\ncabrillo: {contest: \"CQ WPX\"}\n"));
+    QVERIFY(!logger::ContestDefinitionLoader().loadText(
+        invalid, QStringLiteral("invalid.yaml"), definition, &error));
+    QVERIFY(error.contains(QStringLiteral("contest.cabrillo.contest")));
+    invalid = SerialContestYaml;
+    invalid.replace(QStringLiteral("modes: [CW]\n"),
+                    QStringLiteral("modes: [CW]\ncabrillo: {name: X}\n"));
+    QVERIFY(!logger::ContestDefinitionLoader().loadText(
+        invalid, QStringLiteral("invalid.yaml"), definition, &error));
+    QVERIFY(error.contains(QStringLiteral("contest.cabrillo.name")));
 }
 
 void ContestDefinitionTest::rejectsMalformedYamlWithLocation()
@@ -149,6 +178,7 @@ void ContestDefinitionTest::loadsBundledExamples()
         QStringLiteral("cqww-cw.yaml"), QStringLiteral("cqww-ssb.yaml"),
         QStringLiteral("cqwpx-cw.yaml"), QStringLiteral("cqwpx-ssb.yaml"),
         QStringLiteral("iaruhfc.yaml"), QStringLiteral("spdx.yaml"),
+        QStringLiteral("spdx-dx.yaml"),
         QStringLiteral("wag.yaml"), QStringLiteral("arrl-dx-cw.yaml"),
         QStringLiteral("arrl-dx-ssb.yaml"), QStringLiteral("arrl-dx-10m.yaml"),
         QStringLiteral("eudx.yaml"), QStringLiteral("euhfc.yaml")
@@ -166,7 +196,89 @@ void ContestDefinitionTest::loadsBundledExamples()
         QVERIFY(!definition.id.isEmpty());
         QVERIFY(!definition.sentExchange.isEmpty());
         QVERIFY(!definition.receivedExchange.isEmpty());
+        if (filename == QStringLiteral("cqwpx-cw.yaml")) {
+            QCOMPARE(definition.cabrilloContest, QStringLiteral("CQ-WPX-CW"));
+        }
     }
+}
+
+void ContestDefinitionTest::loadsCtyMultiplierType()
+{
+    QString yaml = GridContestYaml;
+    yaml.replace(QStringLiteral("    - type: prefix\n      per_band: false"),
+                 QStringLiteral("    - type: dxcc\n      per_band: true"));
+    const auto definition = loadDefinition(yaml);
+    logger::Qso qso;
+    qso.callsign = QStringLiteral("DL1ABC");
+    qso.band = QStringLiteral("20m");
+
+    const auto keys = logger::ContestEngine().multiplierKeys(
+        definition, qso, [](const logger::Qso &) {
+            return QMap<QString, QString>{{QStringLiteral("dxcc"),
+                                          QStringLiteral("Germany")}};
+        });
+    QVERIFY(keys.contains(QStringLiteral("dxcc:GERMANY@20m")));
+}
+
+void ContestDefinitionTest::scoresSpdxProfiles()
+{
+    const QString examplesDirectory = QStringLiteral(
+        CONTEST_LOGGER_TEST_SOURCE_DIR "/contests/examples");
+    logger::ContestDefinition polishProfile;
+    logger::ContestDefinition dxProfile;
+    QString error;
+    const logger::ContestDefinitionLoader loader;
+    QVERIFY2(loader.loadFile(examplesDirectory + QStringLiteral("/spdx.yaml"),
+                             polishProfile, &error),
+             qPrintable(error));
+    QVERIFY2(loader.loadFile(examplesDirectory + QStringLiteral("/spdx-dx.yaml"),
+                             dxProfile, &error),
+             qPrintable(error));
+
+    logger::ContestEvaluationContext context;
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("EU")},
+        {QStringLiteral("dxcc"), QStringLiteral("Germany")}
+    };
+    const auto euQso = logger::ContestEngine().evaluate(
+        polishProfile, QStringLiteral("DL1ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("serial"), QStringLiteral("123")}},
+        context, std::nullopt, {{QStringLiteral("province"), QStringLiteral("M")}});
+    QVERIFY2(euQso.valid, qPrintable(euQso.issues.isEmpty()
+                                         ? QString()
+                                         : euQso.issues.first().message));
+    QCOMPARE(euQso.points, 1);
+    QVERIFY(euQso.newMultiplierKeys.contains(
+        QStringLiteral("dxcc:GERMANY@20m")));
+
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("NA")},
+        {QStringLiteral("dxcc"), QStringLiteral("United States")}
+    };
+    const auto dxQso = logger::ContestEngine().evaluate(
+        polishProfile, QStringLiteral("K1ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("serial"), QStringLiteral("124")}},
+        context, std::nullopt, {{QStringLiteral("province"), QStringLiteral("M")}});
+    QVERIFY(dxQso.valid);
+    QCOMPARE(dxQso.points, 3);
+
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("country"), QStringLiteral("Poland")}
+    };
+    const auto spQso = logger::ContestEngine().evaluate(
+        dxProfile, QStringLiteral("SP9ABC"), QStringLiteral("40m"),
+        QStringLiteral("SSB"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("province"), QStringLiteral("M")}},
+        context);
+    QVERIFY(spQso.valid);
+    QCOMPARE(spQso.points, 3);
+    QVERIFY(spQso.newMultiplierKeys.contains(
+        QStringLiteral("exchange:province:M@40m")));
 }
 
 void ContestDefinitionTest::rejectsInvalidReceivedExchange()
@@ -415,6 +527,115 @@ void ContestDefinitionTest::exposesCallsignValidation()
 {
     QVERIFY(logger::ContestEngine::isValidCallsign(QStringLiteral(" k1abc/p ")));
     QVERIFY(!logger::ContestEngine::isValidCallsign(QStringLiteral("bad!")));
+}
+
+void ContestDefinitionTest::validatesConditionalExchangeAndQsoPointRules()
+{
+    const auto definition = loadDefinition(QStringLiteral(R"yaml(
+schema_version: 1
+id: conditional-scoring
+name: Conditional scoring
+bands: [20m, 40m]
+modes: [CW]
+exchange:
+  sent:
+    - {name: report, type: rst, default: "599"}
+  received:
+    - {name: report, type: rst}
+    - name: state
+      type: text
+      required: false
+      required_when:
+        continent: NA
+scoring:
+  qso_points: 1
+  qso_point_rules:
+    - points: 5
+      when:
+        continent: NA
+        band: 20m
+    - points: 3
+      when:
+        country: United States
+)yaml"));
+
+    logger::ContestEvaluationContext context;
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("NA")},
+        {QStringLiteral("dxcc"), QStringLiteral("United States")}
+    };
+    const auto missingRequiredField = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("W1AW"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")}}, context);
+    QVERIFY(!missingRequiredField.valid);
+    QVERIFY(std::any_of(
+        missingRequiredField.issues.cbegin(), missingRequiredField.issues.cend(),
+        [](const logger::ContestValidationIssue &issue) {
+            return issue.field == QStringLiteral("received.state");
+        }));
+
+    const auto twentyMeters = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("W1AW"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("state"), QStringLiteral("NY")}},
+        context);
+    QVERIFY(twentyMeters.valid);
+    QCOMPARE(twentyMeters.points, 5);
+
+    auto otherContinent = context;
+    otherContinent.resolvedMultiplierValues.insert(
+        QStringLiteral("continent"), QStringLiteral("EU"));
+    const auto fortyMeters = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("W1AW"), QStringLiteral("40m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")}},
+        otherContinent);
+    QVERIFY(fortyMeters.valid);
+    QCOMPARE(fortyMeters.points, 3);
+
+    logger::Qso qso;
+    qso.callsign = QStringLiteral("W1AW");
+    qso.band = QStringLiteral("20m");
+    qso.mode = QStringLiteral("CW");
+    qso.timestampUtc = QDateTime::fromSecsSinceEpoch(1).toUTC();
+    qso.receivedExchangeFields = {
+        {QStringLiteral("report"), QStringLiteral("599")},
+        {QStringLiteral("state"), QStringLiteral("NY")}
+    };
+    const auto score = logger::ContestEngine().score(
+        definition, {qso}, [&context](const logger::Qso &) {
+            return context.resolvedMultiplierValues;
+        });
+    QCOMPARE(score.totalPoints, 5);
+}
+
+void ContestDefinitionTest::rejectsUnknownConditionalRuleFields()
+{
+    const QString yaml = QStringLiteral(R"yaml(
+schema_version: 1
+id: invalid-condition
+name: Invalid condition
+bands: [20m]
+modes: [CW]
+exchange:
+  sent:
+    - {name: report, type: rst, default: "599"}
+  received:
+    - {name: report, type: rst}
+scoring:
+  qso_points: 1
+  qso_point_rules:
+    - points: 5
+      when:
+        dxcc_group: NA
+)yaml");
+    logger::ContestDefinition definition;
+    QString error;
+    QVERIFY(!logger::ContestDefinitionLoader().loadText(
+        yaml, QStringLiteral("invalid-condition.yaml"), definition, &error));
+    QVERIFY(error.contains(QStringLiteral("unsupported condition 'dxcc_group'")));
 }
 
 QTEST_GUILESS_MAIN(ContestDefinitionTest)

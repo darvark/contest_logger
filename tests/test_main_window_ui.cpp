@@ -1,16 +1,23 @@
 #include "logger/data/sqlite_repository.h"
 #include "logger/ui/main_window.h"
+#include "logger/ui/new_log_dialog.h"
 
 #include <QApplication>
 #include <QAction>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QDateEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEvent>
 #include <QFrame>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QSettings>
 #include <QSqlDatabase>
 #include <QTableWidget>
@@ -32,6 +39,13 @@ private slots:
     void cleanup();
     void contestDefinitionConstrainsBandAndModeSelectors();
     void connectionMenuReconnectsAndDisconnects();
+    void radioConfigDialogPersistsHamlibAndCatTimingOptions();
+    void cwKeyerDialogPersistsHamlibSerialControlOptions();
+    void functionKeyMessagesAreManuallyConfigurable();
+    void esmSendsCallAndLogsOnExchangeEnter();
+    void autoCqRequiresRunAndStopsWhenEnteringCallsign();
+    void frequencyChangeWithinBandSwitchesRunToSearchAndPounce();
+    void so2vCwTransmissionFollowsRxFocus();
     void bandmapSortAndKeyboardNavigation();
     void ctrlWipeClearsCallAndReceivedExchange();
     void supportDataDownloadActionsExist();
@@ -40,6 +54,8 @@ private slots:
     void duplicateIsRejected();
     void editDialogValidatesAndSaves();
     void serialFollowsStoredMaximum();
+    void newLogDialogRequiresCallsignAndContest();
+    void newLogActionCreatesLogWithStationCallsign();
 
 private:
     QLineEdit *callEdit() const;
@@ -197,6 +213,270 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
     disconnectCw->trigger();
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Disconnected")));
+}
+
+void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
+{
+    QAction *configureRadioB = nullptr;
+    for (QAction *action : m_window->findChildren<QAction *>()) {
+        if (action->text() == QStringLiteral("Radio B CAT settings...")) {
+            configureRadioB = action;
+            break;
+        }
+    }
+    QVERIFY(configureRadioB != nullptr);
+
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        dialogSeen = true;
+        auto *backend = dialog->findChild<QComboBox *>(QStringLiteral("radioBackend"));
+        auto *modelId = dialog->findChild<QSpinBox *>(QStringLiteral("radioHamlibModelId"));
+        auto *transport = dialog->findChild<QComboBox *>(QStringLiteral("radioTransport"));
+        auto *host = dialog->findChild<QLineEdit *>(QStringLiteral("radioTcpHost"));
+        auto *port = dialog->findChild<QSpinBox *>(QStringLiteral("radioTcpPort"));
+        auto *pollInterval =
+            dialog->findChild<QComboBox *>(QStringLiteral("radioPollInterval"));
+        auto *timeout = dialog->findChild<QSpinBox *>(QStringLiteral("radioTimeout"));
+        auto *rtsState = dialog->findChild<QComboBox *>(QStringLiteral("radioRtsState"));
+        auto *dtrState = dialog->findChild<QComboBox *>(QStringLiteral("radioDtrState"));
+        QVERIFY(backend != nullptr);
+        QVERIFY(modelId != nullptr);
+        QVERIFY(transport != nullptr);
+        QVERIFY(host != nullptr);
+        QVERIFY(port != nullptr);
+        QVERIFY(pollInterval != nullptr);
+        QVERIFY(timeout != nullptr);
+        QVERIFY(rtsState != nullptr);
+        QVERIFY(dtrState != nullptr);
+
+        backend->setCurrentIndex(backend->findData(static_cast<int>(RadioBackendType::Hamlib)));
+        modelId->setValue(3073);
+        QVERIFY(dialog->findChild<QGroupBox *>(QStringLiteral("radioSerialGroup"))->isVisible());
+        rtsState->setCurrentIndex(
+            rtsState->findData(static_cast<int>(SerialControlState::On)));
+        dtrState->setCurrentIndex(
+            dtrState->findData(static_cast<int>(SerialControlState::Off)));
+        transport->setCurrentIndex(
+            transport->findData(static_cast<int>(RadioTransport::Tcp)));
+        QVERIFY(!dialog->findChild<QGroupBox *>(QStringLiteral("radioSerialGroup"))->isVisible());
+        QVERIFY(dialog->findChild<QGroupBox *>(QStringLiteral("radioTcpGroup"))->isVisible());
+        host->setText(QStringLiteral("localhost"));
+        port->setValue(4533);
+        pollInterval->setCurrentIndex(pollInterval->findData(500));
+        timeout->setValue(4200);
+        dialog->findChild<QPushButton *>(QStringLiteral("radioSaveButton"))->click();
+    });
+    configureRadioB->trigger();
+    QVERIFY(dialogSeen);
+
+    QSettings settings;
+    QCOMPARE(settings.value(QStringLiteral("radio/B/backend")).toInt(),
+             static_cast<int>(RadioBackendType::Hamlib));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/modelId")).toInt(), 3073);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/transport")).toInt(),
+             static_cast<int>(RadioTransport::Tcp));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/host")).toString(),
+             QStringLiteral("localhost"));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/port")).toInt(), 4533);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/pollIntervalMs")).toInt(), 500);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/timeoutMs")).toInt(), 4200);
+    QCOMPARE(settings.value(QStringLiteral("radio/B/rtsState")).toInt(),
+             static_cast<int>(SerialControlState::On));
+    QCOMPARE(settings.value(QStringLiteral("radio/B/dtrState")).toInt(),
+             static_cast<int>(SerialControlState::Off));
+    QVERIFY(!settings.contains(QStringLiteral("radio/A/modelId")));
+}
+
+void MainWindowUiTest::cwKeyerDialogPersistsHamlibSerialControlOptions()
+{
+    QAction *configureCw = nullptr;
+    for (QAction *action : m_window->findChildren<QAction *>()) {
+        if (action->text() == QStringLiteral("CW keyer...")) {
+            configureCw = action;
+            break;
+        }
+    }
+    QVERIFY(configureCw != nullptr);
+
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        dialogSeen = true;
+        auto *type = dialog->findChild<QComboBox *>(QStringLiteral("cwKeyerProvider"));
+        auto *transport =
+            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibTransport"));
+        auto *rtsState =
+            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibRtsState"));
+        auto *dtrState =
+            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibDtrState"));
+        QVERIFY(type != nullptr);
+        QVERIFY(transport != nullptr);
+        QVERIFY(rtsState != nullptr);
+        QVERIFY(dtrState != nullptr);
+        type->setCurrentIndex(type->findData(static_cast<int>(CwKeyerType::Hamlib)));
+        transport->setCurrentIndex(
+            transport->findData(static_cast<int>(RadioTransport::Serial)));
+        QVERIFY(rtsState->isVisible());
+        QVERIFY(dtrState->isVisible());
+        rtsState->setCurrentIndex(
+            rtsState->findData(static_cast<int>(SerialControlState::Off)));
+        dtrState->setCurrentIndex(
+            dtrState->findData(static_cast<int>(SerialControlState::On)));
+        type->setCurrentIndex(type->findData(static_cast<int>(CwKeyerType::Mock)));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+    });
+    configureCw->trigger();
+    QVERIFY(dialogSeen);
+
+    QSettings settings;
+    QCOMPARE(settings.value(QStringLiteral("cw/hamlib/rtsState")).toInt(),
+             static_cast<int>(SerialControlState::Off));
+    QCOMPARE(settings.value(QStringLiteral("cw/hamlib/dtrState")).toInt(),
+             static_cast<int>(SerialControlState::On));
+    QCOMPARE(settings.value(QStringLiteral("cw/type")).toInt(),
+             static_cast<int>(CwKeyerType::Mock));
+}
+
+void MainWindowUiTest::functionKeyMessagesAreManuallyConfigurable()
+{
+    auto *configure = m_window->findChild<QAction *>(
+        QStringLiteral("configureFunctionKeysAction"));
+    QVERIFY(configure != nullptr);
+
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        dialogSeen = true;
+        auto *label = dialog->findChild<QLineEdit *>(
+            QStringLiteral("functionKeyLabel2"));
+        auto *text = dialog->findChild<QPlainTextEdit *>(
+            QStringLiteral("functionKeyMessage2"));
+        QVERIFY(label != nullptr);
+        QVERIFY(text != nullptr);
+        label->setText(QStringLiteral("Exchange"));
+        text->setPlainText(QStringLiteral("{CALL} {MYCALL}\n{SERIAL}"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    configure->trigger();
+    QVERIFY(dialogSeen);
+
+    QSettings settings;
+    QCOMPARE(settings.value(QStringLiteral("cw/functionKeys/F2/label")).toString(),
+             QStringLiteral("Exchange"));
+    QCOMPARE(settings.value(QStringLiteral("cw/functionKeys/F2/text")).toString(),
+             QStringLiteral("{CALL} {MYCALL}\n{SERIAL}"));
+    auto *button = m_window->findChild<QPushButton *>(QStringLiteral("functionKey2"));
+    QVERIFY(button != nullptr);
+    QCOMPARE(button->text(), QStringLiteral("F2  Exchange"));
+    QVERIFY(button->toolTip().contains(QStringLiteral("{CALL} {MYCALL}")));
+}
+
+void MainWindowUiTest::esmSendsCallAndLogsOnExchangeEnter()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
+    settings.setValue(QStringLiteral("cw/radioIndex"), 0);
+    m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
+    auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
+
+    auto *esm = m_window->findChild<QAction *>(QStringLiteral("esmAction"));
+    QVERIFY(esm != nullptr);
+    esm->setChecked(true);
+
+    QLineEdit *callsign = callEdit();
+    callsign->setText(QStringLiteral("W1AW"));
+    QTest::keyClick(callsign, Qt::Key_Return);
+    auto *serial = exchangeEdit(QStringLiteral("serial"));
+    QVERIFY(serial != nullptr);
+    QTRY_VERIFY(serial->hasFocus());
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("Sending CW.")));
+
+    serial->setText(QStringLiteral("27"));
+    QTest::keyClick(serial, Qt::Key_Return);
+    QTRY_COMPARE(table()->rowCount(), 1);
+    QVERIFY(callsign->text().isEmpty());
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("queue 1")));
+}
+
+void MainWindowUiTest::autoCqRequiresRunAndStopsWhenEnteringCallsign()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
+    settings.setValue(QStringLiteral("cw/radioIndex"), 0);
+    m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
+    auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
+
+    auto *mode = m_window->findChild<QComboBox *>(QStringLiteral("runModeSelector"));
+    auto *autoCq = m_window->findChild<QAction *>(QStringLiteral("autoCqAction"));
+    QVERIFY(mode != nullptr);
+    QVERIFY(autoCq != nullptr);
+    mode->setCurrentIndex(mode->findData(1));
+    autoCq->setChecked(true);
+    QVERIFY(!autoCq->isChecked());
+    mode->setCurrentIndex(mode->findData(0));
+    autoCq->setChecked(true);
+    QVERIFY(autoCq->isChecked());
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("Sending CW.")));
+
+    callEdit()->setText(QStringLiteral("K1ABC"));
+    QVERIFY(!autoCq->isChecked());
+}
+
+void MainWindowUiTest::frequencyChangeWithinBandSwitchesRunToSearchAndPounce()
+{
+    auto *mode = m_window->findChild<QComboBox *>(QStringLiteral("runModeSelector"));
+    QVERIFY(mode != nullptr);
+
+    RadioSnapshot snapshot;
+    snapshot.state = ConnectionState::Connected;
+    snapshot.frequencyHz = 7'030'000;
+    snapshot.vfos = {{QStringLiteral("VFOA"), 0, 7'030'000, QStringLiteral("CW"),
+                      ConnectionState::Connected}};
+    QVERIFY(QMetaObject::invokeMethod(
+        m_window.get(), "updateRadioSnapshotForRadio", Qt::DirectConnection,
+        Q_ARG(int, 0), Q_ARG(logger::RadioSnapshot, snapshot)));
+
+    mode->setCurrentIndex(mode->findData(0));
+    snapshot.frequencyHz = 7'040'000;
+    snapshot.vfos[0].frequencyHz = 7'040'000;
+    QVERIFY(QMetaObject::invokeMethod(
+        m_window.get(), "updateRadioSnapshotForRadio", Qt::DirectConnection,
+        Q_ARG(int, 0), Q_ARG(logger::RadioSnapshot, snapshot)));
+
+    QCOMPARE(mode->currentData().toInt(), 1);
+    QCOMPARE(QSettings().value(QStringLiteral("operating/runMode")).toInt(), 1);
+}
+
+void MainWindowUiTest::so2vCwTransmissionFollowsRxFocus()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("radio/A/backend"),
+                      static_cast<int>(RadioBackendType::Mock));
+    settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
+    settings.setValue(QStringLiteral("cw/radioIndex"), 0);
+    m_window->findChild<QAction *>(QStringLiteral("reconnectRadioAAction"))->trigger();
+    auto *radioStatus = m_window->findChild<QLabel *>(QStringLiteral("radioStatus"));
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: "))
+                && radioStatus->text().contains(QStringLiteral(" MHz ")));
+
+    auto *so2v = m_window->findChild<QCheckBox *>(QStringLiteral("so2vToggle"));
+    auto *focusB = m_window->findChild<QPushButton *>(QStringLiteral("focusVfoB"));
+    QVERIFY(so2v != nullptr);
+    QVERIFY(focusB != nullptr);
+    so2v->setChecked(true);
+    QTest::mouseClick(focusB, Qt::LeftButton);
+
+    m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
+    auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
+    const auto headers =
+        m_window->findChildren<QLabel *>(QStringLiteral("entryHeader"));
+    QCOMPARE(headers.size(), 2);
+    QTRY_VERIFY(headers.at(1)->text().contains(QStringLiteral("◀ TX")));
+
+    QTest::mouseClick(callEdit(), Qt::LeftButton);
+    QTest::keyClick(m_window.get(), Qt::Key_F1);
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("TX VFO B")));
 }
 
 void MainWindowUiTest::bandmapSortAndKeyboardNavigation()
@@ -385,6 +665,106 @@ void MainWindowUiTest::serialFollowsStoredMaximum()
     });
     QMetaObject::invokeMethod(m_window.get(), "editSelectedQso", Q_ARG(int, 1), Q_ARG(int, 0));
     QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QStringLiteral("011"));
+}
+
+void MainWindowUiTest::newLogDialogRequiresCallsignAndContest()
+{
+    NewLogContestOption option;
+    option.definition.id = QStringLiteral("zone-test");
+    option.definition.name = QStringLiteral("Zone Test");
+    option.definition.bands = {QStringLiteral("20m"), QStringLiteral("40m")};
+    option.definition.modes = {QStringLiteral("CW"), QStringLiteral("SSB")};
+    option.definition.sentExchange = {
+        {QStringLiteral("report"), QStringLiteral("RST"), ExchangeFieldType::Rst,
+         true, false, QStringLiteral("599")},
+        {QStringLiteral("zone"), QStringLiteral("Zone"), ExchangeFieldType::Integer,
+         true, false, {}, {}, 0, 1, 40}};
+    option.source = QStringLiteral("test");
+    Station station;
+    NewLogDialog dialog({option}, station, {QStringLiteral("SP9ABC Zone Test 2026")});
+    auto *callsign = dialog.findChild<QLineEdit *>(QStringLiteral("newLogCallsign"));
+    auto *name = dialog.findChild<QLineEdit *>(QStringLiteral("newLogName"));
+    auto *ok = dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+    auto *startDate = dialog.findChild<QDateEdit *>(QStringLiteral("newLogStartDate"));
+    QVERIFY(callsign != nullptr && name != nullptr && startDate != nullptr);
+    QVERIFY(dialog.selectedOption() != nullptr);
+    QVERIFY(!ok->isEnabled());
+    QVERIFY(dialog.findChild<QLineEdit *>(QStringLiteral("newLogSent_report")) == nullptr);
+    QVERIFY(dialog.findChild<QLineEdit *>(QStringLiteral("newLogSent_zone")) != nullptr);
+    auto *mode = dialog.findChild<QComboBox *>(QStringLiteral("newLogCategoryMode"));
+    QCOMPARE(mode->itemText(0), QStringLiteral("MIXED"));
+    auto *transmitter =
+        dialog.findChild<QComboBox *>(QStringLiteral("newLogCategoryTransmitter"));
+    QVERIFY(!transmitter->isEnabled());
+
+    startDate->setDate(QDate(2026, 3, 1));
+    callsign->setText(QStringLiteral("SP9ABC"));
+    QVERIFY(ok->isEnabled());
+    QCOMPARE(name->text(), QStringLiteral("SP9ABC Zone Test 2026 (2)"));
+    dialog.findChild<QComboBox *>(QStringLiteral("newLogCategoryOperator"))
+        ->setCurrentText(QStringLiteral("MULTI-OP"));
+    QVERIFY(transmitter->isEnabled());
+    dialog.findChild<QLineEdit *>(QStringLiteral("newLogSent_zone"))
+        ->setText(QStringLiteral("15"));
+    const Contest log = dialog.log();
+    QCOMPARE(log.stationCallsign, QStringLiteral("SP9ABC"));
+    QCOMPARE(log.properties.value(QStringLiteral("CATEGORY-OPERATOR")),
+             QStringLiteral("MULTI-OP"));
+    QCOMPARE(log.startsAtUtc->date(), QDate(2026, 3, 1));
+    QCOMPARE(dialog.sentExchange().value(QStringLiteral("zone")), QStringLiteral("15"));
+}
+
+void MainWindowUiTest::newLogActionCreatesLogWithStationCallsign()
+{
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
+    QVERIFY(action != nullptr);
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        auto *newLog = qobject_cast<NewLogDialog *>(dialog);
+        if (newLog == nullptr) {
+            dialog->reject();
+            return;
+        }
+        dialogSeen = true;
+        auto *callsign = dialog->findChild<QLineEdit *>(QStringLiteral("newLogCallsign"));
+        QCOMPARE(callsign->text(), QStringLiteral("SP9TEST"));
+        auto *filter = dialog->findChild<QLineEdit *>(QStringLiteral("newLogContestFilter"));
+        filter->setText(QStringLiteral("CQ WW"));
+        auto *list = dialog->findChild<QListWidget *>(QStringLiteral("newLogContestList"));
+        QVERIFY(list->count() >= 2);
+        QVERIFY(newLog->selectContest(QStringLiteral("cqww-cw")));
+        callsign->setText(QStringLiteral("SN9X"));
+        dialog->findChild<QLineEdit *>(QStringLiteral("newLogSent_zone"))
+            ->setText(QStringLiteral("15"));
+        dialog->findChild<QComboBox *>(QStringLiteral("newLogCategoryPower"))
+            ->setCurrentText(QStringLiteral("LOW"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action->trigger();
+    QVERIFY(dialogSeen);
+
+    auto *selector = m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QVERIFY2(selector->currentText().startsWith(QStringLiteral("SN9X CQ WW DX Contest")),
+             qPrintable(selector->currentText()));
+    QCOMPARE(sentEdit(QStringLiteral("zone"))->text(), QStringLiteral("15"));
+    auto *topStatus = m_window->findChild<QLabel *>(QStringLiteral("topStatus"));
+    QVERIFY2(topStatus->text().contains(QStringLiteral("SN9X")),
+             qPrintable(topStatus->text()));
+    const QVector<Contest> contests = m_repository->contests();
+    const auto created = std::find_if(
+        contests.cbegin(), contests.cend(), [](const Contest &contest) {
+            return contest.stationCallsign == QStringLiteral("SN9X");
+        });
+    QVERIFY(created != contests.cend());
+    QCOMPARE(created->properties.value(QStringLiteral("CATEGORY-POWER")),
+             QStringLiteral("LOW"));
+    QCOMPARE(created->properties.value(QStringLiteral("CATEGORY-MODE")),
+             QStringLiteral("CW"));
+
+    // Switching back to a log without its own callsign restores the station default.
+    selector->setCurrentIndex(selector->findText(QStringLiteral("Serial Sprint"),
+                                                 Qt::MatchContains));
+    QVERIFY(topStatus->text().contains(QStringLiteral("SP9TEST")));
 }
 
 QTEST_MAIN(MainWindowUiTest)

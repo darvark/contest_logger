@@ -38,6 +38,7 @@ struct CwKeyerStatus {
     int queuedMessages = 0;
     int wpm = 25;
     bool transmitting = false;
+    int transmitVfo = 0;
     // True when the keyer itself confirms end of transmission; false when the
     // queue is paced by estimated duration.
     bool completionConfirmed = false;
@@ -61,7 +62,7 @@ public:
     virtual ~ICwKeyer() = default;
     virtual bool connect(const CwKeyerConfig &config, QString *error) = 0;
     virtual void disconnect() = 0;
-    virtual bool sendText(const QString &text, QString *error) = 0;
+    virtual bool sendText(const QString &text, int transmitVfo, QString *error) = 0;
     virtual bool abort(QString *error) = 0;
     virtual bool setWpm(int wpm, QString *error) = 0;
     // True if the keyer can confirm end of transmission via pollCompleted().
@@ -81,7 +82,7 @@ public:
 public slots:
     void connectKeyer(const logger::CwKeyerConfig &config);
     void disconnectKeyer();
-    void enqueueMessage(const QString &text);
+    void enqueueMessage(const QString &text, int transmitVfo = 0);
     void abortTransmission();
     void setWpm(int wpm);
 
@@ -102,9 +103,14 @@ private:
     class QTimer *m_queueTimer = nullptr;
     class QTimer *m_pollTimer = nullptr;
     class QTimer *m_timeoutTimer = nullptr;
-    QStringList m_queue;
+    struct QueuedMessage {
+        QString text;
+        int transmitVfo = 0;
+    };
+    QList<QueuedMessage> m_queue;
     CwKeyerConfig m_config;
     bool m_transmitting = false;
+    int m_transmittingVfo = 0;
     bool m_timedOut = false;
     QString m_lastError;
 };
@@ -118,14 +124,14 @@ public:
 
     void connectKeyer(const CwKeyerConfig &config);
     void disconnectKeyer();
-    void enqueueMessage(const QString &text);
+    void enqueueMessage(const QString &text, int transmitVfo = 0);
     void abortTransmission();
     void setWpm(int wpm);
 
 signals:
     void connectRequested(const logger::CwKeyerConfig &config);
     void disconnectRequested();
-    void enqueueRequested(const QString &text);
+    void enqueueRequested(const QString &text, int transmitVfo);
     void abortRequested();
     void setWpmRequested(int wpm);
     void statusChanged(const logger::CwKeyerStatus &status);

@@ -17,7 +17,7 @@
 namespace logger {
 namespace {
 
-constexpr int CurrentSchemaVersion = 5;
+constexpr int CurrentSchemaVersion = 6;
 constexpr int SpotPruneInterval = 200;
 constexpr int SpotRetentionHours = 24;
 constexpr int MaximumRetainedSpots = 5000;
@@ -239,6 +239,37 @@ const QStringList MigrationFive{
         "mode COLLATE NOCASE)")
 };
 
+const QStringList MigrationSix{
+    QStringLiteral(
+        "ALTER TABLE contests ADD COLUMN station_callsign TEXT NOT NULL DEFAULT ''"),
+    QStringLiteral(
+        "ALTER TABLE contests ADD COLUMN properties_json TEXT NOT NULL DEFAULT '{}'")
+};
+
+QMap<QString, QString> propertiesFromJson(const QString &json)
+{
+    QMap<QString, QString> result;
+    const QJsonObject object = QJsonDocument::fromJson(json.toUtf8()).object();
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        result.insert(it.key(), it.value().toString());
+    }
+    return result;
+}
+
+QVariant utcText(const std::optional<QDateTime> &value)
+{
+    if (!value.has_value() || !value->isValid()) {
+        return QVariant(QMetaType::fromType<QString>());
+    }
+    return value->toUTC().toString(Qt::ISODate);
+}
+
+// A null QString binds as SQL NULL, which NOT NULL text columns reject.
+QString notNullText(const QString &value)
+{
+    return value.isNull() ? QStringLiteral("") : value;
+}
+
 bool backfillLegacyExchanges(QSqlDatabase &database, QString *error)
 {
     struct LegacyRow {
@@ -386,6 +417,8 @@ bool SqliteRepository::initialize(QString *error)
             migration = &MigrationFour;
         } else if (version == 5) {
             migration = &MigrationFive;
+        } else if (version == 6) {
+            migration = &MigrationSix;
         }
         if (migration == nullptr) {
             setError(error, QStringLiteral("No migration is available for schema version %1.")
@@ -611,7 +644,8 @@ QVector<Contest> SqliteRepository::contests(QString *error) const
     QVector<Contest> result;
     QSqlQuery query(m_database);
     if (!query.exec(QStringLiteral(
-            "SELECT id, code, name, description, starts_at_utc, ends_at_utc "
+            "SELECT id, code, name, description, starts_at_utc, ends_at_utc, "
+            "station_callsign, properties_json "
             "FROM contests ORDER BY name COLLATE NOCASE"))) {
         setError(error, queryError(query));
         return result;
@@ -631,6 +665,10 @@ QVector<Contest> SqliteRepository::contests(QString *error) const
         if (!endsAt.isEmpty()) {
             contest.endsAtUtc = QDateTime::fromString(endsAt, Qt::ISODate).toUTC();
         }
+        contest.stationCallsign =
+            query.value(QStringLiteral("station_callsign")).toString();
+        contest.properties = propertiesFromJson(
+            query.value(QStringLiteral("properties_json")).toString());
         result.append(std::move(contest));
     }
     return result;
@@ -673,7 +711,20 @@ qint64 SqliteRepository::createContestLog(
     const ContestDefinition &definition, const QString &yaml, const QString &name,
     QString *error)
 {
+    Contest log;
+    log.name = name;
+    return createContestLog(definition, yaml, log, error);
+}
+
+qint64 SqliteRepository::createContestLog(
+    const ContestDefinition &definition, const QString &yaml, const Contest &log,
+    QString *error)
+{
     clearError(error);
+    if (log.name.trimmed().isEmpty()) {
+        setError(error, QStringLiteral("Log name is required."));
+        return 0;
+    }
     QString listError;
     const QStringList taken = contestDefinitionCodes(&listError);
     if (!listError.isEmpty()) {
@@ -687,17 +738,48 @@ qint64 SqliteRepository::createContestLog(
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "INSERT INTO contests(code, name, description, definition_yaml) "
-        "VALUES(?, ?, ?, ?)"));
+        "INSERT INTO contests(code, name, description, definition_yaml, "
+        "starts_at_utc, station_callsign, properties_json) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?)"));
     query.addBindValue(code);
-    query.addBindValue(name);
-    query.addBindValue(definition.description);
-    query.addBindValue(yaml);
+    query.addBindValue(log.name.trimmed());
+    query.addBindValue(notNullText(definition.description));
+    query.addBindValue(notNullText(yaml));
+    query.addBindValue(utcText(log.startsAtUtc));
+    query.addBindValue(notNullText(log.stationCallsign.trimmed().toUpper()));
+    query.addBindValue(QString::fromUtf8(exchangeJson(log.properties)));
     if (!query.exec()) {
         setError(error, queryError(query));
         return 0;
     }
     return query.lastInsertId().toLongLong();
+}
+
+bool SqliteRepository::updateContestLog(const Contest &log, QString *error)
+{
+    clearError(error);
+    if (log.id <= 0 || log.name.trimmed().isEmpty()) {
+        setError(error, QStringLiteral("Log id and name are required."));
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "UPDATE contests SET name = ?, starts_at_utc = ?, station_callsign = ?, "
+        "properties_json = ? WHERE id = ?"));
+    query.addBindValue(log.name.trimmed());
+    query.addBindValue(utcText(log.startsAtUtc));
+    query.addBindValue(notNullText(log.stationCallsign.trimmed().toUpper()));
+    query.addBindValue(QString::fromUtf8(exchangeJson(log.properties)));
+    query.addBindValue(log.id);
+    if (!query.exec()) {
+        setError(error, queryError(query));
+        return false;
+    }
+    if (query.numRowsAffected() == 0) {
+        setError(error, QStringLiteral("Log %1 does not exist.").arg(log.id));
+        return false;
+    }
+    return true;
 }
 
 bool SqliteRepository::saveContestDefinition(

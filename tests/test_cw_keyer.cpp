@@ -12,8 +12,10 @@ class CwKeyerTest final : public QObject {
 
 private slots:
     void mockKeyerQueuesAndAborts();
+    void queuedMessagesKeepTheirRequestedVfo();
     void changesSpeedOnMockKeyer();
     void cwdaemonSendsTextSpeedAndAbortCommands();
+    void cwdaemonRejectsVfoBWithoutSending();
     void mockCompletionDrivesPacing();
     void estimatedPacingIsReportedWithoutCompletionSupport();
     void missingCompletionStopsQueueAndWarns();
@@ -56,6 +58,32 @@ void CwKeyerTest::mockKeyerQueuesAndAborts()
                 && status.message.contains(QStringLiteral("aborted"));
         }(),
         3000);
+}
+
+void CwKeyerTest::queuedMessagesKeepTheirRequestedVfo()
+{
+    logger::CwKeyerController controller;
+    QSignalSpy statuses(&controller, &logger::CwKeyerController::statusChanged);
+    const auto currentStatus = [&statuses] {
+        return qvariant_cast<logger::CwKeyerStatus>(statuses.constLast().first());
+    };
+    logger::CwKeyerConfig config;
+    config.type = logger::CwKeyerType::Mock;
+    controller.connectKeyer(config);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !statuses.isEmpty()
+            && currentStatus().state == logger::ConnectionState::Connected,
+        3000);
+
+    controller.enqueueMessage(QStringLiteral("CQ TEST"), 1);
+    controller.enqueueMessage(QStringLiteral("TU"), 0);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        currentStatus().transmitting
+            && currentStatus().transmitVfo == 1
+            && currentStatus().queuedMessages == 1,
+        3000);
+    controller.abortTransmission();
+    QTRY_VERIFY_WITH_TIMEOUT(!currentStatus().transmitting, 3000);
 }
 
 void CwKeyerTest::changesSpeedOnMockKeyer()
@@ -115,6 +143,37 @@ void CwKeyerTest::cwdaemonSendsTextSpeedAndAbortCommands()
     QCOMPARE(waitDatagram(), QByteArrayLiteral("CQ TEST"));
     controller.abortTransmission();
     QCOMPARE(waitDatagram(), QByteArray::fromHex("1b37"));
+}
+
+void CwKeyerTest::cwdaemonRejectsVfoBWithoutSending()
+{
+    QUdpSocket receiver;
+    QVERIFY(receiver.bind(QHostAddress::LocalHost, 0));
+    logger::CwKeyerController controller;
+    QSignalSpy statuses(&controller, &logger::CwKeyerController::statusChanged);
+    logger::CwKeyerConfig config;
+    config.type = logger::CwKeyerType::Cwdaemon;
+    config.host = QStringLiteral("127.0.0.1");
+    config.port = receiver.localPort();
+    config.cwdaemonCompletionReply = false;
+    controller.connectKeyer(config);
+    QVERIFY(receiver.waitForReadyRead(1000));
+    QByteArray speedCommand;
+    speedCommand.resize(static_cast<qsizetype>(receiver.pendingDatagramSize()));
+    receiver.readDatagram(speedCommand.data(), speedCommand.size());
+    QCOMPARE(speedCommand, QByteArray::fromHex("1b323235"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !statuses.isEmpty()
+            && qvariant_cast<logger::CwKeyerStatus>(statuses.constLast().first()).state
+                   == logger::ConnectionState::Connected,
+        3000);
+
+    controller.enqueueMessage(QStringLiteral("CQ TEST"), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        qvariant_cast<logger::CwKeyerStatus>(statuses.constLast().first())
+            .message.contains(QStringLiteral("cannot select a transmit VFO")),
+        3000);
+    QVERIFY(!receiver.hasPendingDatagrams());
 }
 
 namespace {

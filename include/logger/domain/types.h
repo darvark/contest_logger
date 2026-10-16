@@ -40,6 +40,10 @@ struct Contest {
     QString description;
     std::optional<QDateTime> startsAtUtc;
     std::optional<QDateTime> endsAtUtc;
+    // Station callsign used by this log; empty means the global station callsign.
+    QString stationCallsign;
+    // Cabrillo header values keyed by tag, e.g. CATEGORY-POWER, OPERATORS.
+    QMap<QString, QString> properties;
 };
 
 struct Station {
@@ -47,6 +51,13 @@ struct Station {
     QString operatorName;
     QString grid;
     QString powerClass;
+    QString email;
+    // Street address; each line becomes one Cabrillo ADDRESS: line.
+    QString address;
+    QString city;
+    QString stateProvince;
+    QString postalCode;
+    QString country;
 };
 
 struct Vfo {
