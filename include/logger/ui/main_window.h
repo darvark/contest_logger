@@ -190,7 +190,9 @@ private:
     QTableWidget *m_bandmap = nullptr;
     QTableWidget *m_radioABandmap = nullptr;
     QTableWidget *m_clusterLog = nullptr;
+    bool m_dxClusterConnected = false;
     QComboBox *m_bandmapBandFilter = nullptr;
+    QComboBox *m_bandmapModeFilter = nullptr;
     QCheckBox *m_hideWorkedSpots = nullptr;
     QLabel *m_clusterLabel = nullptr;
     QTimer *m_spotExpiryTimer = nullptr;

@@ -333,6 +333,13 @@ public:
                 ConnectionState::Connected
             });
         }
+        freq_t currentFrequency = 0;
+        if (rig_get_freq(m_rig, RIG_VFO_CURR, &currentFrequency) == RIG_OK
+            && currentFrequency > 0) {
+            m_frequencies[m_focusVfo] = currentFrequency;
+            snapshot.vfos[m_focusVfo].frequencyHz =
+                static_cast<qint64>(currentFrequency);
+        }
         snapshot.frequencyHz =
             snapshot.vfos.at(qMin(m_focusVfo, snapshot.vfos.size() - 1)).frequencyHz;
         snapshot.mode =

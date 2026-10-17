@@ -459,7 +459,8 @@ private:
 
 class DxClusterConfigDialog final : public QDialog {
 public:
-    explicit DxClusterConfigDialog(const DxClusterConfig &config, QWidget *parent)
+    explicit DxClusterConfigDialog(const DxClusterConfig &config,
+                                   int spotLifetimeMinutes, QWidget *parent)
         : QDialog(parent)
     {
         setWindowTitle(tr("DX cluster connection"));
@@ -471,9 +472,15 @@ public:
         m_port->setRange(1, 65535);
         m_port->setValue(config.port);
         m_callsign = new QLineEdit(config.callsign, this);
+        m_spotLifetime = new QSpinBox(this);
+        m_spotLifetime->setObjectName(QStringLiteral("dxSpotLifetimeMinutes"));
+        m_spotLifetime->setRange(1, 1440);
+        m_spotLifetime->setSuffix(tr(" min"));
+        m_spotLifetime->setValue(spotLifetimeMinutes);
         form->addRow(tr("Host:"), m_host);
         form->addRow(tr("Telnet port:"), m_port);
         form->addRow(tr("Station callsign:"), m_callsign);
+        form->addRow(tr("Spot lifetime:"), m_spotLifetime);
         layout->addLayout(form);
         auto *buttons = new QDialogButtonBox(
             QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -489,10 +496,13 @@ public:
                 m_callsign->text().trimmed().toUpper()};
     }
 
+    int spotLifetimeMinutes() const { return m_spotLifetime->value(); }
+
 private:
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
     QLineEdit *m_callsign = nullptr;
+    QSpinBox *m_spotLifetime = nullptr;
 };
 
 class CwKeyerConfigDialog final : public QDialog {
@@ -1748,6 +1758,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     for (const QString &band : defaultBands()) {
         m_bandmapBandFilter->addItem(band, band);
     }
+    m_bandmapModeFilter = new QComboBox(bandmapPane);
+    m_bandmapModeFilter->setObjectName(QStringLiteral("bandmapModeFilter"));
+    m_bandmapModeFilter->addItem(tr("All modes"), QString());
+    for (const QString &mode : {QStringLiteral("CW"), QStringLiteral("SSB"),
+                                QStringLiteral("USB"), QStringLiteral("LSB"),
+                                QStringLiteral("RTTY"), QStringLiteral("FT8"),
+                                QStringLiteral("FT4"), QStringLiteral("PSK"),
+                                QStringLiteral("FM"), QStringLiteral("AM")}) {
+        m_bandmapModeFilter->addItem(mode, mode);
+    }
     auto *bandmapSortSelector = new QComboBox(bandmapPane);
     bandmapSortSelector->setObjectName(QStringLiteral("bandmapSortSelector"));
     bandmapSortSelector->addItem(tr("Frequency"), QStringLiteral("frequency"));
@@ -1759,6 +1779,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *tuneSelectedSpot = new QPushButton(tr("Tune"), bandmapPane);
     tuneSelectedSpot->setObjectName(QStringLiteral("tuneSelectedSpotButton"));
     bandmapControls->addWidget(m_bandmapBandFilter, 1);
+    bandmapControls->addWidget(m_bandmapModeFilter);
     bandmapControls->addWidget(bandmapSortSelector);
     bandmapControls->addWidget(m_hideWorkedSpots);
     bandmapControls->addWidget(tuneSelectedSpot);
@@ -1790,7 +1811,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     });
     connect(m_bandmapBandFilter, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
-        connect(bandmapSortSelector, &QComboBox::currentIndexChanged,
+    connect(m_bandmapModeFilter, &QComboBox::currentIndexChanged,
+            this, &MainWindow::refreshBandmap);
+    connect(bandmapSortSelector, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
     connect(m_hideWorkedSpots, &QCheckBox::toggled,
             this, &MainWindow::refreshBandmap);
@@ -1941,6 +1964,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     });
     m_catStaleTimer->start();
     QTimer::singleShot(0, this, &MainWindow::autoConnectRadios);
+    const int spotLifetimeMinutes = qBound(
+        1, QSettings().value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
+        1440);
     QString spotError;
     const QVector<Spot> storedSpots = m_repository.recentSpots(500, &spotError);
     if (!spotError.isEmpty()) {
@@ -1949,20 +1975,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         for (const Spot &spot : storedSpots) {
             const qint64 ageSeconds =
                 spot.timestampUtc.secsTo(QDateTime::currentDateTimeUtc());
-            if (ageSeconds >= 0 && ageSeconds <= 3600) {
+            if (ageSeconds >= 0 && ageSeconds <= spotLifetimeMinutes * 60) {
                 m_spots.insert(spot.id, spot);
             }
         }
-        QVector<Spot> chronological = storedSpots;
-        std::sort(chronological.begin(), chronological.end(),
-                  [](const Spot &left, const Spot &right) {
-                      return left.timestampUtc < right.timestampUtc;
-                  });
-        for (const Spot &spot : std::as_const(chronological)) {
-            appendClusterRow(m_clusterLog, spot);
-        }
-        m_clusterLog->resizeColumnsToContents();
-        m_clusterLog->scrollToBottom();
     }
     updateEntryHeaders();
     setActiveEntryContext(0);
@@ -2267,7 +2283,10 @@ void MainWindow::configureDxCluster()
         settings.value(QStringLiteral("dxCluster/callsign"), m_station.callsign)
             .toString()
     };
-    DxClusterConfigDialog dialog(config, this);
+    const int savedSpotLifetimeMinutes = qBound(
+        1, settings.value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
+        1440);
+    DxClusterConfigDialog dialog(config, savedSpotLifetimeMinutes, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -2280,6 +2299,10 @@ void MainWindow::configureDxCluster()
     settings.setValue(QStringLiteral("dxCluster/host"), config.host);
     settings.setValue(QStringLiteral("dxCluster/port"), config.port);
     settings.setValue(QStringLiteral("dxCluster/callsign"), config.callsign);
+    const int spotLifetimeMinutes = dialog.spotLifetimeMinutes();
+    settings.setValue(QStringLiteral("dxCluster/spotLifetimeMinutes"),
+                      spotLifetimeMinutes);
+    refreshBandmap();
     m_dxClusterController.start(config);
 }
 
@@ -2798,6 +2821,7 @@ void MainWindow::focusVfo(int vfo)
     if (m_so2rToggle->isChecked()) {
         m_activeRadioSelector->setCurrentIndex(
             m_activeRadioSelector->findData(vfo));
+        setActiveEntryContext(vfo);
         m_callsignEdits[vfo]->setFocus();
         return;
     }
@@ -2817,7 +2841,7 @@ void MainWindow::focusVfo(int vfo)
     if (vfo == 1 && !m_so2vToggle->isChecked()) {
         m_so2vToggle->setChecked(true);
     }
-    m_radioControllers[radio].setVfoFocus(vfo);
+    setActiveEntryContext(vfo);
     m_callsignEdits[vfo]->setFocus();
 }
 
@@ -4216,13 +4240,23 @@ int MainWindow::currentEntryContext() const
 
 void MainWindow::setActiveEntryContext(int context)
 {
-    m_activeEntryContext = qBound(0, context, 1);
-    if (m_so2vToggle->isChecked() && !m_so2rToggle->isChecked()) {
+    context = qBound(0, context, 1);
+    const bool contextChanged = context != m_activeEntryContext;
+    m_activeEntryContext = context;
+    if (contextChanged && m_so2vToggle->isChecked()
+        && !m_so2rToggle->isChecked()) {
         const int radio = m_activeRadioSelector->currentData().toInt();
         const RadioSnapshot &snapshot = m_radioSnapshots[radio];
-        if (snapshot.state == ConnectionState::Connected
-            && snapshot.dualVfoSupported && snapshot.focusVfo != m_activeEntryContext) {
-            m_radioControllers[radio].setVfoFocus(m_activeEntryContext);
+        if (snapshot.state == ConnectionState::Connected && snapshot.dualVfoSupported) {
+            const auto vfo = std::find_if(
+                snapshot.vfos.cbegin(), snapshot.vfos.cend(),
+                [context](const Vfo &candidate) { return candidate.number == context; });
+            if (snapshot.focusVfo != context) {
+                m_radioControllers[radio].setVfoFocus(context);
+            }
+            if (vfo != snapshot.vfos.cend() && vfo->frequencyHz > 0) {
+                m_radioControllers[radio].setFrequency(vfo->frequencyHz, context);
+            }
         }
     }
     for (int index = 0; index < 2; ++index) {
@@ -5307,6 +5341,11 @@ void MainWindow::saveRadioConfig(int radio, const RadioConfig &config)
 
 void MainWindow::updateDxClusterStatus(const DxClusterStatus &status)
 {
+    m_dxClusterConnected = status.state == ConnectionState::Connected;
+    if (!m_dxClusterConnected && m_clusterLog != nullptr) {
+        m_clusterLog->setRowCount(0);
+    }
+
     QString state;
     switch (status.state) {
     case ConnectionState::Disconnected: state = tr("Disconnected"); break;
@@ -5341,12 +5380,14 @@ void MainWindow::receiveSpot(const Spot &receivedSpot)
         }
         m_spots.remove(oldest.key());
     }
-    const bool atBottom = m_clusterLog->verticalScrollBar()->value()
-        >= m_clusterLog->verticalScrollBar()->maximum() - 2;
-    appendClusterRow(m_clusterLog, spot);
-    m_clusterLog->resizeColumnsToContents();
-    if (atBottom) {
-        m_clusterLog->scrollToBottom();
+    if (m_dxClusterConnected) {
+        const bool atBottom = m_clusterLog->verticalScrollBar()->value()
+            >= m_clusterLog->verticalScrollBar()->maximum() - 2;
+        appendClusterRow(m_clusterLog, spot);
+        m_clusterLog->resizeColumnsToContents();
+        if (atBottom) {
+            m_clusterLog->scrollToBottom();
+        }
     }
     refreshBandmap();
 }
@@ -5377,6 +5418,9 @@ void MainWindow::refreshBandmap()
                            });
     };
     const QDateTime now = QDateTime::currentDateTimeUtc();
+    const int spotLifetimeMinutes = qBound(
+        1, QSettings().value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
+        1440);
     QVector<Spot> ordered = m_spots.values().toVector();
     std::sort(ordered.begin(), ordered.end(), [](const Spot &left, const Spot &right) {
         return left.timestampUtc > right.timestampUtc;
@@ -5386,7 +5430,8 @@ void MainWindow::refreshBandmap()
     const bool sortByTime = sortSelector != nullptr
         && sortSelector->currentData().toString() == QLatin1String("time");
 
-    const auto populate = [this, &ordered, &isWorked, &loggedCalls, &now, sortByTime](
+    const auto populate = [this, &ordered, &isWorked, &loggedCalls, &now, sortByTime,
+                           spotLifetimeMinutes](
                               QTableWidget *bandmap, QDockWidget *dock,
                               int context, int radio, int labelRadio) {
         qint64 selectedSpot = -1;
@@ -5398,15 +5443,20 @@ void MainWindow::refreshBandmap()
         if (filterBand == QStringLiteral("@active")) {
             filterBand = m_bandSelectors[context]->currentText().trimmed().toLower();
         }
+        const QString filterMode = m_bandmapModeFilter->currentData().toString();
         QSet<QString> displayed;
         QVector<QPair<Spot, bool>> visible;
         for (const Spot &spot : std::as_const(ordered)) {
             const qint64 ageSeconds = spot.timestampUtc.secsTo(now);
-            if (ageSeconds < 0 || ageSeconds > 3600) {
+            if (ageSeconds < 0 || ageSeconds > spotLifetimeMinutes * 60) {
                 continue;
             }
             if (!filterBand.isEmpty()
                 && spot.band.compare(filterBand, Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+            if (!filterMode.isEmpty()
+                && spot.mode.compare(filterMode, Qt::CaseInsensitive) != 0) {
                 continue;
             }
             const QString dedupeKey =

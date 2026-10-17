@@ -202,8 +202,21 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
   ograniczenia punktacji są opisane w odpowiednich profilach. SPDX 2026 ma
   osobne YAML dla stacji polskich i zagranicznych, punktację oraz mnożniki
   per regulamin i jawne wskazanie potrzeby CTY dla DXCC.
-- [ ] **Dokończyć punktację i mnożniki reguł sponsorów.** Silnik musi umieć
 - [x] **Dokończyć punktację i mnożniki reguł sponsorów.** Silnik porównuje
   encje DXCC/kraje i kontynenty obu stacji, obsługuje mnożniki `country`/`dxcc`
   rozdzielane per emisja oraz alternatywne pola wymiany `sent.when` zależne od
   lokalizacji własnej stacji; zakres jest opisany i pokryty testami.
+
+- [x] **ESM i CW są częściowe**. ESM ma stałą, podstawową sekwencję, bez konfiguracji per contest. 
+Hamlib steruje nadawaniem na podstawie szacowanego czasu, a nie potwierdzenia zakończenia; brakuje 
+WinKeyer i bardziej rozbudowanych makr. TODO.md:177, USER_GUIDE.md:790
+
+- [x] **DX Cluster obsługuje głównie odbiór spotów.** Brakuje wysyłania spotów/komend, filtrów po 
+emisji i kontynencie oraz wielu równoległych połączeń. USER_GUIDE.md:798
+
+- [x] **Sekcja ograniczeń w instrukcji jest nieaktualna**: twierdzi, że brak Run/S&P, Auto CQ, wymian 
+warunkowych i mnożników innych niż exchange/prefix. Kod i testy potwierdzają, że te funkcje są już częściowo 
+lub w pełni dostępne. Podobnie BUILD_AND_RELEASE.md błędnie ogranicza typy mnożników i opisuje CTY jako dane 
+wyłącznie informacyjne. USER_GUIDE.md:747, main_window.cpp:2492, test_main_window_ui.cpp:433, BUILD_AND_RELEASE.md:83
+
+Dodatkowo TODO ma ten sam punkt o regułach sponsorów jednocześnie oznaczony jako niewykonany i wykonany. TODO.md:205

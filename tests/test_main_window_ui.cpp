@@ -34,6 +34,9 @@ using namespace logger;
 class MainWindowUiTest final : public QObject {
     Q_OBJECT
 
+signals:
+    void dxClusterStatusChanged(const logger::DxClusterStatus &status);
+
 private slots:
     void initTestCase();
     void init();
@@ -48,6 +51,9 @@ private slots:
     void frequencyChangeWithinBandSwitchesRunToSearchAndPounce();
     void so2vCwTransmissionFollowsRxFocus();
     void bandmapSortAndKeyboardNavigation();
+    void bandmapFiltersSpotsByMode();
+    void bandmapSpotLifetimeIsConfigurable();
+    void clusterAnnouncementsShowOnlyLiveSpots();
     void ctrlWipeClearsCallAndReceivedExchange();
     void supportDataDownloadActionsExist();
     void enterLogsQsoAndRefreshesTable();
@@ -481,15 +487,22 @@ void MainWindowUiTest::so2vCwTransmissionFollowsRxFocus()
     QSettings settings;
     settings.setValue(QStringLiteral("radio/A/backend"),
                       static_cast<int>(RadioBackendType::Mock));
+    settings.setValue(QStringLiteral("radio/B/backend"),
+                      static_cast<int>(RadioBackendType::Mock));
     settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
     settings.setValue(QStringLiteral("cw/radioIndex"), 0);
     m_window->findChild<QAction *>(QStringLiteral("reconnectRadioAAction"))->trigger();
+    m_window->findChild<QAction *>(QStringLiteral("reconnectRadioBAction"))->trigger();
     auto *radioStatus = m_window->findChild<QLabel *>(QStringLiteral("radioStatus"));
     QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: "))
+                && radioStatus->text().contains(QStringLiteral(" MHz ")));
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio B: "))
                 && radioStatus->text().contains(QStringLiteral(" MHz ")));
 
     auto *so2v = m_window->findChild<QCheckBox *>(QStringLiteral("so2vToggle"));
     auto *callsignB = m_window->findChild<QLineEdit *>(QStringLiteral("callsignInputB"));
+    auto *focusVfoB = m_window->findChild<QPushButton *>(QStringLiteral("focusVfoB"));
+    auto *activeRadio = m_window->findChild<QComboBox *>(QStringLiteral("activeRadioSelector"));
     auto *radioABandmap = m_window->findChild<QTableWidget *>(
         QStringLiteral("dxBandmapRadioA"));
     auto *radioABandmapDock = m_window->findChild<QDockWidget *>(
@@ -498,6 +511,8 @@ void MainWindowUiTest::so2vCwTransmissionFollowsRxFocus()
         QStringLiteral("dxBandmapDock"));
     QVERIFY(so2v != nullptr);
     QVERIFY(callsignB != nullptr);
+    QVERIFY(focusVfoB != nullptr);
+    QVERIFY(activeRadio != nullptr);
     QVERIFY(radioABandmap != nullptr);
     QVERIFY(radioABandmapDock != nullptr);
     QVERIFY(radioBBandmapDock != nullptr);
@@ -507,14 +522,36 @@ void MainWindowUiTest::so2vCwTransmissionFollowsRxFocus()
     so2v->setChecked(true);
     QTRY_VERIFY(radioABandmapDock->isVisible());
     QVERIFY(radioBBandmapDock->windowTitle().contains(QStringLiteral("Radio B")));
+
+    RadioSnapshot savedContextSnapshot;
+    savedContextSnapshot.state = ConnectionState::Connected;
+    savedContextSnapshot.frequencyHz = 14'025'000;
+    savedContextSnapshot.mode = QStringLiteral("CW");
+    savedContextSnapshot.focusVfo = 0;
+    savedContextSnapshot.dualVfoSupported = true;
+    savedContextSnapshot.vfos = {
+        {QStringLiteral("A"), 0, 14'025'000, QStringLiteral("CW"),
+         ConnectionState::Connected},
+        {QStringLiteral("B"), 1, 7'123'000, QStringLiteral("CW"),
+         ConnectionState::Connected}
+    };
+    QVERIFY(QMetaObject::invokeMethod(
+        m_window.get(), "updateRadioSnapshotForRadio", Qt::DirectConnection,
+        Q_ARG(int, 0), Q_ARG(logger::RadioSnapshot, savedContextSnapshot)));
+
+    const auto headers = m_window->findChildren<QLabel *>(QStringLiteral("entryHeader"));
+    QCOMPARE(headers.size(), 2);
+    QTest::mouseClick(focusVfoB, Qt::LeftButton);
+    QTRY_VERIFY(headers.at(1)->text().contains(QStringLiteral("◀ TX")));
+    QCOMPARE(activeRadio->currentData().toInt(), 0);
+    QVERIFY(headers.at(1)->parentWidget()->property("active").toBool());
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("B 7.123")));
+    QVERIFY(radioStatus->text().contains(QStringLiteral("active: A")));
     QTest::mouseClick(callsignB, Qt::LeftButton);
 
     m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
     auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
-    const auto headers =
-        m_window->findChildren<QLabel *>(QStringLiteral("entryHeader"));
-    QCOMPARE(headers.size(), 2);
     QTRY_VERIFY(headers.at(1)->text().contains(QStringLiteral("◀ TX")));
 
     QTest::mouseClick(callEdit(), Qt::LeftButton);
@@ -574,6 +611,104 @@ void MainWindowUiTest::bandmapSortAndKeyboardNavigation()
     QCOMPARE(bandmap->currentRow(), 0);
     QTest::keyClick(callEdit(), Qt::Key_Up, Qt::ControlModifier);
     QCOMPARE(bandmap->currentRow(), 2);
+}
+
+void MainWindowUiTest::bandmapSpotLifetimeIsConfigurable()
+{
+    m_window.reset();
+    Spot spot;
+    spot.callsign = QStringLiteral("K1OLD");
+    spot.frequencyHz = 7'040'000;
+    spot.band = QStringLiteral("40m");
+    spot.mode = QStringLiteral("CW");
+    spot.spotter = QStringLiteral("K1ABC");
+    spot.comment = QStringLiteral("CQ TEST");
+    spot.timestampUtc = QDateTime::currentDateTimeUtc().addSecs(-120);
+    spot.source = QStringLiteral("test");
+    QString error;
+    QVERIFY2(m_repository->saveSpot(spot, &error), qPrintable(error));
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+
+    auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    auto *bandFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapBandFilter"));
+    QVERIFY(bandmap != nullptr);
+    QVERIFY(bandFilter != nullptr);
+    bandFilter->setCurrentIndex(bandFilter->findData(QString()));
+    QCOMPARE(bandmap->rowCount(), 1);
+
+    QSettings().setValue(QStringLiteral("dxCluster/spotLifetimeMinutes"), 1);
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "refreshBandmap"));
+    QCOMPARE(bandmap->rowCount(), 0);
+}
+
+void MainWindowUiTest::bandmapFiltersSpotsByMode()
+{
+    const auto addSpot = [this](const QString &callsign, const QString &mode) {
+        Spot spot;
+        spot.callsign = callsign;
+        spot.frequencyHz = 7'040'000;
+        spot.band = QStringLiteral("40m");
+        spot.mode = mode;
+        spot.spotter = QStringLiteral("K1ABC");
+        spot.comment = QStringLiteral("CQ TEST");
+        spot.timestampUtc = QDateTime::currentDateTimeUtc();
+        spot.source = QStringLiteral("test");
+        return QMetaObject::invokeMethod(
+            m_window.get(), "receiveSpot", Qt::DirectConnection,
+            Q_ARG(logger::Spot, spot));
+    };
+    QVERIFY(addSpot(QStringLiteral("K1CW"), QStringLiteral("CW")));
+    QVERIFY(addSpot(QStringLiteral("K1SSB"), QStringLiteral("SSB")));
+    QVERIFY(addSpot(QStringLiteral("K1UNKNOWN"), QString()));
+
+    auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    auto *modeFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapModeFilter"));
+    QVERIFY(bandmap != nullptr);
+    QVERIFY(modeFilter != nullptr);
+    QCOMPARE(bandmap->rowCount(), 3);
+
+    modeFilter->setCurrentIndex(modeFilter->findData(QStringLiteral("CW")));
+    QCOMPARE(bandmap->rowCount(), 1);
+    QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("K1CW"));
+
+    modeFilter->setCurrentIndex(modeFilter->findData(QString()));
+    QCOMPARE(bandmap->rowCount(), 3);
+}
+
+void MainWindowUiTest::clusterAnnouncementsShowOnlyLiveSpots()
+{
+    auto *announcements = m_window->findChild<QTableWidget *>(
+        QStringLiteral("clusterLog"));
+    QVERIFY(announcements != nullptr);
+    QCOMPARE(announcements->rowCount(), 0);
+
+    QVERIFY(QObject::connect(
+        this, SIGNAL(dxClusterStatusChanged(logger::DxClusterStatus)),
+        m_window.get(), SLOT(updateDxClusterStatus(logger::DxClusterStatus)),
+        Qt::DirectConnection));
+    emit dxClusterStatusChanged(
+        {ConnectionState::Connected, QStringLiteral("test"), 0});
+
+    Spot spot;
+    spot.callsign = QStringLiteral("K1LIVE");
+    spot.frequencyHz = 7'040'000;
+    spot.band = QStringLiteral("40m");
+    spot.mode = QStringLiteral("CW");
+    spot.spotter = QStringLiteral("K1ABC");
+    spot.comment = QStringLiteral("CQ TEST");
+    spot.timestampUtc = QDateTime::currentDateTimeUtc();
+    spot.source = QStringLiteral("test");
+    QVERIFY(QMetaObject::invokeMethod(
+        m_window.get(), "receiveSpot", Qt::DirectConnection,
+        Q_ARG(logger::Spot, spot)));
+    QCOMPARE(announcements->rowCount(), 1);
+
+    emit dxClusterStatusChanged(
+        {ConnectionState::Disconnected, QStringLiteral("test"), 0});
+    QCOMPARE(announcements->rowCount(), 0);
 }
 
 void MainWindowUiTest::ctrlWipeClearsCallAndReceivedExchange()
