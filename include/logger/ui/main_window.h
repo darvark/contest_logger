@@ -93,6 +93,7 @@ private:
     void loadContests();
     const Contest *activeContest() const;
     void applyActiveLogStation();
+    void updateSentExchangeVisibility(int vfo);
     QStringList logNames(qint64 excludedId = 0) const;
     void saveSentExchangeValues(qint64 contestId,
                                 const QMap<QString, QString> &values);

@@ -99,6 +99,7 @@ private slots:
     void calculatesWpxPrefixes();
     void exposesCallsignValidation();
     void validatesConditionalExchangeAndQsoPointRules();
+    void scoresLocationRulesAndStationDependentExchange();
     void rejectsUnknownConditionalRuleFields();
 };
 
@@ -611,6 +612,96 @@ scoring:
     QCOMPARE(score.totalPoints, 5);
 }
 
+void ContestDefinitionTest::scoresLocationRulesAndStationDependentExchange()
+{
+    const auto definition = loadDefinition(QStringList{
+        QStringLiteral("schema_version: 1"),
+        QStringLiteral("id: station-scoring"),
+        QStringLiteral("name: Station scoring"),
+        QStringLiteral("bands: [20m]"),
+        QStringLiteral("modes: [CW, SSB]"),
+        QStringLiteral("exchange:"),
+        QStringLiteral("  sent:"),
+        QStringLiteral("    - {name: report, type: rst, default: \"599\"}"),
+        QStringLiteral("    - name: state"),
+        QStringLiteral("      type: text"),
+        QStringLiteral("      when:"),
+        QStringLiteral("        station.country: Poland"),
+        QStringLiteral("    - name: province"),
+        QStringLiteral("      type: text"),
+        QStringLiteral("      when:"),
+        QStringLiteral("        station.country: Canada"),
+        QStringLiteral("  received:"),
+        QStringLiteral("    - {name: report, type: rst}"),
+        QStringLiteral("scoring:"),
+        QStringLiteral("  qso_points: 1"),
+        QStringLiteral("  qso_point_rules:"),
+        QStringLiteral("    - {points: 5, when: {same_country: true}}"),
+        QStringLiteral("    - {points: 3, when: {same_continent: true}}"),
+        QStringLiteral("  multipliers:"),
+        QStringLiteral("    - {type: country, per_mode: true}")}
+                                               .join(QLatin1Char('\n')));
+
+    logger::ContestEvaluationContext context;
+    context.resolvedMultiplierValues
+        = {{QStringLiteral("dxcc"), QStringLiteral("Poland")},
+           {QStringLiteral("continent"), QStringLiteral("EU")},
+           {QStringLiteral("station.dxcc"), QStringLiteral("Poland")},
+           {QStringLiteral("station.continent"), QStringLiteral("EU")},
+           {QStringLiteral("same_country"), QStringLiteral("true")},
+           {QStringLiteral("same_continent"), QStringLiteral("true")},
+           {QStringLiteral("country"), QStringLiteral("Poland")}};
+    const auto localQso = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("SP9ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")}}, context,
+        std::nullopt,
+        {{QStringLiteral("state"), QStringLiteral("MA")},
+         {QStringLiteral("province"), QStringLiteral("ON")}});
+    QVERIFY(localQso.valid);
+    QCOMPARE(localQso.points, 5);
+    QCOMPARE(localQso.sentExchange.value(QStringLiteral("state")),
+             QStringLiteral("MA"));
+    QVERIFY(!localQso.sentExchange.contains(QStringLiteral("province")));
+
+    auto remoteContext = context;
+    remoteContext.resolvedMultiplierValues.insert(
+        QStringLiteral("same_country"), QStringLiteral("false"));
+    const auto remoteQso = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("DL1ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")}}, remoteContext,
+        std::nullopt, {{QStringLiteral("state"), QStringLiteral("MA")}});
+    QVERIFY(remoteQso.valid);
+    QCOMPARE(remoteQso.points, 3);
+
+    QVector<logger::Qso> qsos(2);
+    qsos[0].id = 1;
+    qsos[0].callsign = QStringLiteral("DL1ABC");
+    qsos[0].band = QStringLiteral("20m");
+    qsos[0].mode = QStringLiteral("CW");
+    qsos[0].timestampUtc = QDateTime::fromSecsSinceEpoch(1).toUTC();
+    qsos[1] = qsos[0];
+    qsos[1].id = 2;
+    qsos[1].callsign = QStringLiteral("JA1ABC");
+    qsos[1].mode = QStringLiteral("SSB");
+    qsos[1].timestampUtc = QDateTime::fromSecsSinceEpoch(2).toUTC();
+    const auto score = logger::ContestEngine().score(
+        definition, qsos, [&context](const logger::Qso &) {
+            return context.resolvedMultiplierValues;
+        });
+    QCOMPARE(score.totalMultipliers, 2);
+    QCOMPARE(score.perMode.value(QStringLiteral("CW")).multipliers, 1);
+    QCOMPARE(score.perMode.value(QStringLiteral("SSB")).multipliers, 1);
+    QVERIFY(score.multiplierCounts.value(QStringLiteral("country")) == 2);
+
+    const auto missingStationLocation = logger::ContestEngine().evaluate(
+        definition, QStringLiteral("SP9ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")}});
+    QVERIFY(!missingStationLocation.valid);
+}
+
 void ContestDefinitionTest::rejectsUnknownConditionalRuleFields()
 {
     const QString yaml = QStringLiteral(R"yaml(
@@ -635,7 +726,8 @@ scoring:
     QString error;
     QVERIFY(!logger::ContestDefinitionLoader().loadText(
         yaml, QStringLiteral("invalid-condition.yaml"), definition, &error));
-    QVERIFY(error.contains(QStringLiteral("unsupported condition 'dxcc_group'")));
+    QVERIFY(
+        error.contains(QStringLiteral("unsupported condition 'dxcc_group'")));
 }
 
 QTEST_GUILESS_MAIN(ContestDefinitionTest)

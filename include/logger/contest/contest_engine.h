@@ -10,6 +10,9 @@ public:
 
     static bool isValidCallsign(const QString &callsign);
     static QString wpxPrefix(const QString &callsign);
+    static bool sentFieldApplies(
+        const ExchangeFieldDefinition &field,
+        const QMap<QString, QString> &resolvedValues);
     QStringList multiplierKeys(
         const ContestDefinition &definition, const Qso &qso,
         const MultiplierResolver &resolver = {}) const;

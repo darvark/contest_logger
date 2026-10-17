@@ -71,6 +71,7 @@ Sekcja zawiera dwie niepuste listy pól (maks. 32 każda):
 | `label` | wszystkie | Etykieta w interfejsie. Domyślnie równa `name`. |
 | `required` | wszystkie | `true` (domyślnie) lub `false`. Pole opcjonalne puste nie trafia do logu. |
 | `required_when` | tylko `received` | Warunek, przy którym pole jest wymagane; gdy nie pasuje, pole jest opcjonalne. |
+| `when` | tylko `sent` | Warunek lokalizacji stacji, przy którym pole jest wysyłane; użyj go do alternatywnych wymian stacji. |
 | `default` | tylko `sent`, nie generowane | Wartość domyślna; musi spełniać regułę pola. |
 | `generated` | tylko `sent` typu `serial` | Numer jest nadawany automatycznie. |
 | `width` | wszystkie | Maksymalna liczba znaków (0-32). Dla `serial` uzupełnia zerami z przodu (`001`). |
@@ -127,6 +128,9 @@ liter.
 | `continent` | Kontynent rozpoznany przez `wl_cty.dat`. |
 | `dxcc`, `country` | Nazwa encji DXCC z `wl_cty.dat` (`country` jest aliasem `dxcc`, nie niezależnym katalogiem państw). |
 | `cq_zone`, `itu_zone` | Strefa rozpoznana przez `wl_cty.dat`. |
+| `station.dxcc`, `station.country` | Encja DXCC/kraj własnej stacji z jej znaku w `wl_cty.dat`. |
+| `station.continent`, `station.cq_zone`, `station.itu_zone` | Kontynent i strefy własnej stacji. |
+| `same_dxcc`, `same_country`, `same_continent` | `true`/`false`, porównanie encji, kraju (alias DXCC) lub kontynentu obu stacji. |
 | `exchange.<name>`, `received.<name>` | Wartość odebranej wymiany z pola `<name>`. |
 
 `required_when` dla pola odebranej wymiany używa tego samego formatu. Gdy
@@ -160,20 +164,41 @@ Północnej. QSO z NA na 20 m dostaje 5 punktów; w przeciwnym razie dopasowanie
 encją `United States` daje 3; QSO bez pasującej reguły dostaje wartość bazową.
 Reguły są oceniane od góry, dlatego bardziej szczegółowe warunki umieszczaj
 przed ogólnymi. Warunki geograficzne wymagają załadowanego `wl_cty.dat`;
-gdy metadane CTY są niedostępne, reguła nie dopasowuje się.
+gdy metadane korespondenta są niedostępne, reguła nie dopasowuje się. Warunki
+`station.*` i `same_*` porównują znak zapisany w QSO ze znakiem korespondenta.
+`country` jest obecnie nazwą encji CTY/DXCC, nie niezależnym katalogiem
+suwerennych państw.
 
 ### Mnożniki
 
 | Opcja | Opis |
 |---|---|
-| `type` | `exchange`, `prefix` lub `dxcc`. |
+| `type` | `exchange`, `prefix`, `dxcc` lub `country`. `country` i `dxcc` korzystają z encji `wl_cty.dat`. |
 | `field` | Tylko dla `exchange`: nazwa pola z `received`, którego wartość jest mnożnikiem (np. strefa, DOK). Wymagane. |
 | `per_band` | `true` – mnożnik liczony osobno na każdym paśmie; domyślnie `false`. |
+| `per_mode` | `true` – mnożnik liczony osobno dla każdej emisji; domyślnie `false`. Można łączyć z `per_band`. |
 
 Typ `prefix` używa prefiksu znaku (reguły WPX, np. `SP9`). Nie można zdefiniować dwóch identycznych mnożników.
-Typ `dxcc` używa nazwy encji rozpoznanej z `wl_cty.dat`; wymaga danych CTY
-dostarczonych przez resolver aplikacji. Przykład SPDX używa go do mnożnika
-DXCC/pasmo w profilu stacji polskiej.
+Typy `dxcc` i `country` używają nazwy encji rozpoznanej z `wl_cty.dat`;
+wymagają danych CTY dostarczonych przez resolver aplikacji. Klucz może więc
+być liczony osobno dla pasma, emisji lub obu wymiarów.
+
+Pole nadawanej wymiany może mieć `when` z warunkiem `station.*`. Pole jest
+pomijane dla innej lokalizacji, a gdy CTY nie pozwala rozpoznać własnej stacji,
+QSO zostaje odrzucone z błędem zamiast zapisać niekompletną wymianę. Warunki
+alternatywnych pól powinny być wzajemnie rozłączne, np.:
+
+```yaml
+exchange:
+  sent:
+    - {name: report, type: rst, default: "599"}
+    - name: state
+      type: text
+      when: {station.country: "United States"}
+    - name: province
+      type: text
+      when: {station.country: Canada}
+```
 
 ## Dublety (`dupe_key`)
 

@@ -105,6 +105,7 @@ void SupportDataParserTest::resolvesCtyMultiplierValues()
     const auto us = logger::SupportDataParser::resolveCtyMultipliers(
         QStringLiteral("K1ABC/P"), entries);
     QCOMPARE(us.value(QStringLiteral("dxcc")), QStringLiteral("United States"));
+    QCOMPARE(us.value(QStringLiteral("country")), QStringLiteral("United States"));
     QCOMPARE(us.value(QStringLiteral("primary_prefix")), QStringLiteral("K1ABC"));
     QCOMPARE(us.value(QStringLiteral("cq_zone")), QStringLiteral("5"));
     QCOMPARE(us.value(QStringLiteral("itu_zone")), QStringLiteral("8"));

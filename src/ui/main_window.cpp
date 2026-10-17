@@ -797,15 +797,22 @@ QMenu::item {
     background: transparent; color: #202020; padding: 4px 24px 4px 8px;
 }
 QMenu::item:selected { background: #4682B4; color: white; }
-QMenu::item:disabled { color: #777777; }
+QMenu::item:disabled { color: #666666; }
 QMenu::separator { height: 1px; background: #C0C0C0; margin: 4px 8px; }
 QToolBar {
     background: #ECECEC; color: #202020; border: none; spacing: 4px; padding: 2px;
 }
 QToolBar QCheckBox, QToolBar QLabel { color: #202020; }
-QToolBar QComboBox { color: #202020; background: white; }
-QStatusBar { background: #D4D0C8; }
-QStatusBar QLabel { padding: 0 8px; border-left: 1px solid #A0A0A0; }
+QComboBox { color: #202020; background: #FFFFFF; }
+QComboBox QAbstractItemView {
+    color: #202020; background: #FFFFFF;
+    selection-background-color: #C7E7E4; selection-color: #101010;
+}
+QComboBox QAbstractItemView::item:disabled { color: #666666; }
+QStatusBar { background: #D4D0C8; color: #202020; }
+QStatusBar QLabel {
+    color: #202020; padding: 0 8px; border-left: 1px solid #A0A0A0;
+}
 
 QDockWidget { color: white; font-weight: bold; }
 QDockWidget::title {
@@ -2845,6 +2852,9 @@ void MainWindow::selectContest(int index)
             } else if (!field.defaultValue.isEmpty()) {
                 detail += tr(", default: %1").arg(field.defaultValue);
             }
+            if (field.hasWhen) {
+                detail += tr(", station-dependent");
+            }
             if (field.width > 0) {
                 detail += tr(", width: %1").arg(field.width);
             }
@@ -2867,14 +2877,26 @@ void MainWindow::selectContest(int index)
         }
         QStringList multiplierDescriptions;
         for (const MultiplierDefinition &multiplier : definition->multipliers) {
-            const QString type = multiplier.type == QStringLiteral("exchange")
-                ? tr("Exchange: %1").arg(multiplier.field).toHtmlEscaped()
-                : tr("Callsign prefix").toHtmlEscaped();
-            multiplierDescriptions.append(
-                QStringLiteral("%1%2")
-                    .arg(type, multiplier.perBand
-                                   ? tr(" (per band)").toHtmlEscaped()
-                                   : QString()));
+            QString type;
+            if (multiplier.type == QStringLiteral("exchange")) {
+                type = tr("Exchange: %1").arg(multiplier.field).toHtmlEscaped();
+            } else if (multiplier.type == QStringLiteral("prefix")) {
+                type = tr("Callsign prefix").toHtmlEscaped();
+            } else if (multiplier.type == QStringLiteral("dxcc")) {
+                type = tr("DXCC entity").toHtmlEscaped();
+            } else {
+                type = tr("Country").toHtmlEscaped();
+            }
+            QStringList scopes;
+            if (multiplier.perBand) {
+                scopes.append(tr("per band"));
+            }
+            if (multiplier.perMode) {
+                scopes.append(tr("per mode"));
+            }
+            const QString scope = scopes.isEmpty()
+                ? QString() : QStringLiteral(" (%1)").arg(scopes.join(QStringLiteral(", ")));
+            multiplierDescriptions.append(QStringLiteral("%1%2").arg(type, scope));
         }
         const QString preview = tr(
             "<h2>%1</h2>"
@@ -3089,6 +3111,36 @@ void MainWindow::applyActiveLogStation()
         m_station.callsign = contest->stationCallsign;
     }
     updateStationLabel();
+    updateSentExchangeVisibility(0);
+    updateSentExchangeVisibility(1);
+}
+
+void MainWindow::updateSentExchangeVisibility(int vfo)
+{
+    vfo = qBound(0, vfo, 1);
+    const ContestDefinition *definition = activeDefinition();
+    if (definition == nullptr || m_sentExchangeEdits[vfo].isEmpty()) {
+        return;
+    }
+    Qso stationQso;
+    stationQso.callsign = m_station.callsign;
+    stationQso.stationCallsign = m_station.callsign;
+    const auto resolver = multiplierResolver();
+    const QMap<QString, QString> facts = resolver ? resolver(stationQso)
+                                                   : QMap<QString, QString>{};
+    if (!facts.contains(QStringLiteral("station.dxcc"))) {
+        return;
+    }
+    for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+        if (!field.hasWhen) {
+            continue;
+        }
+        QLineEdit *edit = m_sentExchangeEdits[vfo].value(field.name, nullptr);
+        if (edit != nullptr && edit->parentWidget() != nullptr) {
+            edit->parentWidget()->setVisible(
+                ContestEngine::sentFieldApplies(field, facts));
+        }
+    }
 }
 
 void MainWindow::importContestDefinition()
@@ -3833,6 +3885,7 @@ void MainWindow::rebuildQsoForm(int vfo)
         connect(edit, &QLineEdit::textChanged,
                 this, [this, vfo] { updateDupeIndicatorForVfo(vfo); });
     }
+    updateSentExchangeVisibility(vfo);
 }
 
 void MainWindow::updateSentReportForMode(int vfo)
@@ -4246,14 +4299,45 @@ ContestEngine::MultiplierResolver MainWindow::multiplierResolver() const
         return {};
     }
     return [this](const Qso &qso) {
-        const QString call = qso.callsign.trimmed().toUpper();
-        const auto cached = m_ctyCache.constFind(call);
-        if (cached != m_ctyCache.cend()) {
-            return cached.value();
+        const auto resolve = [this](const QString &rawCall) {
+            const QString call = rawCall.trimmed().toUpper();
+            const auto cached = m_ctyCache.constFind(call);
+            if (cached != m_ctyCache.cend()) {
+                return cached.value();
+            }
+            const QMap<QString, QString> resolved =
+                SupportDataParser::resolveCtyMultipliers(call, m_ctyPrefixes);
+            m_ctyCache.insert(call, resolved);
+            return resolved;
+        };
+        QMap<QString, QString> resolved = resolve(qso.callsign);
+        const QString stationCall = qso.stationCallsign.isEmpty()
+            ? m_station.callsign : qso.stationCallsign;
+        const QMap<QString, QString> station = resolve(stationCall);
+        for (const QString &key : {QStringLiteral("dxcc"),
+                                   QStringLiteral("country"),
+                                   QStringLiteral("continent"),
+                                   QStringLiteral("cq_zone"),
+                                   QStringLiteral("itu_zone")}) {
+            if (station.contains(key)) {
+                resolved.insert(QStringLiteral("station.%1").arg(key),
+                                station.value(key));
+            }
         }
-        const QMap<QString, QString> resolved =
-            SupportDataParser::resolveCtyMultipliers(call, m_ctyPrefixes);
-        m_ctyCache.insert(call, resolved);
+        if (resolved.contains(QStringLiteral("dxcc"))
+            && station.contains(QStringLiteral("dxcc"))) {
+            const bool sameEntity = resolved.value(QStringLiteral("dxcc"))
+                == station.value(QStringLiteral("dxcc"));
+            resolved.insert(QStringLiteral("same_dxcc"), sameEntity ? "true" : "false");
+            resolved.insert(QStringLiteral("same_country"), sameEntity ? "true" : "false");
+        }
+        if (resolved.contains(QStringLiteral("continent"))
+            && station.contains(QStringLiteral("continent"))) {
+            resolved.insert(QStringLiteral("same_continent"),
+                resolved.value(QStringLiteral("continent"))
+                        == station.value(QStringLiteral("continent"))
+                    ? "true" : "false");
+        }
         return resolved;
     };
 }
@@ -4553,6 +4637,7 @@ void MainWindow::logQsoForVfo(int vfo)
             engine.buildContext(*definition, previousQsos, resolver);
         Qso candidate;
         candidate.callsign = callsign;
+        candidate.stationCallsign = m_station.callsign;
         if (resolver) {
             context.resolvedMultiplierValues = resolver(candidate);
         }
@@ -4842,8 +4927,16 @@ void MainWindow::editSelectedQso(int row, int)
             if (!problems.isEmpty()) {
                 return problems;
             }
-            const ContestEvaluationContext context =
-                ContestEngine().buildContext(*definition, others, multiplierResolver());
+            const auto resolver = multiplierResolver();
+            ContestEvaluationContext context =
+                ContestEngine().buildContext(*definition, others, resolver);
+            Qso locationContext = candidate;
+            if (locationContext.stationCallsign.isEmpty()) {
+                locationContext.stationCallsign = m_station.callsign;
+            }
+            if (resolver) {
+                context.resolvedMultiplierValues = resolver(locationContext);
+            }
             const ContestEvaluationResult evaluation =
                 ContestEngine().evaluate(*definition, candidate.callsign, candidate.band,
                                          candidate.mode, receivedFields, context, serial,

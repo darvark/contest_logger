@@ -27,6 +27,10 @@ QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
     for (auto it = resolved.cbegin(); it != resolved.cend(); ++it) {
         facts.insert(it.key().toLower(), normalized(it.value()));
     }
+    if (facts.contains(QStringLiteral("station.dxcc"))) {
+        facts.insert(QStringLiteral("station.country"),
+                     facts.value(QStringLiteral("station.dxcc")));
+    }
     facts.insert(QStringLiteral("band"), band.trimmed().toLower());
     facts.insert(QStringLiteral("mode"), normalized(mode));
     for (auto it = exchange.cbegin(); it != exchange.cend(); ++it) {
@@ -37,6 +41,13 @@ QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
     }
     if (facts.contains(QStringLiteral("dxcc"))) {
         facts.insert(QStringLiteral("country"), facts.value(QStringLiteral("dxcc")));
+    }
+    for (const QString &key : {QStringLiteral("same_dxcc"),
+                               QStringLiteral("same_country"),
+                               QStringLiteral("same_continent")}) {
+        if (facts.contains(key)) {
+            facts.insert(key, normalized(facts.value(key)));
+        }
     }
     return facts;
 }
@@ -156,7 +167,7 @@ QString multiplierValue(const MultiplierDefinition &multiplier,
 }
 
 QString multiplierKey(const MultiplierDefinition &multiplier, const QString &value,
-                      const QString &band)
+                      const QString &band, const QString &mode)
 {
     QString key = multiplier.type == QStringLiteral("exchange")
         ? multiplier.type + QLatin1Char(':') + multiplier.field
@@ -164,6 +175,9 @@ QString multiplierKey(const MultiplierDefinition &multiplier, const QString &val
         : multiplier.type + QLatin1Char(':') + value;
     if (multiplier.perBand) {
         key += QLatin1Char('@') + band.trimmed().toLower();
+    }
+    if (multiplier.perMode) {
+        key += QLatin1Char('@') + mode.trimmed().toUpper();
     }
     return key;
 }
@@ -185,6 +199,14 @@ bool ContestEngine::isValidCallsign(const QString &callsign)
 {
     return QRegularExpression(QStringLiteral("^[A-Z0-9/]{3,}$"))
         .match(normalized(callsign)).hasMatch();
+}
+
+bool ContestEngine::sentFieldApplies(
+    const ExchangeFieldDefinition &field,
+    const QMap<QString, QString> &resolvedValues)
+{
+    return !field.hasWhen
+        || conditionMatches(field.when, conditionFacts({}, {}, {}, resolvedValues));
 }
 
 QString ContestEngine::wpxPrefix(const QString &rawCallsign)
@@ -249,7 +271,7 @@ QStringList ContestEngine::multiplierKeys(
                                               ContestEvaluationContext{.resolvedMultiplierValues = resolved},
                                               qso.callsign);
         if (!value.isEmpty()) {
-            keys.append(multiplierKey(multiplier, value, qso.band));
+            keys.append(multiplierKey(multiplier, value, qso.band, qso.mode));
         }
     }
     return keys;
@@ -321,12 +343,14 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
     for (const Qso &qso : ordered) {
         ++result.totalQsos;
         ++result.perBand[qso.band.trimmed().toLower()].qsos;
+        ++result.perMode[qso.mode.trimmed().toUpper()].qsos;
         const QMap<QString, QString> resolved = resolver ? resolver(qso)
                                                           : QMap<QString, QString>{};
         const int points = qso.points > 0
             ? qso.points : pointsForQso(definition, qso, resolved);
         result.totalPoints += points;
         result.perBand[qso.band.trimmed().toLower()].points += points;
+        result.perMode[qso.mode.trimmed().toUpper()].points += points;
         const MultiplierResolver currentResolver = [&resolved](const Qso &) {
             return resolved;
         };
@@ -347,7 +371,7 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
                 }
                 continue;
             }
-            const QString key = multiplierKey(multiplier, value, qso.band);
+            const QString key = multiplierKey(multiplier, value, qso.band, qso.mode);
             if (!keys.contains(key) || worked.contains(key)) {
                 continue;
             }
@@ -358,6 +382,9 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
             ContestBandScore &bandScore = result.perBand[qso.band.trimmed().toLower()];
             ++bandScore.multipliers;
             ++bandScore.multiplierCounts[multiplier.type];
+            ContestBandScore &modeScore = result.perMode[qso.mode.trimmed().toUpper()];
+            ++modeScore.multipliers;
+            ++modeScore.multiplierCounts[multiplier.type];
         }
     }
     result.finalScore = result.totalPoints
@@ -472,7 +499,29 @@ ContestEvaluationResult ContestEngine::evaluate(
     }
     result.serialNumber = serial;
 
+    const auto fieldConditionFacts = conditionFacts(
+        normalizedBand, normalizedMode, normalizedReceived,
+        context.resolvedMultiplierValues);
+
     for (const ExchangeFieldDefinition &field : definition.sentExchange) {
+        if (field.hasWhen) {
+            bool locationUnresolved = false;
+            for (auto condition = field.when.cbegin(); condition != field.when.cend();
+                 ++condition) {
+                if (!fieldConditionFacts.contains(condition.key())) {
+                    addIssue(result, QStringLiteral("sent.%1").arg(field.name),
+                             QStringLiteral("requires station CTY data to select the exchange"));
+                    locationUnresolved = true;
+                    break;
+                }
+            }
+            if (locationUnresolved) {
+                continue;
+            }
+        }
+        if (!sentFieldApplies(field, context.resolvedMultiplierValues)) {
+            continue;
+        }
         QString value = field.defaultValue;
         if (field.type == ExchangeFieldType::Serial && field.generated) {
             value = QString::number(serial);
@@ -491,9 +540,6 @@ ContestEvaluationResult ContestEngine::evaluate(
         }
     }
 
-    const auto fieldConditionFacts = conditionFacts(
-        normalizedBand, normalizedMode, normalizedReceived,
-        context.resolvedMultiplierValues);
     for (const ExchangeFieldDefinition &field : definition.receivedExchange) {
         const QString rawValue = normalizedReceived.value(field.name);
         ExchangeFieldDefinition validationField = field;
@@ -534,7 +580,7 @@ ContestEvaluationResult ContestEngine::evaluate(
                     .arg(multiplier.type));
             continue;
         }
-        const QString key = multiplierKey(multiplier, value, normalizedBand);
+        const QString key = multiplierKey(multiplier, value, normalizedBand, normalizedMode);
         if (!context.workedMultiplierKeys.contains(key)) {
             result.newMultiplierKeys.append(key);
         }

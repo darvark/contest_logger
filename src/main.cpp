@@ -18,6 +18,13 @@
 int main(int argc, char *argv[])
 {
     Q_INIT_RESOURCE(contests);
+#if defined(Q_OS_LINUX)
+    if (qEnvironmentVariable("XDG_CURRENT_DESKTOP")
+            .contains(QStringLiteral("KDE"), Qt::CaseInsensitive)
+        && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORMTHEME")) {
+        qputenv("QT_QPA_PLATFORMTHEME", QByteArrayLiteral("generic"));
+    }
+#endif
     QApplication application(argc, argv);
     QApplication::setStyle(QStringLiteral("Fusion"));
     QCoreApplication::setOrganizationName(QStringLiteral("ContestLogger"));

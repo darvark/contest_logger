@@ -382,7 +382,8 @@ QMap<QString, QString> SupportDataParser::resolveCtyMultipliers(
     }
     const QString cqZone = QString::number(match->cqZone);
     const QString ituZone = QString::number(match->ituZone);
-    return {{QStringLiteral("dxcc"), match->entity},
+        return {{QStringLiteral("dxcc"), match->entity},
+            {QStringLiteral("country"), match->entity},
             {QStringLiteral("primary_prefix"), match->prefix},
             {QStringLiteral("dxcc_prefix"), match->prefix},
             {QStringLiteral("cq_zone"), cqZone},

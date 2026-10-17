@@ -34,12 +34,15 @@ struct ExchangeFieldDefinition {
     QStringList values;
     QMap<QString, QString> requiredWhen;
     bool hasRequiredWhen = false;
+    QMap<QString, QString> when;
+    bool hasWhen = false;
 };
 
 struct MultiplierDefinition {
     QString type;
     QString field;
     bool perBand = false;
+    bool perMode = false;
 };
 
 struct QsoPointsRule {
@@ -92,6 +95,7 @@ struct ContestScore {
     int finalScore = 0;
     QMap<QString, int> multiplierCounts;
     QMap<QString, ContestBandScore> perBand;
+    QMap<QString, ContestBandScore> perMode;
     QStringList unresolvedMultiplierKeys;
     QHash<qint64, int> newMultipliersByQsoId;
 };

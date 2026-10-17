@@ -203,5 +203,7 @@ Lista powstała po przeglądzie implementacji kolejnych etapów loggera. Prioryt
   osobne YAML dla stacji polskich i zagranicznych, punktację oraz mnożniki
   per regulamin i jawne wskazanie potrzeby CTY dla DXCC.
 - [ ] **Dokończyć punktację i mnożniki reguł sponsorów.** Silnik musi umieć
-  porównywać lokalizacje obu korespondentów, liczyć DXCC/kraje i mnożniki
-  osobno dla emisji oraz obsługiwać alternatywne wymiany zależne od stacji.
+- [x] **Dokończyć punktację i mnożniki reguł sponsorów.** Silnik porównuje
+  encje DXCC/kraje i kontynenty obu stacji, obsługuje mnożniki `country`/`dxcc`
+  rozdzielane per emisja oraz alternatywne pola wymiany `sent.when` zależne od
+  lokalizacji własnej stacji; zakres jest opisany i pokryty testami.
