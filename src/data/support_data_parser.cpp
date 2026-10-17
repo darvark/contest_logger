@@ -3,6 +3,9 @@
 #include <QRegularExpression>
 #include <QSet>
 
+#include <algorithm>
+#include <cmath>
+
 namespace logger {
 namespace {
 
@@ -106,6 +109,18 @@ bool parseCtyRecord(const QString &record, QVector<CtyPrefixEntry> &output)
         return false;
     }
 
+    bool latOk = false;
+    bool lonOk = false;
+    const double latitude = columns.at(4).trimmed().toDouble(&latOk);
+    // cty.dat stores longitude with west positive.
+    const double longitude = -columns.at(5).trimmed().toDouble(&lonOk);
+    const bool hasLocation = latOk && lonOk && qAbs(latitude) <= 90.0
+        && qAbs(longitude) <= 180.0;
+
+    // Aliases may carry overrides: (CQ) [ITU] <lat/lon> {continent} ~tz~.
+    static const QRegularExpression aliasPattern(QStringLiteral(
+        "^([A-Z0-9/]{1,16})(?:\\((\\d+)\\))?(?:\\[(\\d+)\\])?"
+        "(?:<([-+0-9.]+)/([-+0-9.]+)>)?(?:\\{([A-Z]{2})\\})?(?:~[^~]*~)?$"));
     const QString prefixText = columns.mid(8).join(QLatin1Char(':'));
     const QStringList aliases = prefixText.split(QLatin1Char(','),
                                                   Qt::SkipEmptyParts);
@@ -116,12 +131,31 @@ bool parseCtyRecord(const QString &record, QVector<CtyPrefixEntry> &output)
                || alias.startsWith(QLatin1Char('='))) {
             alias.remove(0, 1);
         }
-        alias = alias.toUpper();
-        if (QRegularExpression(QStringLiteral("^[A-Z0-9]{1,8}$"))
-                .match(alias).hasMatch()) {
-            output.append({alias, entity, continent, cqZone, ituZone,
-                           exactCallsign});
+        const QRegularExpressionMatch match =
+            aliasPattern.match(alias.toUpper());
+        if (!match.hasMatch()) {
+            continue;
         }
+        CtyPrefixEntry entry{match.captured(1), entity,
+                             match.captured(6).isEmpty() ? continent
+                                                         : match.captured(6),
+                             match.captured(2).isEmpty() ? cqZone
+                                                         : match.captured(2).toInt(),
+                             match.captured(3).isEmpty() ? ituZone
+                                                         : match.captured(3).toInt(),
+                             exactCallsign, hasLocation, latitude, longitude};
+        if (!match.captured(4).isEmpty()) {
+            bool aOk = false;
+            bool bOk = false;
+            const double lat = match.captured(4).toDouble(&aOk);
+            const double lon = -match.captured(5).toDouble(&bOk);
+            if (aOk && bOk) {
+                entry.latitude = lat;
+                entry.longitude = lon;
+                entry.hasLocation = true;
+            }
+        }
+        output.append(entry);
     }
     return output.size() > initialSize;
 }
@@ -251,9 +285,15 @@ bool SupportDataParser::parseCtyDat(const QString &contents,
     prefixes.clear();
     QString pending;
     const QStringList lines = linesWithoutBom(contents);
+    bool commentContinues = false;
     for (const QString &line : lines) {
         const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) {
+        if (trimmed.isEmpty()) {
+            continue;
+        }
+        // wl_cty.dat comments may wrap onto lines that lack the leading '#'.
+        if (trimmed.startsWith(QLatin1Char('#')) || commentContinues) {
+            commentContinues = trimmed.endsWith(QLatin1Char(','));
             continue;
         }
         if (!pending.isEmpty()) {
@@ -285,7 +325,72 @@ bool SupportDataParser::parseCtyDat(const QString &contents,
 }
 
 
+bool SupportDataParser::maidenheadToLatLon(const QString &rawLocator,
+                                           double &latitude, double &longitude)
+{
+    static const QRegularExpression pattern(QStringLiteral(
+        "^[A-R]{2}[0-9]{2}(?:[A-X]{2}(?:[0-9]{2})?)?$"));
+    const QString locator = rawLocator.trimmed().toUpper();
+    if (!pattern.match(locator).hasMatch()) {
+        return false;
+    }
+    double lon = (locator.at(0).unicode() - 'A') * 20.0 - 180.0
+        + (locator.at(2).unicode() - '0') * 2.0;
+    double lat = (locator.at(1).unicode() - 'A') * 10.0 - 90.0
+        + (locator.at(3).unicode() - '0') * 1.0;
+    double lonStep = 2.0;
+    double latStep = 1.0;
+    if (locator.size() >= 6) {
+        lonStep = 5.0 / 60.0;
+        latStep = 2.5 / 60.0;
+        lon += (locator.at(4).unicode() - 'A') * lonStep;
+        lat += (locator.at(5).unicode() - 'A') * latStep;
+    }
+    longitude = lon + lonStep / 2.0;
+    latitude = lat + latStep / 2.0;
+    return true;
+}
+
+GeoBearing SupportDataParser::bearingBetween(double fromLat, double fromLon,
+                                             double toLat, double toLon)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kEarthRadiusKm = 6371.0;
+    const double phi1 = fromLat * kPi / 180.0;
+    const double phi2 = toLat * kPi / 180.0;
+    const double dLambda = (toLon - fromLon) * kPi / 180.0;
+    const double y = std::sin(dLambda) * std::cos(phi2);
+    const double x = std::cos(phi1) * std::sin(phi2)
+        - std::sin(phi1) * std::cos(phi2) * std::cos(dLambda);
+    double azimuth = std::atan2(y, x) * 180.0 / kPi;
+    if (azimuth < 0.0) {
+        azimuth += 360.0;
+    }
+    const double dPhi = phi2 - phi1;
+    const double a = std::sin(dPhi / 2) * std::sin(dPhi / 2)
+        + std::cos(phi1) * std::cos(phi2)
+            * std::sin(dLambda / 2) * std::sin(dLambda / 2);
+    return {azimuth, 2.0 * kEarthRadiusKm * std::asin(std::min(1.0, std::sqrt(a)))};
+}
+
 QMap<QString, QString> SupportDataParser::resolveCtyMultipliers(
+    const QString &rawCallsign, const QVector<CtyPrefixEntry> &prefixes)
+{
+    const CtyPrefixEntry *match = findCtyEntry(rawCallsign, prefixes);
+    if (match == nullptr) {
+        return {};
+    }
+    const QString cqZone = QString::number(match->cqZone);
+    const QString ituZone = QString::number(match->ituZone);
+    return {{QStringLiteral("dxcc"), match->entity},
+            {QStringLiteral("primary_prefix"), match->prefix},
+            {QStringLiteral("dxcc_prefix"), match->prefix},
+            {QStringLiteral("cq_zone"), cqZone},
+            {QStringLiteral("itu_zone"), ituZone},
+            {QStringLiteral("continent"), match->continent}};
+}
+
+const CtyPrefixEntry *SupportDataParser::findCtyEntry(
     const QString &rawCallsign, const QVector<CtyPrefixEntry> &prefixes)
 {
     const QString callsign = rawCallsign.trimmed().toUpper();
@@ -319,17 +424,7 @@ QMap<QString, QString> SupportDataParser::resolveCtyMultipliers(
             }
         }
     }
-    if (match == nullptr) {
-        return {};
-    }
-    const QString cqZone = QString::number(match->cqZone);
-    const QString ituZone = QString::number(match->ituZone);
-    return {{QStringLiteral("dxcc"), match->entity},
-            {QStringLiteral("primary_prefix"), match->prefix},
-            {QStringLiteral("dxcc_prefix"), match->prefix},
-            {QStringLiteral("cq_zone"), cqZone},
-            {QStringLiteral("itu_zone"), ituZone},
-            {QStringLiteral("continent"), match->continent}};
+    return match;
 }
 
 } // namespace logger

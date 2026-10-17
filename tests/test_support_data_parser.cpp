@@ -12,6 +12,7 @@ private slots:
     void parsesMultilineCtyDat();
     void rejectsMalformedSupportFiles();
     void resolvesCtyMultiplierValues();
+    void parsesCtyOverridesAndBearing();
 };
 
 void SupportDataParserTest::parsesHeaderedCallHistory()
@@ -111,6 +112,40 @@ void SupportDataParserTest::resolvesCtyMultiplierValues()
     QCOMPARE(logger::SupportDataParser::resolveCtyMultipliers(
                  QStringLiteral("DL1ABC"), entries).value(QStringLiteral("dxcc")),
              QStringLiteral("Germany"));
+}
+
+void SupportDataParserTest::parsesCtyOverridesAndBearing()
+{
+    QVector<logger::CtyPrefixEntry> entries;
+    QString error;
+    QVERIFY2(logger::SupportDataParser::parseCtyDat(
+                 QStringLiteral("Poland: 15: 28: EU: 52.28: -18.67: -1.0: SP:\n"
+                                "    3Z,SP,SQ(16)[29],=SP9ABC/P;\n"),
+                 entries, &error), qPrintable(error));
+    QCOMPARE(entries.size(), 4);
+    const auto *sq = logger::SupportDataParser::findCtyEntry(
+        QStringLiteral("SQ1X"), entries);
+    QVERIFY(sq != nullptr);
+    QCOMPARE(sq->cqZone, 16);
+    QCOMPARE(sq->ituZone, 29);
+    QCOMPARE(sq->longitude, 18.67);
+    QVERIFY(logger::SupportDataParser::findCtyEntry(
+                QStringLiteral("SP9ABC/P"), entries) != nullptr);
+
+    QVERIFY2(logger::SupportDataParser::parseCtyDat(
+                 QStringLiteral("# BY0: BY0A(23)[42],\n         BY0B(23)[42];\n"
+                                "Poland: 15: 28: EU: 52.28: -18.67: -1.0: SP:\n    SP;\n"),
+                 entries, &error), qPrintable(error));
+    QCOMPARE(entries.size(), 1);
+
+    double lat = 0;
+    double lon = 0;
+    QVERIFY(logger::SupportDataParser::maidenheadToLatLon(
+        QStringLiteral("JO91"), lat, lon));
+    const auto east = logger::SupportDataParser::bearingBetween(0, 0, 0, 10);
+    QVERIFY(qAbs(east.azimuthDegrees - 90.0) < 0.01);
+    QVERIFY(!logger::SupportDataParser::maidenheadToLatLon(
+        QStringLiteral("ZZ99"), lat, lon));
 }
 
 QTEST_GUILESS_MAIN(SupportDataParserTest)

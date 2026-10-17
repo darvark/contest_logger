@@ -3477,31 +3477,12 @@ void MainWindow::updateCallLookup(int vfo)
         }
     }
 
-    CtyPrefixEntry bestMatch;
-    qsizetype bestLength = 0;
-    const QStringList callParts = callsign.split(QLatin1Char('/'), Qt::SkipEmptyParts);
-    for (const CtyPrefixEntry &entry : m_ctyPrefixes) {
-        if (entry.exactCallsign) {
-            if (callsign.compare(entry.prefix, Qt::CaseInsensitive) == 0
-                && entry.prefix.size() > bestLength) {
-                bestMatch = entry;
-                bestLength = entry.prefix.size();
-            }
-            continue;
-        }
-        for (const QString &part : callParts) {
-            if (part.startsWith(entry.prefix, Qt::CaseInsensitive)
-                && entry.prefix.size() > bestLength) {
-                bestMatch = entry;
-                bestLength = entry.prefix.size();
-            }
-        }
-    }
-    if (bestLength > 0) {
+    if (const CtyPrefixEntry *bestMatch =
+            SupportDataParser::findCtyEntry(callsign, m_ctyPrefixes)) {
         details.append(tr("%1 · CQ %2 / ITU %3")
-                           .arg(bestMatch.entity)
-                           .arg(bestMatch.cqZone)
-                           .arg(bestMatch.ituZone));
+                           .arg(bestMatch->entity)
+                           .arg(bestMatch->cqZone)
+                           .arg(bestMatch->ituZone));
     }
     m_callInfoLabels[vfo]->setText(details.join(QStringLiteral(" — ")));
 }
@@ -4458,11 +4439,32 @@ void MainWindow::refreshCheckWindows()
         m_checkCallTitle->setText(tr("Type a callsign to see where it is worked."));
     } else {
         const QString info = m_callInfoLabels[context]->text();
+        QString dxcc;
+        if (const CtyPrefixEntry *entry =
+                SupportDataParser::findCtyEntry(callsign, m_ctyPrefixes)) {
+            dxcc = tr("DXCC: %1 (%2), %3, CQ %4 / ITU %5")
+                       .arg(entry->entity, entry->prefix, entry->continent)
+                       .arg(entry->cqZone)
+                       .arg(entry->ituZone);
+            double myLat = 0.0;
+            double myLon = 0.0;
+            if (entry->hasLocation
+                && SupportDataParser::maidenheadToLatLon(m_station.grid, myLat, myLon)) {
+                const GeoBearing bearing = SupportDataParser::bearingBetween(
+                    myLat, myLon, entry->latitude, entry->longitude);
+                dxcc += tr("\nAzimuth: %1° · %2 km")
+                            .arg(qRound(bearing.azimuthDegrees))
+                            .arg(qRound(bearing.distanceKm));
+            } else if (entry->hasLocation) {
+                dxcc += tr("\nAzimuth: set a valid station grid locator");
+            }
+        }
         m_checkCallTitle->setText(
-            QStringLiteral("%1 — %2%3")
+            QStringLiteral("%1 — %2%3%4")
                 .arg(callsign,
                      workedCount == 0 ? tr("not in log") : tr("%n QSO(s)", "", workedCount),
-                     info.isEmpty() ? QString() : QStringLiteral(" — ") + info));
+                     info.isEmpty() ? QString() : QStringLiteral(" — ") + info,
+                     dxcc.isEmpty() ? QString() : QLatin1Char('\n') + dxcc));
     }
 }
 

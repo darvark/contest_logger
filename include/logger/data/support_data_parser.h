@@ -20,6 +20,14 @@ struct CtyPrefixEntry {
     int cqZone = 0;
     int ituZone = 0;
     bool exactCallsign = false;
+    bool hasLocation = false;
+    double latitude = 0.0;   // degrees, north positive
+    double longitude = 0.0;  // degrees, east positive
+};
+
+struct GeoBearing {
+    double azimuthDegrees = 0.0;
+    double distanceKm = 0.0;
 };
 
 class SupportDataParser final {
@@ -32,6 +40,12 @@ public:
     static bool parseCtyDat(const QString &contents,
                             QVector<CtyPrefixEntry> &prefixes,
                             QString *error = nullptr);
+    static const CtyPrefixEntry *findCtyEntry(
+        const QString &callsign, const QVector<CtyPrefixEntry> &prefixes);
+    static bool maidenheadToLatLon(const QString &locator, double &latitude,
+                                   double &longitude);
+    static GeoBearing bearingBetween(double fromLat, double fromLon,
+                                     double toLat, double toLon);
     static QMap<QString, QString> resolveCtyMultipliers(
         const QString &callsign, const QVector<CtyPrefixEntry> &prefixes);
 };
