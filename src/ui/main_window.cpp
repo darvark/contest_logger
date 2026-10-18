@@ -1197,30 +1197,36 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             m_callsignEdits[other]->setFocus();
         }
     });
+    const auto stepAndActivateSpot = [this](int direction) {
+        QTableWidget *bandmap =
+            (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
+                && currentEntryContext() == 0
+            ? m_radioABandmap : m_bandmap;
+        selectAdjacentBandmapRow(bandmap, direction);
+        const QTableWidgetItem *item = bandmap->item(bandmap->currentRow(), 0);
+        if (item == nullptr) {
+            return;
+        }
+        if (bandmap == m_radioABandmap) {
+            const int radio = m_so2rToggle->isChecked()
+                ? 0 : m_activeRadioSelector->currentData().toInt();
+            activateSpotId(item->data(Qt::UserRole).toLongLong(), radio, 0);
+        } else {
+            activateSpot(bandmap->currentRow(), 0);
+        }
+    };
     auto *previousSpotAction = operatingMenu->addAction(tr("Previous bandmap spot"));
     previousSpotAction->setObjectName(QStringLiteral("previousBandmapSpotAction"));
     previousSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Up));
     previousSpotAction->setShortcutContext(Qt::WindowShortcut);
     connect(previousSpotAction, &QAction::triggered, this,
-            [this] {
-                QTableWidget *bandmap =
-                    (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
-                        && currentEntryContext() == 0
-                    ? m_radioABandmap : m_bandmap;
-                selectAdjacentBandmapRow(bandmap, -1);
-            });
+            [stepAndActivateSpot] { stepAndActivateSpot(-1); });
     auto *nextSpotAction = operatingMenu->addAction(tr("Next bandmap spot"));
     nextSpotAction->setObjectName(QStringLiteral("nextBandmapSpotAction"));
     nextSpotAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Down));
     nextSpotAction->setShortcutContext(Qt::WindowShortcut);
     connect(nextSpotAction, &QAction::triggered, this,
-            [this] {
-                QTableWidget *bandmap =
-                    (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
-                        && currentEntryContext() == 0
-                    ? m_radioABandmap : m_bandmap;
-                selectAdjacentBandmapRow(bandmap, 1);
-            });
+            [stepAndActivateSpot] { stepAndActivateSpot(1); });
     operatingMenu->addAction(abortCwAction);
     operatingMenu->addSeparator();
     auto *editKeysMenu = new QMenu(tr("Edit function key message"), operatingMenu);
@@ -1887,7 +1893,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_bandmap->setFocusPolicy(Qt::StrongFocus);
     m_bandmap->installEventFilter(this);
     m_bandmap->setToolTip(
-        tr("Ctrl+Up/Down selects a spot; Enter copies its callsign and tunes the active radio. "
+        tr("Ctrl+Up/Down selects a spot, copies its callsign and tunes the active radio; Enter repeats it. "
            "Orange = spot nearest the active radio frequency; grey = already worked."));
     connect(m_bandmap, &QTableWidget::cellDoubleClicked,
             this, &MainWindow::activateSpot);
