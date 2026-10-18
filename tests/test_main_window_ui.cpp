@@ -43,6 +43,7 @@ private slots:
     void cleanup();
     void contestDefinitionConstrainsBandAndModeSelectors();
     void connectionMenuReconnectsAndDisconnects();
+    void dxClusterDialogSelectsDirectoryOrCustomServer();
     void radioConfigDialogPersistsHamlibAndCatTimingOptions();
     void cwKeyerDialogPersistsHamlibSerialControlOptions();
     void functionKeyMessagesAreManuallyConfigurable();
@@ -223,6 +224,56 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
     disconnectCw->trigger();
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Disconnected")));
+}
+
+void MainWindowUiTest::dxClusterDialogSelectsDirectoryOrCustomServer()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("dxCluster/host"), QStringLiteral("my.cluster.test"));
+    settings.setValue(QStringLiteral("dxCluster/port"), 7777);
+    QAction *configureCluster = nullptr;
+    for (QAction *action : m_window->findChildren<QAction *>()) {
+        if (action->text() == QStringLiteral("&DX cluster...")) {
+            configureCluster = action;
+            break;
+        }
+    }
+    QVERIFY(configureCluster != nullptr);
+
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        dialogSeen = true;
+        auto *server = dialog->findChild<QComboBox *>(QStringLiteral("dxClusterServer"));
+        auto *host = dialog->findChild<QLineEdit *>(QStringLiteral("dxClusterHost"));
+        auto *port = dialog->findChild<QSpinBox *>(QStringLiteral("dxClusterPort"));
+        QVERIFY(server != nullptr);
+        QVERIFY(host != nullptr);
+        QVERIFY(port != nullptr);
+        QCOMPARE(server->count(), 31);
+        QCOMPARE(server->currentIndex(), 0);
+        QCOMPARE(host->text(), QStringLiteral("my.cluster.test"));
+        QCOMPARE(port->value(), 7777);
+
+        const int poland = server->findText(QStringLiteral("SP6PWS-2"),
+                                            Qt::MatchStartsWith);
+        QVERIFY(poland > 0);
+        server->setCurrentIndex(poland);
+        QCOMPARE(host->text(), QStringLiteral("sp6xd.weles.pro"));
+        QCOMPARE(port->value(), 7300);
+        QVERIFY(!host->isEnabled());
+        QVERIFY(!port->isEnabled());
+
+        server->setCurrentIndex(0);
+        QVERIFY(host->isEnabled());
+        QVERIFY(port->isEnabled());
+        host->setText(QStringLiteral("custom.cluster.test"));
+        port->setValue(7373);
+        QCOMPARE(host->text(), QStringLiteral("custom.cluster.test"));
+        QCOMPARE(port->value(), 7373);
+        dialog->reject();
+    });
+    configureCluster->trigger();
+    QVERIFY(dialogSeen);
 }
 
 void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()

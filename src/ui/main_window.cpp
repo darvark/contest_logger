@@ -466,9 +466,57 @@ public:
         setWindowTitle(tr("DX cluster connection"));
         auto *layout = new QVBoxLayout(this);
         auto *form = new QFormLayout;
+        m_server = new QComboBox(this);
+        m_server->setObjectName(QStringLiteral("dxClusterServer"));
+        m_server->addItem(tr("Custom server"));
+        struct ClusterServer {
+            QString label;
+            QString host;
+            int port;
+        };
+        const QList<ClusterServer> servers{
+            {QStringLiteral("DA0BCC-7"), QStringLiteral("dx.da0bcc.de"), 7300},
+            {QStringLiteral("F4BPO-1"), QStringLiteral("cluster.f4bpo.com"), 7300},
+            {QStringLiteral("EA2CW-1"), QStringLiteral("cluster.gautxori.com"), 7300},
+            {QStringLiteral("EA4URE-2"), QStringLiteral("ea4ure.com"), 7300},
+            {QStringLiteral("PI1LAP-1"), QStringLiteral("dx.packet-radio.nl"), 7300},
+            {QStringLiteral("S50CLX"), QStringLiteral("s50clx.si"), 41112},
+            {QStringLiteral("OE3XHQ-1"), QStringLiteral("dxcluster.oevsv.at"), 7300},
+            {QStringLiteral("OH1AF"), QStringLiteral("oh1af.fi"), 8000},
+            {QStringLiteral("VE3CGR-5"), QStringLiteral("ve3cgr.dyndns.org"), 7300},
+            {QStringLiteral("N0OJ-7"), QStringLiteral("cluster.n0oj.net"), 7300},
+            {QStringLiteral("DA0BCC-7"), QStringLiteral("dx.da0bcc.de"), 7300},
+            {QStringLiteral("EA4URE-2"), QStringLiteral("ea4ure.com"), 7300},
+            {QStringLiteral("GB7DJK"), QStringLiteral("gb7djk.dxcluster.net"), 7300},
+            {QStringLiteral("MX0ONL-4"), QStringLiteral("dx.onlineradioclub.org"), 7300},
+            {QStringLiteral("GB7DXG"), QStringLiteral("gb7dxg.lebs.org.uk"), 7373},
+            {QStringLiteral("GB7DXG-1"), QStringLiteral("gb7dxg-1.lebs.org.uk"), 7300},
+            {QStringLiteral("HA5DXC"), QStringLiteral("ha5dxc.homelinux.net"), 8000},
+            {QStringLiteral("K1AX-11"), QStringLiteral("dxdata.io"), 7300},
+            {QStringLiteral("ON0LLV-5"), QStringLiteral("on0llv-5.on6ll.be"), 7300},
+            {QStringLiteral("ON0LLV-6"), QStringLiteral("on0llv-6.on6ll.be"), 7373},
+            {QStringLiteral("ON0NOL-9"), QStringLiteral("nolcluster.on8ar.eu"), 7300},
+            {QStringLiteral("ON4KST-2"), QStringLiteral("www.on4kst.info"), 7300},
+            {QStringLiteral("ON4LL-2"), QStringLiteral("on4ll.ddns.net"), 7300},
+            {QStringLiteral("PI4CC"), QStringLiteral("dxc.pi4cc.nl"), 8000},
+            {QStringLiteral("SM7IUN-1"), QStringLiteral("dxc.sm7iun.se"), 7300},
+            {QStringLiteral("SR4DXCW"), QStringLiteral("dx.jestok.com"), 7300},
+            {QStringLiteral("VE3EID-1"), QStringLiteral("cluster.ve3eid.com"), 9000}
+
+        };
+        for (const ClusterServer &server : servers) {
+            const int index = m_server->count();
+            m_server->addItem(QStringLiteral("%1 (%2:%3)")
+                                  .arg(server.label, server.host)
+                                  .arg(server.port),
+                              server.host);
+            m_server->setItemData(index, server.port, Qt::UserRole + 1);
+        }
         m_host = new QLineEdit(config.host, this);
+        m_host->setObjectName(QStringLiteral("dxClusterHost"));
         m_host->setPlaceholderText(QStringLiteral("cluster.example.net"));
         m_port = new QSpinBox(this);
+        m_port->setObjectName(QStringLiteral("dxClusterPort"));
         m_port->setRange(1, 65535);
         m_port->setValue(config.port);
         m_callsign = new QLineEdit(config.callsign, this);
@@ -477,11 +525,35 @@ public:
         m_spotLifetime->setRange(1, 1440);
         m_spotLifetime->setSuffix(tr(" min"));
         m_spotLifetime->setValue(spotLifetimeMinutes);
+        form->addRow(tr("Server:"), m_server);
         form->addRow(tr("Host:"), m_host);
         form->addRow(tr("Telnet port:"), m_port);
         form->addRow(tr("Station callsign:"), m_callsign);
         form->addRow(tr("Spot lifetime:"), m_spotLifetime);
         layout->addLayout(form);
+        connect(m_server, &QComboBox::currentIndexChanged, this,
+                [this](int index) {
+                    const bool custom = index == 0;
+                    m_host->setEnabled(custom);
+                    m_port->setEnabled(custom);
+                    if (!custom) {
+                        m_host->setText(m_server->itemData(index).toString());
+                        m_port->setValue(
+                            m_server->itemData(index, Qt::UserRole + 1).toInt());
+                    }
+                });
+        for (int index = 1; index < m_server->count(); ++index) {
+            if (m_server->itemData(index).toString().compare(
+                    config.host, Qt::CaseInsensitive) == 0
+                && m_server->itemData(index, Qt::UserRole + 1).toInt() == config.port) {
+                m_server->setCurrentIndex(index);
+                break;
+            }
+        }
+        if (m_server->currentIndex() != 0) {
+            m_host->setEnabled(false);
+            m_port->setEnabled(false);
+        }
         auto *buttons = new QDialogButtonBox(
             QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
         buttons->button(QDialogButtonBox::Ok)->setText(tr("Connect"));
@@ -499,6 +571,7 @@ public:
     int spotLifetimeMinutes() const { return m_spotLifetime->value(); }
 
 private:
+    QComboBox *m_server = nullptr;
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
     QLineEdit *m_callsign = nullptr;
