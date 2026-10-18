@@ -231,6 +231,8 @@ private:
     QDockWidget *m_checkCallDock = nullptr;
     QDockWidget *m_rateDock = nullptr;
     QDockWidget *m_summaryDock = nullptr;
+    QDockWidget *m_greylineDock = nullptr;
+    QWidget *m_greylineWidget = nullptr;
 };
 
 } // namespace logger

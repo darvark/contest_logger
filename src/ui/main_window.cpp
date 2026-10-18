@@ -47,7 +47,9 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPainter>
 #include <QPlainTextEdit>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
@@ -66,7 +68,9 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
+#include <optional>
 #include <utility>
 
 namespace logger {
@@ -704,6 +708,160 @@ private:
     QSpinBox *m_wpm = nullptr;
 };
 
+// Day/night map (equirectangular); points are (longitude, latitude) in degrees.
+class GreylineWidget final : public QWidget {
+public:
+    using PointProvider = std::function<std::optional<QPointF>()>;
+
+    GreylineWidget(PointProvider home, PointProvider target, QWidget *parent = nullptr)
+        : QWidget(parent)
+        , m_home(std::move(home))
+        , m_target(std::move(target))
+    {
+        setMinimumSize(200, 100);
+        loadLand();
+        auto *timer = new QTimer(this);
+        connect(timer, &QTimer::timeout, this, qOverload<>(&QWidget::update));
+        timer->start(30'000);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.fillRect(rect(), QColor(QStringLiteral("#40E0D0")));
+        const double width = qMin<double>(this->width(), this->height() * 2.0);
+        const QRectF map((this->width() - width) / 2.0,
+                         (this->height() - width / 2.0) / 2.0, width, width / 2.0);
+        const auto project = [&map](double lon, double lat) {
+            return QPointF(map.left() + (lon + 180.0) / 360.0 * map.width(),
+                           map.top() + (90.0 - lat) / 180.0 * map.height());
+        };
+        p.fillRect(map, QColor(QStringLiteral("#BFEFFF")));
+        p.save();
+        p.setClipRect(map);
+        p.setPen(QPen(QColor(QStringLiteral("#3A6B35")), 1));
+        p.setBrush(QColor(QStringLiteral("#8FCB7A")));
+        for (const QPolygonF &ring : std::as_const(m_land)) {
+            QPolygonF projected;
+            projected.reserve(ring.size());
+            for (const QPointF &point : ring) {
+                projected << project(point.x(), point.y());
+            }
+            p.drawPolygon(projected);
+        }
+        p.restore();
+
+        // Subsolar point from the UTC time (low-precision solar position).
+        constexpr double kRad = M_PI / 180.0;
+        const double days = QDateTime::currentMSecsSinceEpoch() / 86'400'000.0 - 10'957.5;
+        const double meanLon = 280.460 + 0.9856474 * days;
+        const double anomaly = (357.528 + 0.9856003 * days) * kRad;
+        const double eclipticLon =
+            (meanLon + 1.915 * std::sin(anomaly) + 0.020 * std::sin(2 * anomaly)) * kRad;
+        const double obliquity = (23.439 - 0.0000004 * days) * kRad;
+        const double declination = std::asin(std::sin(obliquity) * std::sin(eclipticLon));
+        const double rightAscension =
+            std::atan2(std::cos(obliquity) * std::sin(eclipticLon), std::cos(eclipticLon));
+        const double gmst = std::fmod(280.46061837 + 360.98564736629 * days, 360.0);
+        double sunLon = std::fmod(rightAscension / kRad - gmst, 360.0);
+        if (sunLon < -180.0) {
+            sunLon += 360.0;
+        } else if (sunLon > 180.0) {
+            sunLon -= 360.0;
+        }
+
+        const double safeDeclination =
+            std::abs(declination) < 0.0002 ? 0.0002 : declination;
+        QPolygonF night;
+        for (int lon = -180; lon <= 180; ++lon) {
+            const double hourAngle = (lon - sunLon) * kRad;
+            const double lat =
+                std::atan(-std::cos(hourAngle) / std::tan(safeDeclination)) / kRad;
+            night << project(lon, lat);
+        }
+        const double capLat = safeDeclination > 0 ? -90.0 : 90.0;
+        night << project(180.0, capLat) << project(-180.0, capLat);
+        p.save();
+        p.setClipRect(map);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 40, 130));
+        p.drawPolygon(night);
+        p.restore();
+
+        p.setPen(QPen(QColor(0, 0, 0, 70), 1));
+        for (int lon = -180; lon <= 180; lon += 30) {
+            p.drawLine(project(lon, 90), project(lon, -90));
+        }
+        for (int lat = -90; lat <= 90; lat += 30) {
+            p.drawLine(project(-180, lat), project(180, lat));
+        }
+        p.setPen(QPen(Qt::black, 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(map);
+
+        const QPointF sun = project(sunLon, declination / kRad);
+        p.setPen(QPen(QColor(QStringLiteral("#B8860B")), 1));
+        p.setBrush(QColor(QStringLiteral("#FFD700")));
+        p.drawEllipse(sun, 6, 6);
+
+        const auto marker = [&](const std::optional<QPointF> &point, const QColor &color,
+                                const QString &label) {
+            if (!point.has_value()) {
+                return;
+            }
+            const QPointF position = project(point->x(), point->y());
+            p.setPen(QPen(Qt::black, 1));
+            p.setBrush(color);
+            p.drawEllipse(position, 4, 4);
+            p.drawText(position + QPointF(7, -5), label);
+        };
+        const std::optional<QPointF> home = m_home();
+        const std::optional<QPointF> target = m_target();
+        if (home.has_value() && target.has_value()) {
+            p.setPen(QPen(QColor(QStringLiteral("#CE0000")), 1, Qt::DashLine));
+            p.drawLine(project(home->x(), home->y()), project(target->x(), target->y()));
+        }
+        marker(home, QColor(QStringLiteral("#CE0000")), tr("QTH"));
+        marker(target, QColor(QStringLiteral("#0000CD")), tr("DX"));
+
+        p.setPen(Qt::black);
+        p.drawText(map.adjusted(4, 2, -4, -2), Qt::AlignLeft | Qt::AlignBottom,
+                   QDateTime::currentDateTimeUtc().toString(
+                       QStringLiteral("yyyy-MM-dd HH:mm 'UTC'")));
+    }
+
+private:
+    void loadLand()
+    {
+        QFile file(QStringLiteral(":/map/world_land.txt"));
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return;
+        }
+        while (!file.atEnd()) {
+            const QString line = QString::fromLatin1(file.readLine()).trimmed();
+            if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) {
+                continue;
+            }
+            QPolygonF ring;
+            for (const QString &pair : line.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+                const QStringList parts = pair.split(QLatin1Char(','));
+                if (parts.size() == 2) {
+                    ring << QPointF(parts.at(0).toDouble(), parts.at(1).toDouble());
+                }
+            }
+            if (ring.size() > 2) {
+                m_land.append(ring);
+            }
+        }
+    }
+
+    QList<QPolygonF> m_land;
+    PointProvider m_home;
+    PointProvider m_target;
+};
+
 QStringList defaultBands()
 {
     return {QStringLiteral("160m"), QStringLiteral("80m"), QStringLiteral("60m"),
@@ -922,6 +1080,9 @@ QFrame[pane="true"] QTableCornerButton::section { background: #40E0D0; border: n
 QFrame#bandmapPane, QFrame#bandmapPane QTableWidget,
 QFrame#radioABandmapPane, QFrame#radioABandmapPane QTableWidget {
     background: #AFEEEE;
+}
+QFrame#bandmapPane QHeaderView, QFrame#radioABandmapPane QHeaderView {
+    background: #AFEEEE; border: none;
 }
 QFrame#bandmapPane QHeaderView::section,
 QFrame#radioABandmapPane QHeaderView::section { background: #AFEEEE; }
@@ -1853,7 +2014,6 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_bandmapModeFilter->setObjectName(QStringLiteral("bandmapModeFilter"));
     m_bandmapModeFilter->addItem(tr("All modes"), QString());
     for (const QString &mode : {QStringLiteral("CW"), QStringLiteral("SSB"),
-                                QStringLiteral("USB"), QStringLiteral("LSB"),
                                 QStringLiteral("RTTY"), QStringLiteral("FT8"),
                                 QStringLiteral("FT4"), QStringLiteral("PSK"),
                                 QStringLiteral("FM"), QStringLiteral("AM")}) {
@@ -1971,6 +2131,40 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     clusterPane->layout()->addWidget(m_clusterLog);
     m_clusterDock = createPaneDock(tr("DX Cluster announcements"),
                                    QStringLiteral("dxClusterDock"), clusterPane);
+
+    // Greyline (day/night terminator with the QTH and the entered callsign).
+    auto *greylinePane = createPane(QStringLiteral("greylinePane"));
+    m_greylineWidget = new GreylineWidget(
+        [this]() -> std::optional<QPointF> {
+            double lat = 0.0;
+            double lon = 0.0;
+            if (!SupportDataParser::maidenheadToLatLon(m_station.grid, lat, lon)) {
+                return std::nullopt;
+            }
+            return QPointF(lon, lat);
+        },
+        [this]() -> std::optional<QPointF> {
+            const QString call =
+                m_callsignEdits[currentEntryContext()]->text().trimmed().toUpper();
+            if (call.isEmpty()) {
+                return std::nullopt;
+            }
+            const CtyPrefixEntry *entry =
+                SupportDataParser::findCtyEntry(call, m_ctyPrefixes);
+            if (entry == nullptr || !entry->hasLocation) {
+                return std::nullopt;
+            }
+            return QPointF(entry->longitude, entry->latitude);
+        },
+        greylinePane);
+    m_greylineWidget->setObjectName(QStringLiteral("greylineMap"));
+    greylinePane->layout()->addWidget(m_greylineWidget);
+    m_greylineDock = createPaneDock(tr("Greyline"), QStringLiteral("greylineDock"),
+                                    greylinePane);
+    for (int vfo = 0; vfo < 2; ++vfo) {
+        connect(m_callsignEdits[vfo], &QLineEdit::textChanged,
+                m_greylineWidget, qOverload<>(&QWidget::update));
+    }
 
     // Rate.
     auto *ratePane = createPane(QStringLiteral("ratePane"));
@@ -2101,13 +2295,15 @@ void MainWindow::applyDefaultDockLayout()
     addDockWidget(Qt::LeftDockWidgetArea, m_radioABandmapDock);
     splitDockWidget(m_checkCallDock, m_radioABandmapDock, Qt::Horizontal);
     tabifyDockWidget(m_cwDock, m_contestInfoDock);
+    addDockWidget(Qt::LeftDockWidgetArea, m_greylineDock);
+    tabifyDockWidget(m_contestInfoDock, m_greylineDock);
     addDockWidget(Qt::RightDockWidgetArea, m_bandmapDock);
     addDockWidget(Qt::RightDockWidgetArea, m_rateDock);
     splitDockWidget(m_bandmapDock, m_rateDock, Qt::Horizontal);
     splitDockWidget(m_rateDock, m_summaryDock, Qt::Vertical);
     splitDockWidget(m_summaryDock, m_clusterDock, Qt::Vertical);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_cwDock,
-                              m_radioABandmapDock,
+                              m_radioABandmapDock, m_greylineDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         dock->setFloating(false);
@@ -2128,7 +2324,7 @@ void MainWindow::createWindowMenu()
     QMenu *windowMenu = menuBar()->addMenu(tr("&Window"));
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_bandmapDock,
                               m_clusterDock, m_rateDock, m_summaryDock, m_cwDock,
-                              m_contestInfoDock}) {
+                              m_contestInfoDock, m_greylineDock}) {
         windowMenu->addAction(dock->toggleViewAction());
     }
     windowMenu->addSeparator();
@@ -2172,7 +2368,7 @@ void MainWindow::resetWindowLayout()
     showNormal();
     resize(1600, 960);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_cwDock,
-                              m_radioABandmapDock,
+                              m_radioABandmapDock, m_greylineDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         removeDockWidget(dock);
@@ -5658,7 +5854,12 @@ void MainWindow::refreshBandmap()
         if (filterBand == QStringLiteral("@active")) {
             filterBand = m_bandSelectors[context]->currentText().trimmed().toLower();
         }
-        const QString filterMode = m_bandmapModeFilter->currentData().toString();
+        const auto normalizeSpotMode = [](const QString &value) {
+            const QString upper = value.trimmed().toUpper();
+            return upper == QLatin1String("USB") || upper == QLatin1String("LSB")
+                ? QStringLiteral("SSB") : upper;
+        };
+        const QString filterMode = normalizeSpotMode(m_bandmapModeFilter->currentData().toString());
         QSet<QString> displayed;
         QVector<QPair<Spot, bool>> visible;
         for (const Spot &spot : std::as_const(ordered)) {
@@ -5671,7 +5872,7 @@ void MainWindow::refreshBandmap()
                 continue;
             }
             if (!filterMode.isEmpty()
-                && spot.mode.compare(filterMode, Qt::CaseInsensitive) != 0) {
+                && normalizeSpotMode(spot.mode) != filterMode) {
                 continue;
             }
             const QString dedupeKey =
