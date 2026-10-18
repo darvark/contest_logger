@@ -1,6 +1,11 @@
 #include "logger/cw/cw_keyer_service.h"
 
 #include <QSignalSpy>
+#include <QElapsedTimer>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QUdpSocket>
 #include <QtTest>
 
@@ -11,6 +16,7 @@ class CwKeyerTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void expandsCwMacrosCaseInsensitively();
     void mockKeyerQueuesAndAborts();
     void queuedMessagesKeepTheirRequestedVfo();
     void changesSpeedOnMockKeyer();
@@ -24,7 +30,21 @@ private slots:
     void cwdaemonWithoutReplyTimesOutAndAborts();
     void detectsHamlibModelWithoutCwSupport();
     void reportsUnsupportedHamlibModelBeforeOpeningPort();
+    void hamlibRigctldFallbackCanAbortAndDisconnect();
 };
+
+void CwKeyerTest::expandsCwMacrosCaseInsensitively()
+{
+    const QMap<QString, QString> values{
+        {QStringLiteral("CALL"), QStringLiteral("W1AW")},
+        {QStringLiteral("NR"), QStringLiteral("007")},
+        {QStringLiteral("OPERATOR"), QStringLiteral("Ada")},
+        {QStringLiteral("WPM"), QStringLiteral("28")},
+    };
+    QCOMPARE(logger::expandCwMacros(
+                 QStringLiteral("{call} {NR} {operator} {WPM} {UNKNOWN}"), values),
+             QStringLiteral("W1AW 007 Ada 28 {UNKNOWN}"));
+}
 
 void CwKeyerTest::mockKeyerQueuesAndAborts()
 {
@@ -402,6 +422,115 @@ void CwKeyerTest::reportsUnsupportedHamlibModelBeforeOpeningPort()
         3000);
 #else
     QSKIP("Hamlib support was not built.");
+#endif
+}
+
+void CwKeyerTest::hamlibRigctldFallbackCanAbortAndDisconnect()
+{
+#ifndef LOGGER_WITH_HAMLIB
+    QSKIP("Hamlib support is not compiled in");
+#else
+    const QString rigctldPath =
+        QStandardPaths::findExecutable(QStringLiteral("rigctld"));
+    const QString rigctlPath = QStandardPaths::findExecutable(QStringLiteral("rigctl"));
+    if (rigctldPath.isEmpty() || rigctlPath.isEmpty()) {
+        QSKIP("rigctld and rigctl are required for the Hamlib CW integration test");
+    }
+
+    const auto capabilities = logger::inspectHamlibCwCapabilities(1);
+    QVERIFY(capabilities.modelAvailable);
+    QVERIFY(capabilities.sendText);
+
+    QTcpServer reservation;
+    QVERIFY(reservation.listen(QHostAddress::LocalHost, 0));
+    const int port = reservation.serverPort();
+    reservation.close();
+
+    QProcess rigctld;
+    rigctld.start(rigctldPath, {QStringLiteral("-m"), QStringLiteral("1"),
+                                QStringLiteral("-t"), QString::number(port),
+                                QStringLiteral("-T"), QStringLiteral("127.0.0.1")});
+    if (!rigctld.waitForStarted(3000)) {
+        QFAIL(qPrintable(QStringLiteral("Unable to start rigctld: %1")
+                             .arg(rigctld.errorString())));
+    }
+
+    bool listening = false;
+    QElapsedTimer startupTimer;
+    startupTimer.start();
+    while (startupTimer.elapsed() < 5000 && rigctld.state() == QProcess::Running) {
+        QTcpSocket socket;
+        socket.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(port));
+        if (socket.waitForConnected(100)) {
+            socket.disconnectFromHost();
+            listening = true;
+            break;
+        }
+        QTest::qWait(50);
+    }
+    QVERIFY2(listening, qPrintable(QStringLiteral("rigctld did not start: %1 %2")
+                                       .arg(QString::fromLocal8Bit(rigctld.readAllStandardError()),
+                                            QString::fromLocal8Bit(rigctld.readAllStandardOutput()))));
+
+    QProcess modeSetter;
+    modeSetter.start(rigctlPath,
+                     {QStringLiteral("-m"), QStringLiteral("2"), QStringLiteral("-r"),
+                      QStringLiteral("127.0.0.1:%1").arg(port), QStringLiteral("M"),
+                      QStringLiteral("CW"), QStringLiteral("500")});
+    QVERIFY(modeSetter.waitForStarted(3000));
+    QVERIFY(modeSetter.waitForFinished(3000));
+    QCOMPARE(modeSetter.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(modeSetter.exitCode(), 0);
+
+    logger::CwKeyerController controller;
+    QSignalSpy statuses(&controller, &logger::CwKeyerController::statusChanged);
+    QVERIFY(statuses.isValid());
+    logger::CwKeyerConfig config;
+    config.type = logger::CwKeyerType::Hamlib;
+    config.radio.modelId = 2;
+    config.radio.transport = logger::RadioTransport::Tcp;
+    config.radio.host = QStringLiteral("127.0.0.1");
+    config.radio.port = port;
+    controller.connectKeyer(config);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !statuses.isEmpty()
+            && lastStatus(statuses).state == logger::ConnectionState::Connected
+            && !lastStatus(statuses).completionConfirmed,
+        5000);
+    QCOMPARE(lastStatus(statuses).pacing, QStringLiteral("estimated timing"));
+
+    controller.enqueueMessage(QStringLiteral("TEST"));
+    controller.enqueueMessage(QStringLiteral("73"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !lastStatus(statuses).transmitting
+            && lastStatus(statuses).queuedMessages == 0,
+        5000);
+    QVERIFY(!anyStatus(statuses, [](const auto &status) {
+        return status.completionTimedOut;
+    }));
+
+    controller.enqueueMessage(QString(256, QLatin1Char('E')));
+    controller.enqueueMessage(QStringLiteral("SHOULD NOT SEND"));
+    controller.abortTransmission();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        lastStatus(statuses).state == logger::ConnectionState::Connected
+            && !lastStatus(statuses).transmitting
+            && lastStatus(statuses).queuedMessages == 0
+            && lastStatus(statuses).message.contains(QStringLiteral("aborted")),
+        5000);
+
+    controller.enqueueMessage(QString(256, QLatin1Char('E')));
+    controller.disconnectKeyer();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        lastStatus(statuses).state == logger::ConnectionState::Disconnected
+            && !lastStatus(statuses).transmitting,
+        5000);
+
+    rigctld.terminate();
+    if (!rigctld.waitForFinished(3000)) {
+        rigctld.kill();
+        rigctld.waitForFinished(3000);
+    }
 #endif
 }
 

@@ -19,6 +19,18 @@ QString normalized(const QString &value)
     return value.trimmed().toUpper();
 }
 
+QString dupeIdentity(const QStringList &dupeKey, const Qso &qso)
+{
+    QStringList values{normalized(qso.callsign)};
+    if (dupeKey.contains(QStringLiteral("band"), Qt::CaseInsensitive)) {
+        values.append(qso.band.trimmed().toLower());
+    }
+    if (dupeKey.contains(QStringLiteral("mode"), Qt::CaseInsensitive)) {
+        values.append(normalized(qso.mode));
+    }
+    return values.join(QChar(0x1f));
+}
+
 QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
                                       const QMap<QString, QString> &exchange,
                                       const QMap<QString, QString> &resolved)
@@ -283,7 +295,20 @@ ContestEvaluationContext ContestEngine::buildContext(
 {
     ContestEvaluationContext context;
     context.previousQsos = previousQsos;
-    for (const Qso &qso : previousQsos) {
+    QVector<Qso> ordered = previousQsos;
+    std::stable_sort(ordered.begin(), ordered.end(), [](const Qso &left, const Qso &right) {
+        if (left.timestampUtc != right.timestampUtc) {
+            return left.timestampUtc < right.timestampUtc;
+        }
+        return left.id < right.id;
+    });
+    QSet<QString> seenDupeKeys;
+    for (const Qso &qso : ordered) {
+        const QString identity = dupeIdentity(definition.dupeKey, qso);
+        if (seenDupeKeys.contains(identity)) {
+            continue;
+        }
+        seenDupeKeys.insert(identity);
         for (const QString &key : multiplierKeys(definition, qso, resolver)) {
             context.workedMultiplierKeys.insert(key);
         }
@@ -340,10 +365,18 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
         return left.id < right.id;
     });
     QSet<QString> worked;
+    QSet<QString> seenDupeKeys;
     for (const Qso &qso : ordered) {
         ++result.totalQsos;
         ++result.perBand[qso.band.trimmed().toLower()].qsos;
         ++result.perMode[qso.mode.trimmed().toUpper()].qsos;
+        const QString identity = dupeIdentity(definition.dupeKey, qso);
+        const bool duplicate = seenDupeKeys.contains(identity);
+        seenDupeKeys.insert(identity);
+        result.newMultipliersByQsoId.insert(qso.id, 0);
+        if (duplicate) {
+            continue;
+        }
         const QMap<QString, QString> resolved = resolver ? resolver(qso)
                                                           : QMap<QString, QString>{};
         const int points = qso.points > 0
@@ -358,7 +391,6 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
         ContestEvaluationContext context;
         context.resolvedMultiplierValues = resolved;
         const QMap<QString, QString> exchange = receivedFieldsFor(qso, definition);
-        result.newMultipliersByQsoId.insert(qso.id, 0);
         for (qsizetype index = 0; index < definition.multipliers.size(); ++index) {
             const MultiplierDefinition &multiplier = definition.multipliers.at(index);
             const QString value = multiplierValue(multiplier, exchange, context,
@@ -398,7 +430,8 @@ ContestEvaluationResult ContestEngine::evaluate(
     const QMap<QString, QString> &receivedExchange,
     const ContestEvaluationContext &context,
     std::optional<int> requestedSerialNumber,
-    const QMap<QString, QString> &sentExchangeOverrides) const
+    const QMap<QString, QString> &sentExchangeOverrides,
+    bool allowDuplicate) const
 {
     ContestEvaluationResult result;
     const QString normalizedCall = normalized(callsign);
@@ -485,8 +518,10 @@ ContestEvaluationResult ContestEngine::evaluate(
         }
         if (duplicate) {
             result.duplicate = true;
-            addIssue(result, QStringLiteral("callsign"),
-                     QStringLiteral("is a duplicate for the configured dupe key"));
+            if (!allowDuplicate) {
+                addIssue(result, QStringLiteral("callsign"),
+                         QStringLiteral("is a duplicate for the configured dupe key"));
+            }
             break;
         }
     }

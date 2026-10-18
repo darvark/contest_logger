@@ -33,7 +33,8 @@ public:
         const QMap<QString, QString> &receivedExchange,
         const ContestEvaluationContext &context = {},
         std::optional<int> serialNumber = std::nullopt,
-        const QMap<QString, QString> &sentExchangeOverrides = {}) const;
+        const QMap<QString, QString> &sentExchangeOverrides = {},
+        bool allowDuplicate = false) const;
 };
 
 } // namespace logger

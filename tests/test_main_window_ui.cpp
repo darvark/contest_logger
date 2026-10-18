@@ -47,6 +47,7 @@ private slots:
     void cwKeyerDialogPersistsHamlibSerialControlOptions();
     void functionKeyMessagesAreManuallyConfigurable();
     void esmSendsCallAndLogsOnExchangeEnter();
+    void esmMessagesAreConfiguredPerContest();
     void autoCqRequiresRunAndStopsWhenEnteringCallsign();
     void frequencyChangeWithinBandSwitchesRunToSearchAndPounce();
     void so2vCwTransmissionFollowsRxFocus();
@@ -59,6 +60,8 @@ private slots:
     void enterLogsQsoAndRefreshesTable();
     void invalidExchangeIsRejectedWithMessage();
     void duplicateIsRejected();
+    void duplicateCanBeLoggedWhenEnabled();
+    void duplicateCanBeCreatedByEditingWhenEnabled();
     void editDialogValidatesAndSaves();
     void serialFollowsStoredMaximum();
     void newLogDialogRequiresCallsignAndContest();
@@ -432,6 +435,43 @@ void MainWindowUiTest::esmSendsCallAndLogsOnExchangeEnter()
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("queue 1")));
 }
 
+void MainWindowUiTest::esmMessagesAreConfiguredPerContest()
+{
+    const qint64 contestId = m_window->findChild<QComboBox *>(
+        QStringLiteral("contestSelector"))->currentData().toLongLong();
+    auto *configure = m_window->findChild<QAction *>(
+        QStringLiteral("configureEsmMessagesAction"));
+    QVERIFY(configure != nullptr);
+
+    QTimer::singleShot(0, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        dialog->findChild<QPlainTextEdit *>(QStringLiteral("esmCallMessages"))
+            ->setPlainText(QStringLiteral("CALL {CALL}\nNR {NR}"));
+        dialog->findChild<QPlainTextEdit *>(QStringLiteral("esmLoggedMessages"))
+            ->setPlainText(QStringLiteral("TU {MYCALL}"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    configure->trigger();
+
+    const QString prefix = QStringLiteral("cw/esm/%1/").arg(contestId);
+    QSettings settings;
+    QCOMPARE(settings.value(prefix + QStringLiteral("call")).toString(),
+             QStringLiteral("CALL {CALL}\nNR {NR}"));
+    QCOMPARE(settings.value(prefix + QStringLiteral("logged")).toString(),
+             QStringLiteral("TU {MYCALL}"));
+
+    settings.setValue(QStringLiteral("cw/type"), static_cast<int>(CwKeyerType::Mock));
+    settings.setValue(QStringLiteral("cw/radioIndex"), 0);
+    m_window->findChild<QAction *>(QStringLiteral("reconnectCwKeyerAction"))->trigger();
+    auto *cwStatus = m_window->findChild<QLabel *>(QStringLiteral("cwKeyerStatus"));
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
+    m_window->findChild<QAction *>(QStringLiteral("esmAction"))->setChecked(true);
+    callEdit()->setText(QStringLiteral("W1AW"));
+    QTest::keyClick(callEdit(), Qt::Key_Return);
+    QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("queue 1")));
+}
+
 void MainWindowUiTest::autoCqRequiresRunAndStopsWhenEnteringCallsign()
 {
     QSettings settings;
@@ -797,6 +837,64 @@ void MainWindowUiTest::duplicateIsRejected()
     enterQso(QStringLiteral("G4AAA"), QStringLiteral("599"), QStringLiteral("2"));
     QCOMPARE(table()->rowCount(), 1);
     QVERIFY2(message().contains(QStringLiteral("DUPE")), qPrintable(message()));
+}
+
+void MainWindowUiTest::duplicateCanBeLoggedWhenEnabled()
+{
+    auto *allowDupes = m_window->findChild<QAction *>(
+        QStringLiteral("allowDupeLoggingAction"));
+    QVERIFY(allowDupes != nullptr);
+    allowDupes->setChecked(true);
+
+    enterQso(QStringLiteral("G4AAA"), QStringLiteral("599"), QStringLiteral("1"));
+    enterQso(QStringLiteral("G4AAA"), QStringLiteral("599"), QStringLiteral("2"));
+
+    QCOMPARE(table()->rowCount(), 2);
+    QCOMPARE(QSettings().value(QStringLiteral("operating/allowDupeLogging")).toBool(), true);
+    QString error;
+    const qint64 contestId = m_window->findChild<QComboBox *>(
+        QStringLiteral("contestSelector"))->currentData().toLongLong();
+    const QVector<Qso> logged = m_repository->qsosForContest(contestId, 0, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(logged.size(), 2);
+    QVERIFY((logged.at(0).points == 0 && logged.at(1).points > 0)
+            || (logged.at(1).points == 0 && logged.at(0).points > 0));
+    QVERIFY(message().contains(QStringLiteral("DUPE logged")));
+}
+
+void MainWindowUiTest::duplicateCanBeCreatedByEditingWhenEnabled()
+{
+    auto *allowDupes = m_window->findChild<QAction *>(
+        QStringLiteral("allowDupeLoggingAction"));
+    QVERIFY(allowDupes != nullptr);
+    allowDupes->setChecked(true);
+    enterQso(QStringLiteral("G4AAA"), QStringLiteral("599"), QStringLiteral("1"));
+    enterQso(QStringLiteral("G4BBB"), QStringLiteral("599"), QStringLiteral("2"));
+
+    const qint64 selectedId = table()->item(0, 0)->data(Qt::UserRole).toLongLong();
+    QString error;
+    const auto selected = m_repository->qsoById(selectedId, &error);
+    QVERIFY2(selected.has_value(), qPrintable(error));
+    const QString otherCall = selected->callsign == QStringLiteral("G4AAA")
+        ? QStringLiteral("G4BBB") : QStringLiteral("G4AAA");
+
+    runWhenModalAppears([&otherCall](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>(QStringLiteral("editCallsign"))
+            ->setText(otherCall);
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "editSelectedQso",
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+
+    const qint64 contestId = m_window->findChild<QComboBox *>(
+        QStringLiteral("contestSelector"))->currentData().toLongLong();
+    const QVector<Qso> logged = m_repository->qsosForContest(contestId, 0, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(logged.size(), 2);
+    QVERIFY(std::any_of(logged.cbegin(), logged.cend(), [](const Qso &qso) {
+        return qso.points == 0;
+    }));
+    QVERIFY(message().contains(QStringLiteral("updated")));
 }
 
 void MainWindowUiTest::editDialogValidatesAndSaves()

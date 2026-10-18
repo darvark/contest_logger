@@ -47,6 +47,7 @@ protected:
 private slots:
     void configureOperator();
     void configureFunctionKeys();
+    void configureEsmMessages();
     void configureRadio();
     void configureRadioB();
     void exportCabrillo();
@@ -126,7 +127,12 @@ private:
     void updateTopStatus();
     void updateEntryHeaders();
     void showOperatorMessage(const QString &message, bool alert = false);
-    bool sendCwTemplate(QString message, int context, QString *problem);
+    bool sendCwTemplate(QString message, int context, QString *problem,
+                        QString callsignOverride = {});
+    bool sendEsmSequence(const QString &sequence, int context,
+                         QString callsignOverride = {});
+    QString esmSequenceForContest(const QString &stage,
+                                  int fallbackFunctionKey) const;
     bool sendFunctionKeyForContext(int index, int context);
     void sendFunctionKey(int index);
     void editFunctionKey(int index);

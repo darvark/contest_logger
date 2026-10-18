@@ -1010,6 +1010,18 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     connect(m_esmAction, &QAction::toggled, this, [](bool enabled) {
         QSettings().setValue(QStringLiteral("operating/esmEnabled"), enabled);
     });
+    auto *allowDupeLoggingAction = operatingMenu->addAction(tr("Allow logging duplicate QSOs"));
+    allowDupeLoggingAction->setObjectName(QStringLiteral("allowDupeLoggingAction"));
+    allowDupeLoggingAction->setCheckable(true);
+    allowDupeLoggingAction->setChecked(QSettings().value(
+        QStringLiteral("operating/allowDupeLogging"), false).toBool());
+    connect(allowDupeLoggingAction, &QAction::toggled, this, [](bool enabled) {
+        QSettings().setValue(QStringLiteral("operating/allowDupeLogging"), enabled);
+    });
+    auto *configureEsmAction = operatingMenu->addAction(tr("Configure ESM messages..."));
+    configureEsmAction->setObjectName(QStringLiteral("configureEsmMessagesAction"));
+    connect(configureEsmAction, &QAction::triggered,
+            this, &MainWindow::configureEsmMessages);
     m_autoCqAction = operatingMenu->addAction(tr("Auto CQ (F1 repeat)"));
     m_autoCqAction->setObjectName(QStringLiteral("autoCqAction"));
     m_autoCqAction->setCheckable(true);
@@ -2362,7 +2374,8 @@ void MainWindow::queueCwMessage()
     m_cwMessageEdit->clear();
 }
 
-bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
+bool MainWindow::sendCwTemplate(QString message, int context, QString *problem,
+                                QString callsignOverride)
 {
     const int radio = m_cwRadioSelector->currentData().toInt();
     if (m_cwConfiguredRadio != radio) {
@@ -2385,8 +2398,10 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
         return false;
     }
     QStringList sentValues;
+    QString serialValue;
     if (const ContestDefinition *definition = activeDefinition()) {
         const int nextSerial = ContestEngine().nextSerialNumber(*definition, m_logQsos);
+        serialValue = QString::number(nextSerial);
         for (const ExchangeFieldDefinition &field : definition->sentExchange) {
             QString value;
             if (const QLineEdit *edit = m_sentExchangeEdits[context].value(field.name, nullptr)) {
@@ -2405,18 +2420,36 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
                 continue;
             }
             value = value.toUpper();
+            if (field.type == ExchangeFieldType::Serial) {
+                serialValue = value;
+            }
             sentValues.append(value);
-            message.replace(QStringLiteral("{%1}").arg(field.name.toUpper()), value,
-                            Qt::CaseInsensitive);
         }
     }
-    message.replace(QStringLiteral("{CALL}"),
-                    m_callsignEdits[context]->text().trimmed().toUpper(),
-                    Qt::CaseInsensitive);
-    message.replace(QStringLiteral("{MYCALL}"), m_station.callsign.toUpper(),
-                    Qt::CaseInsensitive);
-    message.replace(QStringLiteral("{SENT}"), sentValues.join(QLatin1Char(' ')),
-                    Qt::CaseInsensitive);
+    const QString callsign = callsignOverride.isEmpty()
+        ? m_callsignEdits[context]->text().trimmed() : callsignOverride.trimmed();
+    QMap<QString, QString> macros;
+    macros.insert(QStringLiteral("CALL"), callsign.toUpper());
+    macros.insert(QStringLiteral("MYCALL"), m_station.callsign.toUpper());
+    macros.insert(QStringLiteral("OPERATOR"), m_station.operatorName);
+    macros.insert(QStringLiteral("WPM"), QString::number(m_cwWpmSpin->value()));
+    macros.insert(QStringLiteral("SERIAL"), serialValue);
+    macros.insert(QStringLiteral("NR"), serialValue);
+    macros.insert(QStringLiteral("SENT"), sentValues.join(QLatin1Char(' ')));
+    if (const ContestDefinition *definition = activeDefinition()) {
+        for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+            const QLineEdit *edit = m_sentExchangeEdits[context].value(field.name, nullptr);
+            QString value = edit == nullptr ? field.defaultValue : edit->text().trimmed();
+            if (value.isEmpty()) {
+                value = field.defaultValue;
+            }
+            if (field.type == ExchangeFieldType::Serial && field.generated) {
+                value = serialValue;
+            }
+            macros.insert(field.name, value.toUpper());
+        }
+    }
+    message = expandCwMacros(message, macros);
     message = message.simplified();
     if (message.isEmpty()) {
         if (problem != nullptr) {
@@ -2426,6 +2459,34 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem)
     }
     m_cwKeyerController.enqueueMessage(message, transmitVfo);
     return true;
+}
+
+bool MainWindow::sendEsmSequence(const QString &sequence, int context,
+                                 QString callsignOverride)
+{
+    const QStringList messages = sequence.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &message : messages) {
+        if (message.trimmed().isEmpty()) {
+            continue;
+        }
+        QString problem;
+        if (!sendCwTemplate(message, context, &problem, callsignOverride)) {
+            showOperatorMessage(tr("ESM message not sent: %1").arg(problem), true);
+            return false;
+        }
+    }
+    return true;
+}
+
+QString MainWindow::esmSequenceForContest(const QString &stage,
+                                          int fallbackFunctionKey) const
+{
+    const Contest *contest = activeContest();
+    if (contest == nullptr) {
+        return functionKeyText(fallbackFunctionKey);
+    }
+    const QString key = QStringLiteral("cw/esm/%1/%2").arg(contest->id).arg(stage);
+    return QSettings().value(key, functionKeyText(fallbackFunctionKey)).toString();
 }
 
 void MainWindow::sendFunctionKey(int index)
@@ -2477,7 +2538,7 @@ void MainWindow::handleEntryEnter(int vfo, bool callsignField)
         if (m_callsignEdits[vfo]->text().trimmed().isEmpty()) {
             return;
         }
-        if (!sendFunctionKeyForContext(4, vfo)) {
+        if (!sendEsmSequence(esmSequenceForContest(QStringLiteral("call"), 4), vfo)) {
             return;
         }
         const ContestDefinition *definition = activeDefinition();
@@ -2498,9 +2559,11 @@ void MainWindow::handleEntryEnter(int vfo, bool callsignField)
         logQsoForVfo(vfo);
         return;
     }
+    const QString loggedCall = m_callsignEdits[vfo]->text().trimmed();
     logQsoForVfo(vfo);
     if (m_callsignEdits[vfo]->text().isEmpty()) {
-        sendFunctionKeyForContext(2, vfo);
+        sendEsmSequence(esmSequenceForContest(QStringLiteral("logged"), 2),
+                        vfo, loggedCall);
     }
 }
 
@@ -2576,7 +2639,8 @@ void MainWindow::editFunctionKey(int index)
     }
     const QString text = QInputDialog::getText(
         this, tr("F%1 message").arg(index + 1),
-        tr("CW text ({CALL}, {MYCALL}, {SENT} and {FIELD} macros are supported):"),
+        tr("CW text ({CALL}, {MYCALL}, {OPERATOR}, {WPM}, {SERIAL}, {NR}, "
+           "{SENT} and sent-field macros are supported):"),
         QLineEdit::Normal, functionKeyText(index), &ok);
     if (!ok) {
         return;
@@ -2598,7 +2662,8 @@ void MainWindow::configureFunctionKeys()
     auto *layout = new QVBoxLayout(&dialog);
     auto *help = new QLabel(
         tr("Define the label and CW message for each key. Supported macros: "
-           "{CALL}, {MYCALL}, {SENT}, and sent exchange fields such as {SERIAL}."),
+           "{CALL}, {MYCALL}, {OPERATOR}, {WPM}, {SERIAL}, {NR}, {SENT}, "
+           "and sent exchange fields."),
         &dialog);
     help->setWordWrap(true);
     layout->addWidget(help);
@@ -2663,6 +2728,57 @@ void MainWindow::configureFunctionKeys()
     layout->addWidget(buttons);
 
     dialog.resize(900, 620);
+    dialog.exec();
+}
+
+void MainWindow::configureEsmMessages()
+{
+    const Contest *contest = activeContest();
+    if (contest == nullptr) {
+        QMessageBox::information(this, tr("ESM messages"),
+                                 tr("Select an active contest before configuring ESM."));
+        return;
+    }
+
+    const QString settingsPrefix = QStringLiteral("cw/esm/%1/").arg(contest->id);
+    QSettings settings;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("ESM messages — %1").arg(contest->name));
+    dialog.setMinimumWidth(560);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *help = new QLabel(
+        tr("Enter one CW message per line. Blank lines disable a step. Messages support "
+           "{CALL}, {MYCALL}, {OPERATOR}, {WPM}, {SERIAL}, {NR}, {SENT} and sent "
+           "exchange-field macros. Defaults use the current F5 and F3 messages."),
+        &dialog);
+    help->setWordWrap(true);
+    layout->addWidget(help);
+
+    auto *form = new QFormLayout;
+    auto *callMessages = new QPlainTextEdit(&dialog);
+    callMessages->setObjectName(QStringLiteral("esmCallMessages"));
+    callMessages->setPlainText(settings.value(
+        settingsPrefix + QStringLiteral("call"), functionKeyText(4)).toString());
+    auto *loggedMessages = new QPlainTextEdit(&dialog);
+    loggedMessages->setObjectName(QStringLiteral("esmLoggedMessages"));
+    loggedMessages->setPlainText(settings.value(
+        settingsPrefix + QStringLiteral("logged"), functionKeyText(2)).toString());
+    form->addRow(tr("After Call Enter:"), callMessages);
+    form->addRow(tr("After successful QSO:"), loggedMessages);
+    layout->addLayout(form);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        settings.setValue(settingsPrefix + QStringLiteral("call"),
+                          callMessages->toPlainText().trimmed());
+        settings.setValue(settingsPrefix + QStringLiteral("logged"),
+                          loggedMessages->toPlainText().trimmed());
+        dialog.accept();
+    });
+    layout->addWidget(buttons);
+    dialog.resize(680, 460);
     dialog.exec();
 }
 
@@ -4663,6 +4779,9 @@ void MainWindow::logQsoForVfo(int vfo)
     QMap<QString, QString> sentFields = sentOverrides;
     int points = 0;
     QStringList newMultipliers;
+    bool isDupe = false;
+    const bool allowDupeLogging = QSettings().value(
+        QStringLiteral("operating/allowDupeLogging"), false).toBool();
     const auto definition = m_definitions.constFind(contestId);
     if (definition != m_definitions.cend()) {
         const ContestEngine engine;
@@ -4680,8 +4799,9 @@ void MainWindow::logQsoForVfo(int vfo)
                             bandSelector->currentText().trimmed().toLower(),
                             modeSelector->currentText().trimmed().toUpper(),
                             receivedFields, context, std::nullopt,
-                            sentOverrides);
-        if (evaluation.duplicate) {
+                            sentOverrides, allowDupeLogging);
+        isDupe = evaluation.duplicate;
+        if (evaluation.duplicate && !allowDupeLogging) {
             showOperatorMessage(tr("%1 is a DUPE on %2 %3 — not logged")
                                     .arg(callsign, bandSelector->currentText(),
                                          modeSelector->currentText()),
@@ -4722,10 +4842,12 @@ void MainWindow::logQsoForVfo(int vfo)
         }
         sentFields = evaluation.sentExchange;
         receivedFields = evaluation.receivedExchange;
-        points = evaluation.points;
-        for (const QString &key : evaluation.newMultiplierKeys) {
-            QString label = key.section(QLatin1Char(':'), -1);
-            newMultipliers.append(label.section(QLatin1Char('@'), 0, 0));
+        points = evaluation.duplicate ? 0 : evaluation.points;
+        if (!evaluation.duplicate) {
+            for (const QString &key : evaluation.newMultiplierKeys) {
+                QString label = key.section(QLatin1Char(':'), -1);
+                newMultipliers.append(label.section(QLatin1Char('@'), 0, 0));
+            }
         }
     } else {
         if (!ContestEngine::isValidCallsign(callsign)) {
@@ -4739,13 +4861,16 @@ void MainWindow::logQsoForVfo(int vfo)
             if (previous.callsign.compare(callsign, Qt::CaseInsensitive) == 0
                 && previous.band == bandSelector->currentText().trimmed().toLower()
                 && previous.mode == modeSelector->currentText().trimmed().toUpper()) {
-                showOperatorMessage(tr("%1 is a DUPE on %2 %3 — not logged")
-                                        .arg(callsign, bandSelector->currentText(),
-                                             modeSelector->currentText()),
-                                    true);
-                callsignEdit->setFocus();
-                callsignEdit->selectAll();
-                return;
+                isDupe = true;
+                if (!allowDupeLogging) {
+                    showOperatorMessage(tr("%1 is a DUPE on %2 %3 — not logged")
+                                            .arg(callsign, bandSelector->currentText(),
+                                                 modeSelector->currentText()),
+                                        true);
+                    callsignEdit->setFocus();
+                    callsignEdit->selectAll();
+                    return;
+                }
             }
         }
     }
@@ -4783,7 +4908,9 @@ void MainWindow::logQsoForVfo(int vfo)
     refreshBandmap();
     updateDupeIndicator();
     callsignEdit->setFocus();
-    if (!newMultipliers.isEmpty()) {
+    if (isDupe) {
+        showOperatorMessage(tr("%1 — DUPE logged with 0 points").arg(callsign), true);
+    } else if (!newMultipliers.isEmpty()) {
         showOperatorMessage(tr("%1 — NEW MULTIPLIER %2")
                                 .arg(callsign, newMultipliers.join(QStringLiteral(", "))),
                             true);
@@ -4902,6 +5029,8 @@ void MainWindow::editSelectedQso(int row, int)
     Qso edited = original;
     const auto validate = [&]() -> QStringList {
         QStringList problems;
+        const bool allowDupeLogging = QSettings().value(
+            QStringLiteral("operating/allowDupeLogging"), false).toBool();
         Qso candidate = original;
         candidate.callsign = callEdit->text().trimmed().toUpper();
         candidate.band = bandEdit->currentText().trimmed().toLower();
@@ -4974,11 +5103,11 @@ void MainWindow::editSelectedQso(int row, int)
             const ContestEvaluationResult evaluation =
                 ContestEngine().evaluate(*definition, candidate.callsign, candidate.band,
                                          candidate.mode, receivedFields, context, serial,
-                                         sentFields);
+                                         sentFields, allowDupeLogging);
             for (const ContestValidationIssue &issue : evaluation.issues) {
                 problems.append(QStringLiteral("%1: %2").arg(issue.field, issue.message));
             }
-            if (evaluation.duplicate) {
+            if (evaluation.duplicate && !allowDupeLogging) {
                 problems.append(tr("%1 is already logged on %2 %3 (dupe).")
                                     .arg(candidate.callsign, candidate.band, candidate.mode));
             }
@@ -4992,17 +5121,24 @@ void MainWindow::editSelectedQso(int row, int)
             candidate.receivedExchangeFields = evaluation.receivedExchange;
             candidate.sentExchange = exchangeText(candidate.sentExchangeFields);
             candidate.receivedExchange = exchangeText(candidate.receivedExchangeFields);
-            candidate.points = evaluation.points;
+            candidate.points = evaluation.duplicate ? 0 : evaluation.points;
         } else {
+            bool duplicate = false;
             for (const Qso &other : std::as_const(others)) {
                 if (other.callsign.compare(candidate.callsign, Qt::CaseInsensitive) == 0
                     && other.band.compare(candidate.band, Qt::CaseInsensitive) == 0
                     && other.mode.compare(candidate.mode, Qt::CaseInsensitive) == 0) {
-                    problems.append(tr("%1 is already logged on %2 %3 (dupe).")
-                                        .arg(candidate.callsign, candidate.band,
-                                             candidate.mode));
-                    return problems;
+                    duplicate = true;
+                    if (!allowDupeLogging) {
+                        problems.append(tr("%1 is already logged on %2 %3 (dupe).")
+                                            .arg(candidate.callsign, candidate.band,
+                                                 candidate.mode));
+                        return problems;
+                    }
                 }
+            }
+            if (duplicate) {
+                candidate.points = 0;
             }
             candidate.sentExchange = sentEdits.value(QString())->text().trimmed();
             candidate.receivedExchange = receivedEdits.value(QString())->text().trimmed();

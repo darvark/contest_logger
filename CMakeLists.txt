@@ -126,7 +126,7 @@ endif()
 install(DIRECTORY contests/examples/
     DESTINATION share/contest-logger/contests
 )
-install(FILES README.md TODO.md
+install(FILES README.md TODO.md FUNKCJONALNOSCI.md
     DESTINATION share/doc/contest-logger
 )
 install(DIRECTORY docs/

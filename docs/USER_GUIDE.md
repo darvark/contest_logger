@@ -210,8 +210,10 @@ zmiany zawodów):
 2. `Spacja` przechodzi: Call → kolejne pola wymiany odbieranej → z powrotem do
    Call (z zaznaczeniem tekstu).
 3. `Enter` w polu Call lub w polach wymiany (albo przycisk **Log ↵**) zapisuje
-   QSO. Dublety i błędy walidacji wyświetlane są w linii komunikatów, a kursor
-   wraca do błędnego pola.
+  QSO. Dupe i błędy walidacji są wyświetlane w linii komunikatów, a kursor
+  wraca do błędnego pola. Domyślnie dupe nie są zapisywane; **Operating → Allow
+  logging duplicate QSOs** pozwala zachować je w logu z 0 punktami i bez nowego
+  mnożnika. Opcja dotyczy także edycji QSO.
 4. `Ctrl+W` czyści panel.
 
 Pasmo i emisja ustawiane są automatycznie z CAT. Emisja z radia nadpisuje
@@ -320,8 +322,11 @@ radio. Spoty starsze niż 1 h nie są wyświetlane.
 Hamlib otwiera własne połączenie z radiem — jeśli port szeregowy jest już
 zajęty przez CAT, użyj `rigctld`. Dla cwdaemon i mocka kolejny komunikat jest
 wysyłany dopiero po potwierdzeniu końca nadawania; brak potwierdzenia w czasie
-`oczekiwany × 3 + 3 s` zatrzymuje kolejkę z ostrzeżeniem. Hamlib jest taktowany
-szacowanym czasem nadawania.
+`oczekiwany × 3 + 3 s` zatrzymuje kolejkę z ostrzeżeniem. Dla backendów
+Hamlib używających ogólnego `wait_morse` kolejka nieblokująco odczytuje PTT
+z wyłączonym cache; pozwala to obsłużyć abort i rozłączenie między odczytami.
+Niestandardowe callbacki Hamlib używają szacowanego czasu, dopóki ich semantyka
+nie zostanie zweryfikowana.
 
 ### Komunikaty F1–F8
 
@@ -349,6 +354,9 @@ Makra:
 |---|---|
 | `{CALL}` | Znak z aktywnego panelu QSO. |
 | `{MYCALL}` | Znak stacji (logu). |
+| `{OPERATOR}` | Nazwa operatora z ustawień stacji. |
+| `{WPM}` | Aktualna prędkość keyera. |
+| `{SERIAL}`, `{NR}` | Następny numer serial contestu, z uwzględnieniem szerokości pola. |
 | `{SENT}` | Pełna wymiana nadawana (np. `599 013`). |
 | `{NAZWA_POLA}` | Wartość pola wymiany nadawanej, np. `{SERIAL}`, `{REPORT}`, `{ZONE}`. |
 
@@ -360,11 +368,12 @@ Komunikaty F1–F8 są wysyłane tylko w emisji CW, z kontekstu aktywnego panelu
 - Tryb **Run** lub **Search & Pounce (S&P)** można zmienić w menu
   **Operating** albo na pasku narzędzi; wybór jest zapamiętywany.
 - **Enter Sends Message (ESM)** działa, gdy jest włączone w menu **Operating**,
-  a aktywny panel pracuje emisją CW. Enter w polu Call wysyła F5 (His call)
-  i przechodzi do pierwszego pola odebranej wymiany. Enter w polu wymiany
-  zapisuje QSO; po udanym zapisie wysyła F3 (TU). Nieudane lub niepoprawne QSO
-  nie powoduje wysłania F3. Przy wyłączonym ESM Enter zachowuje standardowe
-  działanie i zapisuje QSO.
+  a aktywny panel pracuje emisją CW. **Operating → Configure ESM messages...**
+  ustawia osobne sekwencje per contest; każda niepusta linia jest osobnym
+  komunikatem. Domyślnie używane są treści F5 (His call) i F3 (TU). Enter w
+  polu Call wysyła sekwencję Call i przechodzi do pierwszego pola wymiany.
+  Enter w polu wymiany zapisuje QSO; sekwencja po zapisie jest wysyłana tylko
+  po udanym logowaniu. Przy wyłączonym ESM Enter zapisuje QSO standardowo.
 - **Auto CQ (F1 repeat)** jest jawnie uruchamiane z menu **Operating**.
   Działa wyłącznie w trybie Run, emisji CW, przy pustym polu Call i gotowym
   keyerze przypisanym do wybranego radia. Wysyła F1, a następne CQ kolejkuje
@@ -767,8 +776,8 @@ END-OF-LOG:
 - Brak trybu multi-op w sieci (synchronizacja wielu stanowisk), brak
   „Run/S&P” oraz automatycznego CQ (auto-repeat).
 - ESM ma celowo podstawową regułę: CW Call/Enter wysyła F5 i przechodzi do
-  wymiany, Enter po wymianie zapisuje i po sukcesie wysyła F3. Brakuje
-  konfigurowalnych sekwencji ESM zależnych od contestu lub pola.
+  wymiany, a Enter po wymianie zapisuje QSO i po sukcesie uruchamia sekwencję
+  wiadomości skonfigurowaną per contest. Sekwencje nie są warunkowane polami.
 
 ### Radio, SO2V i SO2R
 
@@ -787,11 +796,13 @@ END-OF-LOG:
 
 ### Keyer CW
 
-- Hamlib CW jest taktowany wyłącznie szacowanym czasem (brak potwierdzenia
-  końca nadawania).
+- Hamlib CW używa nieblokującego odczytu PTT dla backendów z ogólnym
+  `wait_morse`; callbacki niestandardowe używają szacowanego czasu. To
+  zachowanie wymaga jeszcze walidacji na fizycznych radiach.
 - Brak obsługi WinKeyer.
-- Makra ograniczone do `{CALL}`, `{MYCALL}`, `{SENT}` i pól wymiany nadawanej
-  (brak np. `{NR}+1`, `{OPERATOR}`, zmiany prędkości w makrze).
+- Dostępne makra CW: `{CALL}`, `{MYCALL}`, `{OPERATOR}`, `{WPM}`, `{SERIAL}`,
+  `{NR}`, `{SENT}` i pola wymiany nadawanej. Nie ma jeszcze makra zwiększającego
+  numer, np. `{NR}+1`.
 
 ### DX cluster i bandmapa
 

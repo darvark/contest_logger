@@ -91,6 +91,7 @@ private slots:
     void rejectsInvalidReceivedExchange();
     void rejectsUndefinedReceivedExchangeFields();
     void detectsDuplicateCalls();
+    void duplicateQsosDoNotScoreOrEarnMultipliers();
     void generatesNextSerialAndScoresQso();
     void awardsOnlyNewMultipliers();
     void validatesOperatorSentExchange();
@@ -341,6 +342,41 @@ void ContestDefinitionTest::detectsDuplicateCalls()
         context);
     QVERIFY(otherBand.valid);
     QVERIFY(!otherBand.duplicate);
+}
+
+void ContestDefinitionTest::duplicateQsosDoNotScoreOrEarnMultipliers()
+{
+    logger::ContestDefinition definition;
+    definition.qsoPoints = 3;
+    definition.receivedExchange.append(
+        {QStringLiteral("state"), QStringLiteral("State"),
+         logger::ExchangeFieldType::Text, false});
+    definition.multipliers.append(
+        {QStringLiteral("exchange"), QStringLiteral("state"), false, false});
+    QVector<logger::Qso> qsos(2);
+    qsos[0].id = 1;
+    qsos[0].callsign = QStringLiteral("K1ABC");
+    qsos[0].band = QStringLiteral("20m");
+    qsos[0].mode = QStringLiteral("CW");
+    qsos[0].points = 3;
+    qsos[0].receivedExchangeFields.insert(QStringLiteral("state"), QStringLiteral("CA"));
+    qsos[1] = qsos[0];
+    qsos[1].id = 2;
+    qsos[1].points = 99;
+    qsos[1].receivedExchangeFields.insert(QStringLiteral("state"), QStringLiteral("NY"));
+
+    const logger::ContestEngine engine;
+    const logger::ContestScore score = engine.score(definition, qsos);
+    QCOMPARE(score.totalQsos, 2);
+    QCOMPARE(score.totalPoints, 3);
+    QCOMPARE(score.totalMultipliers, 1);
+    QCOMPARE(score.newMultipliersByQsoId.value(1), 1);
+    QCOMPARE(score.newMultipliersByQsoId.value(2), 0);
+    QCOMPARE(score.finalScore, 3);
+
+    const auto context = engine.buildContext(definition, {qsos.at(1), qsos.at(0)});
+    QVERIFY(context.workedMultiplierKeys.contains(QStringLiteral("exchange:state:CA")));
+    QVERIFY(!context.workedMultiplierKeys.contains(QStringLiteral("exchange:state:NY")));
 }
 
 void ContestDefinitionTest::generatesNextSerialAndScoresQso()

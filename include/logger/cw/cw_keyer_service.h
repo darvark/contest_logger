@@ -3,6 +3,7 @@
 #include "logger/domain/types.h"
 #include "logger/radio/radio_service.h"
 
+#include <QMap>
 #include <QObject>
 #include <QThread>
 
@@ -56,6 +57,7 @@ struct HamlibCwCapabilities {
 };
 
 HamlibCwCapabilities inspectHamlibCwCapabilities(int modelId);
+QString expandCwMacros(QString message, const QMap<QString, QString> &values);
 
 class ICwKeyer {
 public:
@@ -69,7 +71,11 @@ public:
     virtual bool supportsCompletion() const { return false; }
     // Non-blocking. Returns true exactly once after the text most recently
     // passed to sendText() has been fully played. Never true after abort().
-    virtual bool pollCompleted() { return false; }
+    virtual bool pollCompleted(QString *error = nullptr)
+    {
+        Q_UNUSED(error)
+        return false;
+    }
 };
 
 class CwKeyerWorker final : public QObject {

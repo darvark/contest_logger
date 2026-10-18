@@ -59,8 +59,9 @@ public:
         return m_never || m_completionDelayMs >= 0;
     }
 
-    bool pollCompleted() override
+    bool pollCompleted(QString *error) override
     {
+        Q_UNUSED(error)
         if (!m_pending || m_never || m_completionDelayMs < 0
             || m_sentAt.elapsed() < m_completionDelayMs) {
             return false;
@@ -172,8 +173,9 @@ public:
 
     bool supportsCompletion() const override { return m_replyEnabled; }
 
-    bool pollCompleted() override
+    bool pollCompleted(QString *error) override
     {
+        Q_UNUSED(error)
         if (m_socket == nullptr || m_pendingToken.isEmpty()) {
             return false;
         }
@@ -309,6 +311,8 @@ public:
             return false;
         }
         m_open = true;
+        m_completionPollingReady = m_rig->caps->wait_morse == rig_wait_morse
+            && rig_set_cache_timeout_ms(m_rig, HAMLIB_CACHE_PTT, 0) == RIG_OK;
         return true;
     }
 
@@ -319,9 +323,11 @@ public:
         }
         if (m_open) {
             rig_stop_morse(m_rig, m_transmitVfo);
+            m_completionPending = false;
             rig_close(m_rig);
             m_open = false;
         }
+        m_completionPollingReady = false;
         rig_cleanup(m_rig);
         m_rig = nullptr;
     }
@@ -342,8 +348,16 @@ public:
             return false;
         }
         m_transmitVfo = transmitVfo == 0 ? RIG_VFO_A : RIG_VFO_B;
+        m_completionPending = false;
         const int result = rig_send_morse(m_rig, m_transmitVfo, bytes.constData());
-        return check(result, error);
+        if (!check(result, error)) {
+            return false;
+        }
+        if (supportsCompletion()) {
+            m_completionPending = true;
+            m_completionStarted.start();
+        }
+        return true;
     }
 
     bool abort(QString *error) override
@@ -354,7 +368,36 @@ public:
             }
             return false;
         }
-        return check(rig_stop_morse(m_rig, m_transmitVfo), error);
+        if (!check(rig_stop_morse(m_rig, m_transmitVfo), error)) {
+            return false;
+        }
+        m_completionPending = false;
+        return true;
+    }
+
+    bool supportsCompletion() const override
+    {
+        return m_open && m_rig != nullptr && m_rig->caps != nullptr
+            && m_rig->caps->wait_morse != nullptr && m_completionPollingReady;
+    }
+
+    bool pollCompleted(QString *error) override
+    {
+        if (!m_completionPending || !supportsCompletion()
+            || m_completionStarted.elapsed() < 200) {
+            return false;
+        }
+        ptt_t ptt = RIG_PTT_OFF;
+        const int result = rig_get_ptt(m_rig, m_transmitVfo, &ptt);
+        if (!check(result, error)) {
+            m_completionPending = false;
+            return false;
+        }
+        if (ptt == RIG_PTT_OFF) {
+            m_completionPending = false;
+            return true;
+        }
+        return false;
     }
 
     bool setWpm(int wpm, QString *error) override
@@ -402,6 +445,9 @@ private:
 
     RIG *m_rig = nullptr;
     bool m_open = false;
+    bool m_completionPollingReady = false;
+    bool m_completionPending = false;
+    QElapsedTimer m_completionStarted;
     vfo_t m_transmitVfo = RIG_VFO_A;
 };
 #endif
@@ -424,6 +470,15 @@ ICwKeyer *createKeyer(CwKeyerType type)
 }
 
 } // namespace
+
+QString expandCwMacros(QString message, const QMap<QString, QString> &values)
+{
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        message.replace(QStringLiteral("{%1}").arg(it.key()), it.value(),
+                        Qt::CaseInsensitive);
+    }
+    return message;
+}
 
 HamlibCwCapabilities inspectHamlibCwCapabilities(int modelId)
 {
@@ -454,7 +509,7 @@ CwKeyerWorker::CwKeyerWorker(QObject *parent)
     connect(m_queueTimer, &QTimer::timeout,
             this, &CwKeyerWorker::sendNextMessage);
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(10);
+    m_pollTimer->setInterval(50);
     connect(m_pollTimer, &QTimer::timeout, this, &CwKeyerWorker::pollCompletion);
     m_timeoutTimer = new QTimer(this);
     m_timeoutTimer->setSingleShot(true);
@@ -624,10 +679,23 @@ void CwKeyerWorker::pollCompletion()
         clearPendingCompletion();
         return;
     }
-    if (m_keyer->pollCompleted()) {
+    QString error;
+    if (m_keyer->pollCompleted(&error)) {
         m_pollTimer->stop();
         m_timeoutTimer->stop();
         sendNextMessage();
+    } else if (!error.isEmpty()) {
+        m_pollTimer->stop();
+        m_timeoutTimer->stop();
+        m_queue.clear();
+        m_transmitting = false;
+        QString abortError;
+        if (m_keyer != nullptr && !m_keyer->abort(&abortError)
+            && !abortError.isEmpty()) {
+            error += tr("; abort failed: %1").arg(abortError);
+        }
+        m_lastError = tr("CW completion check failed: %1").arg(error);
+        publishStatus(m_lastError);
     }
 }
 
@@ -635,9 +703,26 @@ void CwKeyerWorker::completionTimedOut()
 {
     m_pollTimer->stop();
     // Last chance: the confirmation may have arrived just before the timeout.
-    if (m_keyer != nullptr && m_keyer->pollCompleted()) {
-        sendNextMessage();
-        return;
+    QString completionError;
+    if (m_keyer != nullptr) {
+        if (m_keyer->pollCompleted(&completionError)) {
+            sendNextMessage();
+            return;
+        }
+        if (!completionError.isEmpty()) {
+            m_pollTimer->stop();
+            m_timeoutTimer->stop();
+            m_queue.clear();
+            m_transmitting = false;
+            QString abortError;
+            if (m_keyer != nullptr && !m_keyer->abort(&abortError)
+                && !abortError.isEmpty()) {
+                completionError += tr("; abort failed: %1").arg(abortError);
+            }
+            m_lastError = tr("CW completion check failed: %1").arg(completionError);
+            publishStatus(m_lastError);
+            return;
+        }
     }
     // Safer behaviour: stop and clear the queue, silence the keyer, and tell
     // the operator, rather than blindly sending queued messages.

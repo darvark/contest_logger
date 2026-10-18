@@ -8,6 +8,7 @@ asynchronous CAT radio monitoring.
 
 **User guide (Polish, with screenshots, configuration reference, keyboard
 shortcuts and known limitations): [docs/USER_GUIDE.md](./docs/USER_GUIDE.md).**
+Implemented features are catalogued in [FUNKCJONALNOSCI.md](./FUNKCJONALNOSCI.md).
 
 ## Requirements
 
@@ -165,9 +166,10 @@ copy of DXLog.
 The entry panel provides callsign/exchange fields and Enter-to-log. The active
 panel has a red frame and its header shows VFO/radio, frequency, band and mode.
 The badge next to the callsign shows **DUPE**, **NEW MULT** or **NEW**, and the
-worked bands for that call. Dupes and validation errors are not shown in modal
-dialogs: they appear in the message line, and focus returns to the offending
-field. Double-click a log row to edit the contact: the dialog edits the UTC
+worked bands for that call. Dupes are rejected by default; **Operating > Allow
+logging duplicate QSOs** permits saving them with zero points and no new
+multiplier. Dupes and validation errors appear in the message line, and focus
+returns to the offending field. Double-click a log row to edit the contact: the dialog edits the UTC
 time, callsign, band/mode (restricted to the contest definition), frequency, and
 both sent and received exchange. Changes are validated when saving, duplicates
 are checked excluding the edited QSO, errors are listed in the dialog, and
@@ -235,12 +237,16 @@ Hamlib (validates `send_morse` support and reports unsupported speed control),
 cwdaemon over its UDP protocol, or the mock provider for tests. Hamlib opens its
 own configured rig connection; use rigctld if a CAT controller already owns the
 radio's serial port. CW message templates accept `{CALL}`, `{MYCALL}`, `{SENT}`
-and sent exchange field tokens such as `{SERIAL}`. With cwdaemon (and the mock)
-the next queued message is sent only after the keyer confirms the end of
+and sent exchange field tokens such as `{SERIAL}`, plus `{OPERATOR}`, `{WPM}`
+and `{NR}`. With cwdaemon (and the mock) the next queued message is sent only
+after the keyer confirms the end of
 transmission; if no confirmation arrives within the expected time × 3 + 3 s,
 the queue is stopped and a warning is shown rather than transmitting blindly.
-Hamlib keying is paced by an estimated duration. The CW status line shows
-which pacing is active. Abort is sent immediately and clears the remaining queue.
+Hamlib uses cancellable PTT polling for backends that use its generic
+`wait_morse` implementation; opaque custom callbacks use estimated timing.
+The CW status line shows which pacing is active.
+ESM messages are configurable per contest. Abort is sent immediately and clears
+the remaining queue.
 
 SQLite schema version 5 preserves existing databases; migration 3 adds
 structured sent/received exchange columns, migration 4 adds the spot band, and
