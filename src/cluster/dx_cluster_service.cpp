@@ -378,6 +378,69 @@ void DxClusterWorker::sendLogin()
     m_socket->write(m_config.callsign.toUtf8() + '\n');
 }
 
+void DxClusterWorker::sendCommand(const QString &command)
+{
+    const bool containsControl = std::any_of(
+        command.cbegin(), command.cend(), [](QChar ch) {
+            return ch.category() == QChar::Other_Control;
+        });
+    const QString normalized = command.trimmed();
+    if (containsControl || normalized.isEmpty() || normalized.size() > 512) {
+        const ConnectionState state = m_socket != nullptr
+                && m_socket->state() == QAbstractSocket::ConnectedState
+            ? ConnectionState::Connected : ConnectionState::Disconnected;
+        emit statusChanged({state,
+                            tr("Command was not sent: enter one line of at most 512 characters."),
+                            0});
+        return;
+    }
+    if (!m_loggedIn || m_socket == nullptr
+        || m_socket->state() != QAbstractSocket::ConnectedState) {
+        const ConnectionState state = m_socket != nullptr
+                && m_socket->state() == QAbstractSocket::ConnectedState
+            ? ConnectionState::Connected : ConnectionState::Disconnected;
+        emit statusChanged({state,
+                            tr("Command was not sent: the cluster is not logged in."),
+                            0});
+        return;
+    }
+    const QByteArray bytes = normalized.toUtf8() + '\n';
+    if (m_socket->write(bytes) != bytes.size()) {
+        emit statusChanged({ConnectionState::Error,
+                            tr("Unable to queue command for %1:%2.")
+                                .arg(m_config.host).arg(m_config.port),
+                            0});
+        return;
+    }
+    emit statusChanged({ConnectionState::Connected, tr("Command sent."), 0});
+}
+
+void DxClusterWorker::sendSpot(const Spot &spot)
+{
+    static const QRegularExpression callsignPattern(
+        QStringLiteral("^[A-Z0-9/]{3,20}$"));
+    const QString callsign = spot.callsign.trimmed().toUpper();
+    if (!callsignPattern.match(callsign).hasMatch()
+        || spot.frequencyHz < 100'000 || spot.frequencyHz > 1'000'000'000) {
+        const ConnectionState state = m_socket != nullptr
+                && m_socket->state() == QAbstractSocket::ConnectedState
+            ? ConnectionState::Connected : ConnectionState::Disconnected;
+        emit statusChanged({state,
+                            tr("Spot was not sent: callsign or frequency is invalid."),
+                            0});
+        return;
+    }
+    QString comment = spot.comment.trimmed();
+    if (comment.isEmpty()) {
+        comment = spot.mode.trimmed();
+    }
+    const QString command = QStringLiteral("DX %1 %2 %3")
+        .arg(callsign)
+        .arg(QString::number(static_cast<double>(spot.frequencyHz) / 1000.0, 'f', 1))
+        .arg(comment);
+    sendCommand(command);
+}
+
 void DxClusterWorker::processLine(const QByteArray &line)
 {
     const QString text = QString::fromUtf8(line).trimmed();
@@ -428,6 +491,10 @@ DxClusterController::DxClusterController(QObject *parent)
             m_worker, &DxClusterWorker::start, Qt::QueuedConnection);
     connect(this, &DxClusterController::stopRequested,
             m_worker, &DxClusterWorker::stop, Qt::QueuedConnection);
+    connect(this, &DxClusterController::commandRequested,
+            m_worker, &DxClusterWorker::sendCommand, Qt::QueuedConnection);
+    connect(this, &DxClusterController::spotRequested,
+            m_worker, &DxClusterWorker::sendSpot, Qt::QueuedConnection);
     connect(m_worker, &DxClusterWorker::statusChanged,
             this, &DxClusterController::statusChanged, Qt::QueuedConnection);
     connect(m_worker, &DxClusterWorker::spotReceived,
@@ -454,6 +521,16 @@ void DxClusterController::start(const DxClusterConfig &config)
 void DxClusterController::stop()
 {
     emit stopRequested();
+}
+
+void DxClusterController::sendCommand(const QString &command)
+{
+    emit commandRequested(command);
+}
+
+void DxClusterController::sendSpot(const Spot &spot)
+{
+    emit spotRequested(spot);
 }
 
 } // namespace logger

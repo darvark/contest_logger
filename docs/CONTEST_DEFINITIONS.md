@@ -210,7 +210,15 @@ dupe_key: [callsign, band]        # dubel = ten sam znak na tym samym paśmie
 
 ## Przykłady
 
-Wymiana ze strefą i mnożnikiem strefowym oraz prefiksowym (CQ WW):
+Przykładowy profil nie zastępuje aktualnego regulaminu. Przed zawodami sprawdź
+edycję, kategorię, wymianę i identyfikator Cabrillo; przykłady opisują swoje
+ograniczenia w `description`. W szczególności ocena punktów geograficznych
+wymaga poprawnego `wl_cty.dat`, a niektóre mnożniki zależne od kraju lub
+kategorii entrantów mogą pozostać ręczne/prowizoryczne. Definicja określa
+dozwolone pasma i emisje, ale nie waliduje dozwolonych kombinacji kategorii
+Cabrillo dla danego regulaminu; ustaw je zgodnie z bieżącą edycją zawodów.
+
+Wymiana ze strefą i mnożnikiem strefowym oraz DXCC (CQ WW):
 
 ```yaml
 exchange:
@@ -221,10 +229,15 @@ exchange:
     - {name: report, label: RST, type: rst}
     - {name: zone, label: CQ Zone, type: integer, min: 1, max: 40}
 scoring:
-  qso_points: 1
+  qso_points: 0
+  qso_point_rules:
+    - {points: 0, when: {same_country: true}}
+    - {points: 2, when: {same_continent: true, continent: NA}}
+    - {points: 1, when: {same_continent: true}}
+    - {points: 3, when: {same_continent: false}}
   multipliers:
     - {type: exchange, field: zone, per_band: true}
-    - {type: prefix, per_band: true}
+    - {type: dxcc, per_band: true}
 ```
 
 Pole z listą wartości i lokator:

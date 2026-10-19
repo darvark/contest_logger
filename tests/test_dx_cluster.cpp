@@ -19,6 +19,8 @@ private slots:
     void answersCallPromptWithoutFallbackDelay();
     void reassemblesSpotsSplitAcrossPackets();
     void reconnectsAndRelogsInAfterServerDisconnect();
+    void sendsCommandsAndSpotsWithoutAllowingLineInjection();
+    void supportsParallelClusterConnections();
 };
 
 namespace {
@@ -262,6 +264,82 @@ void DxClusterTest::reconnectsAndRelogsInAfterServerDisconnect()
     const auto error = qvariant_cast<logger::DxClusterStatus>(statuses.at(3).first());
     QVERIFY(error.message.contains(QStringLiteral("Reconnecting")));
     controller.stop();
+}
+
+void DxClusterTest::sendsCommandsAndSpotsWithoutAllowingLineInjection()
+{
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    QTcpSocket *client = nullptr;
+    QByteArray received;
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        client = server.nextPendingConnection();
+        connect(client, &QTcpSocket::readyRead, client,
+                [client, &received] { received.append(client->readAll()); });
+        client->write("login: ");
+        client->flush();
+    });
+
+    logger::DxClusterController controller;
+    controller.start(testConfig(server.serverPort()));
+    QTRY_VERIFY_WITH_TIMEOUT(received.contains("N0CALL\n"), 3000);
+
+    controller.sendCommand(QStringLiteral("SHOW/DX"));
+    logger::Spot spot;
+    spot.callsign = QStringLiteral("W1AW");
+    spot.frequencyHz = 14'025'000;
+    spot.comment = QStringLiteral("CQ TEST");
+    controller.sendSpot(spot);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        received.contains("SHOW/DX\nDX W1AW 14025.0 CQ TEST\n"), 3000);
+    controller.sendCommand(QStringLiteral("BYE\nSHUTDOWN"));
+    QTest::qWait(100);
+    QCOMPARE(received.count("SHOW/DX\n"), 1);
+    QVERIFY(!received.contains("SHUTDOWN"));
+    controller.stop();
+}
+
+void DxClusterTest::supportsParallelClusterConnections()
+{
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    QList<QTcpSocket *> clients;
+    QList<QByteArray> received;
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        QTcpSocket *client = server.nextPendingConnection();
+        const int index = clients.size();
+        clients.append(client);
+        received.append(QByteArray());
+        connect(client, &QTcpSocket::readyRead, client,
+                [client, &received, index] {
+                    received[index].append(client->readAll());
+                });
+        client->write("login: ");
+        client->flush();
+    });
+
+    logger::DxClusterController first;
+    logger::DxClusterController second;
+    first.start(testConfig(server.serverPort()));
+    second.start(testConfig(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(clients.size(), 2, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(received.at(0).contains("N0CALL\n")
+                             && received.at(1).contains("N0CALL\n"), 3000);
+
+    first.sendCommand(QStringLiteral("SHOW/DX"));
+    second.sendCommand(QStringLiteral("SH/WWV"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        (received.at(0).contains("SHOW/DX\n")
+         && received.at(1).contains("SH/WWV\n"))
+            || (received.at(0).contains("SH/WWV\n")
+                && received.at(1).contains("SHOW/DX\n")),
+        3000);
+    QVERIFY(received.at(0).contains("SHOW/DX\n")
+            != received.at(0).contains("SH/WWV\n"));
+    QVERIFY(received.at(1).contains("SHOW/DX\n")
+            != received.at(1).contains("SH/WWV\n"));
+    first.stop();
+    second.stop();
 }
 
 void DxClusterTest::parsesDxSpotLine()

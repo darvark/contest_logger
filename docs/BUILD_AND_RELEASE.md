@@ -80,16 +80,28 @@ Import YAML definition...** or place examples under `contests/examples/` before
 building. Definitions specify contest ID/name, supported bands/modes,
 sent/received exchange fields, serial generation, QSO points, multipliers, and
 the duplicate key. Field types are `rst`, `serial`, `integer`, `text`, `grid`,
-`callsign`, and `enum`; supported multiplier types are `exchange` and `prefix`.
+`callsign`, and `enum`; supported multiplier types are `exchange`, `prefix`,
+`dxcc`, and `country`. Exchange multipliers use a received field; prefix
+multipliers use the WPX prefix derived from the contacted callsign. DXCC and
+country multipliers are resolved from the contact's callsign (`country` is an
+alias for the CTY DXCC entity). Multipliers can be counted per band and/or mode
+with `per_band` and `per_mode`.
 
 The loader rejects malformed YAML, unknown keys, duplicate fields, invalid
 regular expressions, unsupported field types, and values outside configured
 limits. Conditional received fields and ordered `qso_point_rules` can use band,
-mode, received exchange values, or CTY metadata. Geographic conditions depend
-on the application supplying resolved values; prefix/DXCC multiplier values
-are likewise not inferred automatically by the contest engine. Start with one
-of the bundled definitions and run `ctest --test-dir build --output-on-failure`
-after changing contest rules.
+mode, received exchange values, or CTY metadata. Sent exchange fields can also
+be conditional on the station's CTY location. Available location facts include
+`dxcc`/`country`, `continent`, `cq_zone`, `itu_zone`, corresponding
+`station.*` facts, and `same_dxcc`, `same_country`, and `same_continent`
+comparisons. The application resolves contact and station location facts when
+a valid `wl_cty.dat` is loaded; this data is required for geographical
+conditions and DXCC/country multipliers. Without it, dependent conditions may
+not match and CTY-based multiplier values remain unresolved. `qso_point_rules`
+are evaluated in order; the first matching rule supplies QSO points, otherwise
+`qso_points` is used. See [CONTEST_DEFINITIONS.md](./CONTEST_DEFINITIONS.md)
+for the condition syntax. Start with one of the bundled definitions and run
+`ctest --test-dir build --output-on-failure` after changing contest rules.
 
 Bundled starter profiles cover CQ WW CW/SSB, CQ WPX CW/SSB, IARU HF, SP DX,
 WAG, ARRL DX CW/SSB/10m, EU DX, and EU HF Championship. They are not certified
@@ -113,8 +125,10 @@ operator/station settings are under **Options**.
 **File > Import support data** accepts call-history CSV/TXT, `master.cpy`, and
 standard multiline `wl_cty.dat`. The app validates each imported file, stores
 its path in application settings, and reloads the selected data at startup.
-Call history supports callsign completion and exchange suggestions; CTY prefix
-matches show country and zones as hints only, not automatic DXCC scoring.
+Call history supports callsign completion and exchange suggestions. CTY
+prefix/exact-call matches provide country (DXCC entity), continent, and CQ/ITU
+zones for call hints, contest scoring conditions, and DXCC/country multipliers;
+without CTY data, these location-dependent scoring values cannot be resolved.
 
 Use a call-history header beginning `CALL` or `CALLSIGN` with columns such as
 `NAME`, `QTH`, `STATE`, `GRID`, `SECTION`, `SERIAL`, `REPORT`, and `EXCHANGE`.

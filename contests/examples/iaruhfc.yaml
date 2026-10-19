@@ -6,10 +6,11 @@ description: >-
   stations exchange an ITU zone; HQ stations exchange their society
   abbreviation, while IARU officials exchange AC, R1, R2, or R3. Enter exactly
   one of the optional sent/received zone or HQ fields. Zone and HQ multipliers
-  are tracked per band. Official QSO points are 1 for the same ITU zone and
-  continent or an HQ/official station, 3 for a different zone on the same
-  continent, and 5 across continents. The current schema cannot compare both
-  stations' zones and continents, so its point total is provisional.
+  are tracked per band. Official QSO points are 1 for the same ITU zone, 3 for
+  a different zone on the same continent, and 5 across continents or for an
+  HQ/official station. Cross-continent contacts score 5 automatically;
+  same-continent different-zone and HQ/official contacts remain provisional
+  because the schema cannot compare zones or identify HQ/official stations.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW, SSB]
 cabrillo: {contest: IARU-HF}
@@ -24,6 +25,8 @@ exchange:
     - {name: hq, label: HQ / official designator, type: text, required: false, width: 16}
 scoring:
   qso_points: 1
+  qso_point_rules:
+    - {points: 5, when: {same_continent: false}}
   multipliers:
     - {type: exchange, field: itu_zone, per_band: true}
     - {type: exchange, field: hq, per_band: true}

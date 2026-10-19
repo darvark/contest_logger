@@ -5,10 +5,9 @@ description: >-
   2026 rules: https://cqww.com/rules/. Exchange is RS plus CQ Zone. QSO points
   are 3 across continents, 1 on the same continent in different countries, 2
   between different countries in North America, and 0 within the same country.
-  Both CQ Zone and country are multipliers per band. This profile tracks zones;
-  country multipliers are not supported (a callsign prefix is not a country).
-  QSO-point rules need both stations' locations and cannot be fully represented
-  by the current schema, so the configured base point is provisional.
+  CQ Zone and CTY/DXCC country are counted per band. Country scoring depends on
+  wl_cty.dat; verify its entity list against CQ/WAE rules. Maritime-mobile
+  contacts should count only for zone, which this profile cannot enforce.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [SSB]
 cabrillo: {contest: CQ-WW-SSB}
@@ -20,7 +19,13 @@ exchange:
     - {name: report, label: RS, type: rst}
     - {name: zone, label: CQ Zone, type: integer, min: 1, max: 40}
 scoring:
-  qso_points: 1
+  qso_points: 0
+  qso_point_rules:
+    - {points: 0, when: {same_country: true}}
+    - {points: 2, when: {same_continent: true, continent: NA}}
+    - {points: 1, when: {same_continent: true}}
+    - {points: 3, when: {same_continent: false}}
   multipliers:
     - {type: exchange, field: zone, per_band: true}
+    - {type: dxcc, per_band: true}
 dupe_key: [callsign, band, mode]

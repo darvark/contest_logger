@@ -75,6 +75,19 @@ logger::ContestDefinition loadDefinition(const QString &yaml)
     return definition;
 }
 
+logger::ContestDefinition loadExample(const QString &filename)
+{
+    const QString path = QStringLiteral(
+        CONTEST_LOGGER_TEST_SOURCE_DIR "/contests/examples/%1").arg(filename);
+    logger::ContestDefinition definition;
+    QString error;
+    if (!logger::ContestDefinitionLoader().loadFile(path, definition, &error)) {
+        qFatal("Could not load bundled profile %s: %s",
+               qPrintable(filename), qPrintable(error));
+    }
+    return definition;
+}
+
 } // namespace
 
 class ContestDefinitionTest final : public QObject {
@@ -88,6 +101,7 @@ private slots:
     void loadsBundledExamples();
     void loadsCtyMultiplierType();
     void scoresSpdxProfiles();
+    void scoresVerifiedContestProfiles();
     void rejectsInvalidReceivedExchange();
     void rejectsUndefinedReceivedExchangeFields();
     void detectsDuplicateCalls();
@@ -201,6 +215,24 @@ void ContestDefinitionTest::loadsBundledExamples()
         if (filename == QStringLiteral("cqwpx-cw.yaml")) {
             QCOMPARE(definition.cabrilloContest, QStringLiteral("CQ-WPX-CW"));
         }
+        if (filename == QStringLiteral("eudx.yaml")) {
+            QCOMPARE(definition.cabrilloContest, QStringLiteral("EUDXC"));
+            QCOMPARE(definition.multipliers.size(), 1);
+            QCOMPARE(definition.multipliers.first().type, QStringLiteral("dxcc"));
+        }
+        if (filename == QStringLiteral("euhfc.yaml")) {
+            QCOMPARE(definition.cabrilloContest, QStringLiteral("EUHFC"));
+            QCOMPARE(definition.bands.first(), QStringLiteral("160m"));
+            QCOMPARE(definition.multipliers.first().field, QStringLiteral("year"));
+            QVERIFY(definition.multipliers.first().perBand);
+            QVERIFY(!definition.multipliers.first().perMode);
+        }
+        if (filename == QStringLiteral("wag.yaml")) {
+            QCOMPARE(definition.cabrilloContest, QStringLiteral("WAG"));
+            QCOMPARE(definition.qsoPoints, 1);
+            QVERIFY(definition.multipliers.first().perBand);
+            QVERIFY(definition.multipliers.first().perMode);
+        }
     }
 }
 
@@ -281,6 +313,114 @@ void ContestDefinitionTest::scoresSpdxProfiles()
     QCOMPARE(spQso.points, 3);
     QVERIFY(spQso.newMultiplierKeys.contains(
         QStringLiteral("exchange:province:M@40m")));
+
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("EU")},
+        {QStringLiteral("dxcc"), QStringLiteral("Poland")},
+        {QStringLiteral("same_country"), QStringLiteral("true")}
+    };
+    const auto sameCountryQso = logger::ContestEngine().evaluate(
+        polishProfile, QStringLiteral("SP9ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("serial"), QStringLiteral("125")}},
+        context, std::nullopt, {{QStringLiteral("province"), QStringLiteral("M")}});
+    QVERIFY(sameCountryQso.valid);
+    QCOMPARE(sameCountryQso.points, 0);
+}
+
+void ContestDefinitionTest::scoresVerifiedContestProfiles()
+{
+    const logger::ContestEngine engine;
+    const auto cqww = loadExample(QStringLiteral("cqww-cw.yaml"));
+    const QMap<QString, QString> cqwwExchange{
+        {QStringLiteral("report"), QStringLiteral("599")},
+        {QStringLiteral("zone"), QStringLiteral("05")}
+    };
+    logger::ContestEvaluationContext context;
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("NA")},
+        {QStringLiteral("same_country"), QStringLiteral("false")},
+        {QStringLiteral("same_continent"), QStringLiteral("true")},
+        {QStringLiteral("dxcc"), QStringLiteral("Canada")}
+    };
+    auto result = engine.evaluate(
+        cqww, QStringLiteral("VE3ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"), cqwwExchange, context, std::nullopt,
+        {{QStringLiteral("zone"), QStringLiteral("05")}});
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 2);
+    QVERIFY(result.newMultiplierKeys.contains(QStringLiteral("dxcc:CANADA@20m")));
+
+    context.resolvedMultiplierValues.insert(
+        QStringLiteral("same_country"), QStringLiteral("true"));
+    result = engine.evaluate(
+        cqww, QStringLiteral("VE3ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"), cqwwExchange, context, std::nullopt,
+        {{QStringLiteral("zone"), QStringLiteral("05")}});
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 0);
+
+    const auto wpx = loadExample(QStringLiteral("cqwpx-cw.yaml"));
+    const QMap<QString, QString> wpxExchange{
+        {QStringLiteral("report"), QStringLiteral("599")},
+        {QStringLiteral("serial"), QStringLiteral("001")}
+    };
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("NA")},
+        {QStringLiteral("same_country"), QStringLiteral("false")},
+        {QStringLiteral("same_continent"), QStringLiteral("true")}
+    };
+    result = engine.evaluate(wpx, QStringLiteral("VE3ABC"),
+                             QStringLiteral("20m"), QStringLiteral("CW"),
+                             wpxExchange, context);
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 2);
+
+    context.resolvedMultiplierValues.insert(
+        QStringLiteral("same_continent"), QStringLiteral("false"));
+    result = engine.evaluate(wpx, QStringLiteral("VE3ABC"),
+                             QStringLiteral("160m"), QStringLiteral("CW"),
+                             wpxExchange, context);
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 6);
+
+    const auto euhfc = loadExample(QStringLiteral("euhfc.yaml"));
+    const QMap<QString, QString> euhfcExchange{
+        {QStringLiteral("report"), QStringLiteral("599")},
+        {QStringLiteral("year"), QStringLiteral("82")}
+    };
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("continent"), QStringLiteral("EU")}
+    };
+    result = engine.evaluate(euhfc, QStringLiteral("DL1ABC"),
+                             QStringLiteral("20m"), QStringLiteral("CW"),
+                             euhfcExchange, context, std::nullopt,
+                             {{QStringLiteral("year"), QStringLiteral("82")}});
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 1);
+    QVERIFY(result.newMultiplierKeys.contains(
+        QStringLiteral("exchange:year:82@20m")));
+
+    context.resolvedMultiplierValues.insert(
+        QStringLiteral("continent"), QStringLiteral("NA"));
+    result = engine.evaluate(euhfc, QStringLiteral("W1AW"),
+                             QStringLiteral("20m"), QStringLiteral("CW"),
+                             euhfcExchange, context, std::nullopt,
+                             {{QStringLiteral("year"), QStringLiteral("82")}});
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 0);
+
+    const auto iaru = loadExample(QStringLiteral("iaruhfc.yaml"));
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("same_continent"), QStringLiteral("false")}
+    };
+    result = engine.evaluate(
+        iaru, QStringLiteral("W1AW"), QStringLiteral("20m"),
+        QStringLiteral("CW"), {{QStringLiteral("report"), QStringLiteral("599")}},
+        context);
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 5);
 }
 
 void ContestDefinitionTest::rejectsInvalidReceivedExchange()

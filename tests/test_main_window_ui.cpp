@@ -767,6 +767,18 @@ void MainWindowUiTest::bandmapFiltersSpotsByMode()
 
     modeFilter->setCurrentIndex(modeFilter->findData(QString()));
     QCOMPARE(bandmap->rowCount(), 3);
+
+    auto *continentFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapContinentFilter"));
+    QVERIFY(continentFilter != nullptr);
+    continentFilter->setCurrentIndex(
+        continentFilter->findData(QStringLiteral("@unknown")));
+    QCOMPARE(bandmap->rowCount(), 3);
+    continentFilter->setCurrentIndex(
+        continentFilter->findData(QStringLiteral("EU")));
+    QCOMPARE(bandmap->rowCount(), 0);
+    continentFilter->setCurrentIndex(continentFilter->findData(QString()));
+    QCOMPARE(bandmap->rowCount(), 3);
 }
 
 void MainWindowUiTest::clusterAnnouncementsShowOnlyLiveSpots()

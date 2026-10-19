@@ -43,6 +43,8 @@ public:
 public slots:
     void start(const logger::DxClusterConfig &config);
     void stop();
+    void sendCommand(const QString &command);
+    void sendSpot(const logger::Spot &spot);
 
 signals:
     void statusChanged(const logger::DxClusterStatus &status);
@@ -83,10 +85,14 @@ public:
 
     void start(const DxClusterConfig &config);
     void stop();
+    void sendCommand(const QString &command);
+    void sendSpot(const logger::Spot &spot);
 
 signals:
     void startRequested(const logger::DxClusterConfig &config);
     void stopRequested();
+    void commandRequested(const QString &command);
+    void spotRequested(const logger::Spot &spot);
     void statusChanged(const logger::DxClusterStatus &status);
     void spotReceived(const logger::Spot &spot);
 

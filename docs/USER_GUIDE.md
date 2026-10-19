@@ -297,12 +297,21 @@ keyera (ochrona przed nadawaniem złym torem).
 
 Klient obsługuje negocjację Telnet, prompt logowania, parsowanie linii
 `DX de …`, zapis spotów w SQLite (stare spoty są usuwane) oraz automatyczne
-ponowne łączenie (odstęp rosnący do 30 s). **Radio → Disconnect DX cluster**
-rozłącza.
+ponowne łączenie (odstęp rosnący do 30 s). Aby pracować z kilkoma clusterami,
+wybierz **Radio → DX cluster…** dla każdego serwera; aktywne połączenie dla
+wysyłania wybiera się nad listą ogłoszeń. **Radio → Disconnect DX cluster**
+rozłącza wszystkie połączenia.
+
+Pole nad ogłoszeniami wysyła pojedyncze komendy do wybranego połączenia, np.
+`SH/DX` albo spot `DX W1AW 14025.0 CQ TEST`. Komenda nie może zawierać znaków
+końca linii. Spoty można również wysyłać przez API usługi, podając znak,
+częstotliwość i komentarz.
 
 Bandmapa: `Ctrl+Up`/`Ctrl+Down` (lub `Up`/`Down` w tabeli) wybiera spot,
 `Enter`, **Tune** lub dwuklik wpisuje znak do aktywnego panelu i stroi aktywne
-radio. Spoty starsze niż 1 h nie są wyświetlane.
+radio. Filtry pasma, emisji i kontynentu są niezależne. Rozpoznanie kontynentu
+korzysta z załadowanego `wl_cty.dat`; bez pasującego wpisu spot trafia do filtra
+**Unknown**. Spoty starsze niż 1 h nie są wyświetlane.
 
 ## 9. Keyer CW i komunikaty F1–F8
 
@@ -753,12 +762,16 @@ END-OF-LOG:
 ### Reguły zawodów
 
 - Wbudowane definicje to **profile startowe**, nie certyfikowane implementacje
-  regulaminów. Brak wymian warunkowych (np. inna wymiana dla stacji W/VE),
-  punktacji zależnej od kraju/kontynentu/pasma (np. CQ WW 0/1/3 pkt) i
-  automatycznych zmian rocznych regulaminów. Wszystkie QSO mają stałe
-  `qso_points`.
-- Typy mnożników: tylko `exchange` i `prefix`. Prefiks WPX jest wyznaczany
-  uproszczonymi regułami (do weryfikacji dla znaków z `/`).
+  regulaminów. Definicje YAML obsługują warunkowe pola wymiany odbieranej
+  (`required_when`), warunkowe pola wymiany nadawanej zależne od lokalizacji
+  stacji (`when`) oraz uporządkowane reguły punktacji QSO
+  (`qso_point_rules`). Reguły punktacji mogą uwzględniać pasmo, emisję,
+  odebraną wymianę i metadane CTY; pierwsza pasująca reguła wygrywa.
+- Dostępne typy mnożników to `exchange`, `prefix`, `dxcc` i `country`.
+  Mnożniki DXCC/kraju oraz warunki geograficzne wymagają załadowanego
+  `wl_cty.dat`; bez danych CTY wartość mnożnika może pozostać nierozwiązana.
+  Prefiks WPX jest wyznaczany regułą programu, którą należy zweryfikować dla
+  znaków portable.
 - EU DX (`eudx.yaml`) nie ma ustawionego identyfikatora Cabrillo — eksport
   użyje `EUDX`; sprawdź wymagania organizatora.
 - Kategorie Cabrillo specyficzne dla zawodów oraz zasady wysyłki logu należy
@@ -773,11 +786,11 @@ END-OF-LOG:
 - Tabela logu nie ma sortowania (poza chronologicznym), filtrowania ani
   wyszukiwania. Okno *DX Cluster announcements* przechowuje maks. 500 ostatnich
   ogłoszeń.
-- Brak trybu multi-op w sieci (synchronizacja wielu stanowisk), brak
-  „Run/S&P” oraz automatycznego CQ (auto-repeat).
+- Brak trybu multi-op w sieci (synchronizacja wielu stanowisk).
 - ESM ma celowo podstawową regułę: CW Call/Enter wysyła F5 i przechodzi do
   wymiany, a Enter po wymianie zapisuje QSO i po sukcesie uruchamia sekwencję
-  wiadomości skonfigurowaną per contest. Sekwencje nie są warunkowane polami.
+  wiadomości skonfigurowaną per contest. Same sekwencje ESM nie są warunkowane
+  polami wymiany.
 
 ### Radio, SO2V i SO2R
 
@@ -806,9 +819,9 @@ END-OF-LOG:
 
 ### DX cluster i bandmapa
 
-- Brak wysyłania spotów i komend do clustera z programu.
-- Spoty starsze niż 1 h nie są pokazywane; brak filtrów po kontynencie/emisji.
-- Tylko jedno połączenie z clusterem.
+- Spoty starsze niż 1 h nie są pokazywane.
+- Filtr kontynentu wymaga aktualnego `wl_cty.dat`; nieznane znaki można wyświetlić
+  przez filtr **Unknown**.
 
 ### Inne
 

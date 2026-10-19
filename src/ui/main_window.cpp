@@ -1302,10 +1302,6 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                     updateRadioSnapshotForRadio(radio, snapshot);
                 });
     }
-    connect(&m_dxClusterController, &DxClusterController::statusChanged,
-            this, &MainWindow::updateDxClusterStatus);
-    connect(&m_dxClusterController, &DxClusterController::spotReceived,
-            this, &MainWindow::receiveSpot);
     connect(&m_cwKeyerController, &CwKeyerController::statusChanged,
             this, &MainWindow::updateCwStatus);
 
@@ -1315,9 +1311,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::configureDxCluster);
     auto *disconnectClusterAction =
         radioMenu->addAction(tr("Disconnect DX cluster"));
-        disconnectClusterAction->setObjectName(QStringLiteral("disconnectDxClusterAction"));
+    disconnectClusterAction->setObjectName(QStringLiteral("disconnectDxClusterAction"));
     connect(disconnectClusterAction, &QAction::triggered,
-            &m_dxClusterController, &DxClusterController::stop);
+            this, &MainWindow::disconnectDxClusters);
     radioMenu->addSeparator();
     auto *cwKeyerAction = radioMenu->addAction(tr("CW keyer..."));
     connect(cwKeyerAction, &QAction::triggered,
@@ -2019,6 +2015,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                                 QStringLiteral("FM"), QStringLiteral("AM")}) {
         m_bandmapModeFilter->addItem(mode, mode);
     }
+    m_bandmapContinentFilter = new QComboBox(bandmapPane);
+    m_bandmapContinentFilter->setObjectName(QStringLiteral("bandmapContinentFilter"));
+    m_bandmapContinentFilter->addItem(tr("All continents"), QString());
+    for (const QString &continent : {QStringLiteral("AF"), QStringLiteral("AN"),
+                                     QStringLiteral("AS"), QStringLiteral("EU"),
+                                     QStringLiteral("NA"), QStringLiteral("OC"),
+                                     QStringLiteral("SA")}) {
+        m_bandmapContinentFilter->addItem(continent, continent);
+    }
+    m_bandmapContinentFilter->addItem(tr("Unknown"), QStringLiteral("@unknown"));
     auto *bandmapSortSelector = new QComboBox(bandmapPane);
     bandmapSortSelector->setObjectName(QStringLiteral("bandmapSortSelector"));
     bandmapSortSelector->addItem(tr("Frequency"), QStringLiteral("frequency"));
@@ -2031,6 +2037,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     tuneSelectedSpot->setObjectName(QStringLiteral("tuneSelectedSpotButton"));
     bandmapControls->addWidget(m_bandmapBandFilter, 1);
     bandmapControls->addWidget(m_bandmapModeFilter);
+    bandmapControls->addWidget(m_bandmapContinentFilter);
     bandmapControls->addWidget(bandmapSortSelector);
     bandmapControls->addWidget(m_hideWorkedSpots);
     bandmapControls->addWidget(tuneSelectedSpot);
@@ -2063,6 +2070,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     connect(m_bandmapBandFilter, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
     connect(m_bandmapModeFilter, &QComboBox::currentIndexChanged,
+            this, &MainWindow::refreshBandmap);
+    connect(m_bandmapContinentFilter, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
     connect(bandmapSortSelector, &QComboBox::currentIndexChanged,
             this, &MainWindow::refreshBandmap);
@@ -2107,6 +2116,27 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
 
     // DX cluster announcements (raw, chronological).
     auto *clusterPane = createPane(QStringLiteral("clusterPane"));
+    auto *clusterCommandLayout = new QHBoxLayout;
+    clusterCommandLayout->setContentsMargins(2, 2, 2, 0);
+    m_clusterConnectionSelector = new QComboBox(clusterPane);
+    m_clusterConnectionSelector->setObjectName(
+        QStringLiteral("dxClusterConnectionSelector"));
+    m_clusterConnectionSelector->addItem(tr("No connection"), -1);
+    m_clusterCommandInput = new QLineEdit(clusterPane);
+    m_clusterCommandInput->setObjectName(QStringLiteral("dxClusterCommandInput"));
+    m_clusterCommandInput->setPlaceholderText(
+        tr("Cluster command (e.g. DX W1AW 14025.0 comment)"));
+    m_clusterCommandInput->setMaxLength(512);
+    auto *sendClusterCommand = new QPushButton(tr("Send"), clusterPane);
+    sendClusterCommand->setObjectName(QStringLiteral("sendDxClusterCommand"));
+    clusterCommandLayout->addWidget(m_clusterConnectionSelector);
+    clusterCommandLayout->addWidget(m_clusterCommandInput, 1);
+    clusterCommandLayout->addWidget(sendClusterCommand);
+    static_cast<QVBoxLayout *>(clusterPane->layout())->addLayout(clusterCommandLayout);
+    connect(sendClusterCommand, &QPushButton::clicked,
+            this, &MainWindow::sendDxClusterCommand);
+    connect(m_clusterCommandInput, &QLineEdit::returnPressed,
+            this, &MainWindow::sendDxClusterCommand);
     m_clusterLog = new QTableWidget(0, 5, clusterPane);
     m_clusterLog->setObjectName(QStringLiteral("clusterLog"));
     m_clusterLog->setHorizontalHeaderLabels(
@@ -2590,7 +2620,67 @@ void MainWindow::configureDxCluster()
     settings.setValue(QStringLiteral("dxCluster/spotLifetimeMinutes"),
                       spotLifetimeMinutes);
     refreshBandmap();
-    m_dxClusterController.start(config);
+    int connectionIndex = -1;
+    for (int index = 0; index < m_dxClusterConfigs.size(); ++index) {
+        const DxClusterConfig &existing = m_dxClusterConfigs.at(index);
+        if (existing.host.compare(config.host, Qt::CaseInsensitive) == 0
+            && existing.port == config.port) {
+            connectionIndex = index;
+            break;
+        }
+    }
+    DxClusterController *controller = nullptr;
+    if (connectionIndex >= 0) {
+        controller = m_dxClusterControllers.at(connectionIndex);
+        m_dxClusterConfigs[connectionIndex] = config;
+    } else {
+        controller = new DxClusterController(this);
+        connectionIndex = m_dxClusterControllers.size();
+        m_dxClusterControllers.append(controller);
+        m_dxClusterConfigs.append(config);
+        m_clusterConnectionSelector->addItem(
+            QStringLiteral("%1:%2").arg(config.host).arg(config.port),
+            connectionIndex);
+        m_clusterConnectionSelector->setCurrentIndex(
+            m_clusterConnectionSelector->count() - 1);
+        connect(controller, &DxClusterController::statusChanged, this,
+                [this, controller](const DxClusterStatus &status) {
+                    updateDxClusterStatus(controller, status);
+                });
+        connect(controller, &DxClusterController::spotReceived,
+                this, &MainWindow::receiveSpot);
+    }
+    m_clusterConnectionSelector->setCurrentIndex(
+        m_clusterConnectionSelector->findData(connectionIndex));
+    controller->start(config);
+}
+
+void MainWindow::disconnectDxClusters()
+{
+    if (m_dxClusterControllers.isEmpty()) {
+        updateDxClusterStatus(
+            {ConnectionState::Disconnected, tr("Cluster disconnected."), 0});
+        return;
+    }
+    for (DxClusterController *controller : std::as_const(m_dxClusterControllers)) {
+        controller->stop();
+    }
+}
+
+void MainWindow::sendDxClusterCommand()
+{
+    const int index = m_clusterConnectionSelector->currentData().toInt();
+    if (index < 0 || index >= m_dxClusterControllers.size()) {
+        statusBar()->showMessage(tr("Select a DX cluster connection first."), 5000);
+        return;
+    }
+    const QString command = m_clusterCommandInput->text().trimmed();
+    if (command.isEmpty()) {
+        statusBar()->showMessage(tr("Enter a DX cluster command or spot first."), 5000);
+        return;
+    }
+    m_dxClusterControllers.at(index)->sendCommand(command);
+    m_clusterCommandInput->clear();
 }
 
 void MainWindow::configureCwKeyer()
@@ -5750,25 +5840,47 @@ void MainWindow::saveRadioConfig(int radio, const RadioConfig &config)
     settings.endGroup();
 }
 
+void MainWindow::updateDxClusterStatus(DxClusterController *controller,
+                                       const DxClusterStatus &status)
+{
+    m_dxClusterStatuses.insert(controller, status);
+    refreshDxClusterStatus();
+}
+
 void MainWindow::updateDxClusterStatus(const DxClusterStatus &status)
 {
-    m_dxClusterConnected = status.state == ConnectionState::Connected;
+    m_dxClusterStatuses.insert(nullptr, status);
+    refreshDxClusterStatus();
+}
+
+void MainWindow::refreshDxClusterStatus()
+{
+    int connected = 0;
+    int connecting = 0;
+    bool hasError = false;
+    QString latestMessage;
+    for (const DxClusterStatus &status : std::as_const(m_dxClusterStatuses)) {
+        connected += status.state == ConnectionState::Connected;
+        connecting += status.state == ConnectionState::Connecting;
+        hasError = hasError || status.state == ConnectionState::Error;
+        if (!status.message.isEmpty()) {
+            latestMessage = status.message;
+        }
+    }
+    m_dxClusterConnected = connected > 0;
     if (!m_dxClusterConnected && m_clusterLog != nullptr) {
         m_clusterLog->setRowCount(0);
     }
-
-    QString state;
-    switch (status.state) {
-    case ConnectionState::Disconnected: state = tr("Disconnected"); break;
-    case ConnectionState::Connecting: state = tr("Connecting"); break;
-    case ConnectionState::Connected: state = tr("Connected"); break;
-    case ConnectionState::Error: state = tr("Error"); break;
-    case ConnectionState::Unsupported: state = tr("Unsupported"); break;
-    }
-    m_clusterLabel->setText(tr("DX cluster: %1 — %2").arg(state, status.message));
+    const QString state = connected > 0
+        ? tr("%n connected", nullptr, connected)
+        : connecting > 0 ? tr("%n connecting", nullptr, connecting)
+                         : hasError ? tr("Error") : tr("Disconnected");
+    m_clusterLabel->setText(
+        tr("DX cluster: %1%2").arg(state, latestMessage.isEmpty()
+            ? QString() : QStringLiteral(" — ") + latestMessage));
     m_clusterDock->setWindowTitle(tr("DX Cluster announcements — %1").arg(state));
     m_clusterLabel->setStyleSheet(
-        status.state == ConnectionState::Error
+        connected == 0 && hasError
             ? QStringLiteral("color: #c62828;")
             : QString());
 }
@@ -5860,6 +5972,8 @@ void MainWindow::refreshBandmap()
                 ? QStringLiteral("SSB") : upper;
         };
         const QString filterMode = normalizeSpotMode(m_bandmapModeFilter->currentData().toString());
+        const QString filterContinent =
+            m_bandmapContinentFilter->currentData().toString();
         QSet<QString> displayed;
         QVector<QPair<Spot, bool>> visible;
         for (const Spot &spot : std::as_const(ordered)) {
@@ -5874,6 +5988,15 @@ void MainWindow::refreshBandmap()
             if (!filterMode.isEmpty()
                 && normalizeSpotMode(spot.mode) != filterMode) {
                 continue;
+            }
+            if (!filterContinent.isEmpty()) {
+                const CtyPrefixEntry *ctyEntry =
+                    SupportDataParser::findCtyEntry(spot.callsign, m_ctyPrefixes);
+                const QString continent = ctyEntry == nullptr
+                    ? QStringLiteral("@unknown") : ctyEntry->continent.toUpper();
+                if (continent != filterContinent) {
+                    continue;
+                }
             }
             const QString dedupeKey =
                 spot.callsign.toUpper() + QLatin1Char('|') + spot.band;

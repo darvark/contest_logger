@@ -5,9 +5,10 @@ description: >-
   2026 rules: https://www.arrl.org/files/file/Contest%20Rules%20PDFs/2026/10%20Meter%20Rules%20v%202_0%20-%202026.pdf.
   Exchange depends on station location: W/VE and Mexican stations send a
   state/province, DX stations a serial, and maritime mobile stations an ITU
-  region. CW QSOs score 4 points and SSB QSOs 2. The free-text exchange handles
-  the alternatives, but the current scorer cannot split multipliers by mode or
-  classify state/province, DXCC, and maritime-region multipliers.
+  region. CW QSOs score 4 points and SSB QSOs 2; multipliers are separated by
+  mode. The free-text exchange handles the alternatives, but the scorer cannot
+  classify state/province, DXCC, and maritime-region multipliers, so multiplier
+  totals remain provisional.
 bands: [10m]
 modes: [CW, SSB]
 cabrillo: {contest: ARRL-10}
@@ -19,10 +20,10 @@ exchange:
     - {name: report, label: RST, type: rst}
     - {name: exchange, label: "State/province, serial, or ITU region", type: text}
 scoring:
-  qso_points: 1
+  qso_points: 0
   qso_point_rules:
     - {points: 4, when: {mode: CW}}
     - {points: 2, when: {mode: SSB}}
   multipliers:
-    - {type: exchange, field: exchange, per_band: false}
+    - {type: exchange, field: exchange, per_band: false, per_mode: true}
 dupe_key: [callsign, band, mode]

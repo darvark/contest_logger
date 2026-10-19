@@ -20,6 +20,7 @@ exchange:
 scoring:
   qso_points: 3
   qso_point_rules:
+    - {points: 0, when: {same_country: true}}
     - {points: 1, when: {continent: EU}}
   multipliers:
     - {type: dxcc, per_band: true}

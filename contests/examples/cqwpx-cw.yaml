@@ -4,10 +4,8 @@ name: CQ WPX Contest — CW
 description: >-
   2026 rules: https://cqwpx.com/rules/. Exchange is RST plus serial; each
   distinct WPX prefix is a multiplier once across the entire contest, not once
-  per band. QSO points are 3/6 across continents, 1/2 on the same continent in
-  different countries, and 1 within the same country; values are for 10/15/20m
-  then 160/80/40m, with a North America exception of 2/4. The current schema
-  cannot compare both stations' locations, so its base point is provisional.
+  per band. QSO-point rules use CTY location facts; verify those facts against
+  the station locations used by the contest adjudication.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW]
 cabrillo: {contest: CQ-WPX-CW}
@@ -19,7 +17,27 @@ exchange:
     - {name: report, label: RST, type: rst}
     - {name: serial, label: Serial, type: integer, min: 1, max: 999999}
 scoring:
-  qso_points: 1
+  qso_points: 0
+  qso_point_rules:
+    - {points: 1, when: {same_country: true}}
+    - {points: 2, when: {same_continent: true, continent: NA, band: 20m}}
+    - {points: 2, when: {same_continent: true, continent: NA, band: 15m}}
+    - {points: 2, when: {same_continent: true, continent: NA, band: 10m}}
+    - {points: 4, when: {same_continent: true, continent: NA, band: 40m}}
+    - {points: 4, when: {same_continent: true, continent: NA, band: 80m}}
+    - {points: 4, when: {same_continent: true, continent: NA, band: 160m}}
+    - {points: 1, when: {same_continent: true, band: 20m}}
+    - {points: 1, when: {same_continent: true, band: 15m}}
+    - {points: 1, when: {same_continent: true, band: 10m}}
+    - {points: 2, when: {same_continent: true, band: 40m}}
+    - {points: 2, when: {same_continent: true, band: 80m}}
+    - {points: 2, when: {same_continent: true, band: 160m}}
+    - {points: 3, when: {same_continent: false, band: 20m}}
+    - {points: 3, when: {same_continent: false, band: 15m}}
+    - {points: 3, when: {same_continent: false, band: 10m}}
+    - {points: 6, when: {same_continent: false, band: 40m}}
+    - {points: 6, when: {same_continent: false, band: 80m}}
+    - {points: 6, when: {same_continent: false, band: 160m}}
   multipliers:
     - {type: prefix, per_band: false}
 dupe_key: [callsign, band, mode]

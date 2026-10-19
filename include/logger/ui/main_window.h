@@ -15,6 +15,7 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QSet>
+#include <QVector>
 
 class QAction;
 class QComboBox;
@@ -54,6 +55,8 @@ private slots:
     void exportAdif();
     void backupDatabase();
     void configureDxCluster();
+    void disconnectDxClusters();
+    void sendDxClusterCommand();
     void configureCwKeyer();
     void selectContest(int index);
     void createNewLog();
@@ -69,6 +72,8 @@ private slots:
     void editSelectedQso(int row, int column);
     void updateDupeIndicator();
     void updateDxClusterStatus(const logger::DxClusterStatus &status);
+    void updateDxClusterStatus(logger::DxClusterController *controller,
+                               const logger::DxClusterStatus &status);
     void receiveSpot(const logger::Spot &spot);
     void refreshBandmap();
     void activateSpot(int row, int column);
@@ -92,6 +97,7 @@ private:
     void loadBuiltInDefinitions();
     void loadOperator();
     void loadContests();
+    void refreshDxClusterStatus();
     const Contest *activeContest() const;
     void applyActiveLogStation();
     void updateSentExchangeVisibility(int vfo);
@@ -144,7 +150,9 @@ private:
 
     SqliteRepository &m_repository;
     RadioController m_radioControllers[2];
-    DxClusterController m_dxClusterController;
+    QVector<DxClusterController *> m_dxClusterControllers;
+    QVector<DxClusterConfig> m_dxClusterConfigs;
+    QHash<DxClusterController *, DxClusterStatus> m_dxClusterStatuses;
     CwKeyerController m_cwKeyerController;
     // Global station settings; m_station is the effective station of the active log.
     Station m_defaultStation;
@@ -199,6 +207,9 @@ private:
     bool m_dxClusterConnected = false;
     QComboBox *m_bandmapBandFilter = nullptr;
     QComboBox *m_bandmapModeFilter = nullptr;
+    QComboBox *m_bandmapContinentFilter = nullptr;
+    QComboBox *m_clusterConnectionSelector = nullptr;
+    QLineEdit *m_clusterCommandInput = nullptr;
     QCheckBox *m_hideWorkedSpots = nullptr;
     QLabel *m_clusterLabel = nullptr;
     QTimer *m_spotExpiryTimer = nullptr;
