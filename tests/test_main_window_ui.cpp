@@ -1,4 +1,5 @@
 #include "logger/data/sqlite_repository.h"
+#include "logger/contest/contest_definition_loader.h"
 #include "logger/ui/main_window.h"
 #include "logger/ui/new_log_dialog.h"
 
@@ -16,11 +17,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QSettings>
 #include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -43,6 +47,9 @@ private slots:
     void cleanup();
     void contestDefinitionConstrainsBandAndModeSelectors();
     void connectionMenuReconnectsAndDisconnects();
+    void remoteCentralLogJoinOptionIsAvailable();
+    void hostImportRequiresServerMode();
+    void networkStatusShowsQueueAndOfflineState();
     void dxClusterDialogSelectsDirectoryOrCustomServer();
     void radioConfigDialogPersistsHamlibAndCatTimingOptions();
     void cwKeyerDialogPersistsHamlibSerialControlOptions();
@@ -64,7 +71,10 @@ private slots:
     void duplicateCanBeLoggedWhenEnabled();
     void duplicateCanBeCreatedByEditingWhenEnabled();
     void editDialogValidatesAndSaves();
+    void editStaysOpenWhenOutboxWriteFails();
+    void deleteQsoUsesConfirmedTombstone();
     void serialFollowsStoredMaximum();
+    void serverSerialReservationRequiresConnectionAndReservation();
     void newLogDialogRequiresCallsignAndContest();
     void newLogActionCreatesLogWithStationCallsign();
 
@@ -203,6 +213,17 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QVERIFY(disconnectCluster != nullptr);
     QVERIFY(reconnectCw != nullptr);
     QVERIFY(disconnectCw != nullptr);
+    QVERIFY(m_window->findChild<QAction *>(
+                QStringLiteral("configureNetworkConnectionAction")) != nullptr);
+    auto *disconnectNetwork = m_window->findChild<QAction *>(
+        QStringLiteral("disconnectNetworkConnectionAction"));
+    QVERIFY(disconnectNetwork != nullptr);
+    QString repositoryError;
+    const int localLogCountBefore = m_repository->contests(&repositoryError).size();
+    QVERIFY2(repositoryError.isEmpty(), qPrintable(repositoryError));
+    disconnectNetwork->trigger();
+    QCOMPARE(m_repository->contests(&repositoryError).size(), localLogCountBefore);
+    QVERIFY2(repositoryError.isEmpty(), qPrintable(repositoryError));
 
     disconnectCluster->trigger();
     auto *clusterStatus = m_window->findChild<QLabel *>(QStringLiteral("clusterStatus"));
@@ -224,6 +245,122 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Ready")));
     disconnectCw->trigger();
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Disconnected")));
+}
+
+void MainWindowUiTest::remoteCentralLogJoinOptionIsAvailable()
+{
+    auto *configure = m_window->findChild<QAction *>(
+        QStringLiteral("configureNetworkConnectionAction"));
+    QVERIFY(configure != nullptr);
+    runWhenModalAppears([this](QDialog *dialog) {
+        auto *logSelector =
+            dialog->findChild<QComboBox *>(QStringLiteral("syncLogSelector"));
+        QVERIFY(logSelector != nullptr);
+        QVERIFY(logSelector->findData(QStringLiteral("@remote")) >= 0);
+        auto *buttons = dialog->findChild<QDialogButtonBox *>();
+        QVERIFY(buttons != nullptr);
+        buttons->button(QDialogButtonBox::Cancel)->click();
+    });
+    configure->trigger();
+}
+
+void MainWindowUiTest::hostImportRequiresServerMode()
+{
+    const auto *hostAction = m_window->findChild<QAction *>(
+        QStringLiteral("configureHostModeAction"));
+    const auto *importAction = m_window->findChild<QAction *>(
+        QStringLiteral("hostImportLogAction"));
+    QVERIFY(hostAction != nullptr);
+    QVERIFY(importAction != nullptr);
+    QVERIFY(!importAction->isEnabled());
+}
+
+void MainWindowUiTest::networkStatusShowsQueueAndOfflineState()
+{
+    auto *selector =
+        m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QVERIFY(selector != nullptr);
+    const qint64 contestId = selector->currentData().toLongLong();
+    QString error;
+    const QVector<Contest> contests = m_repository->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const auto contest = std::find_if(
+        contests.cbegin(), contests.cend(),
+        [contestId](const Contest &item) { return item.id == contestId; });
+    QVERIFY(contest != contests.cend());
+    QVERIFY2(m_repository->setSynchronizationEnabled(contest->logUuid, true, &error),
+             qPrintable(error));
+    Qso conflictQso;
+    conflictQso.contestId = contestId;
+    conflictQso.callsign = QStringLiteral("K9CONFLICT");
+    conflictQso.stationCallsign = QStringLiteral("SP9TEST");
+    conflictQso.band = QStringLiteral("40m");
+    conflictQso.timestampUtc = QDateTime::currentDateTimeUtc();
+    conflictQso.frequencyHz = 7100000;
+    conflictQso.mode = QStringLiteral("CW");
+    conflictQso.sentExchange = QStringLiteral("");
+    conflictQso.receivedExchange = QStringLiteral("");
+    QVERIFY2(m_repository->saveQso(conflictQso, &error), qPrintable(error));
+    const QVector<SyncOutboxOperation> pending =
+        m_repository->syncOutbox(contest->logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!pending.isEmpty());
+    QVERIFY2(m_repository->recordSyncConflict(
+                 pending.last().operationUuid,
+                 QStringLiteral("{\"callsign\":\"K9REMOTE\",\"qso_version\":2}"),
+                 &error),
+             qPrintable(error));
+
+    QAction *statusAction =
+        m_window->findChild<QAction *>(QStringLiteral("networkStatusAction"));
+    QVERIFY(statusAction != nullptr);
+    bool dialogSeen = false;
+    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+        if (dialog->objectName() != QStringLiteral("networkStatusDialog")) {
+            return;
+        }
+        dialogSeen = true;
+        auto *summary =
+            dialog->findChild<QLabel *>(QStringLiteral("networkStatusSummary"));
+        auto *queue =
+            dialog->findChild<QTableWidget *>(QStringLiteral("networkOutboxTable"));
+        QVERIFY(summary != nullptr);
+        QVERIFY(queue != nullptr);
+        QVERIFY(summary->text().contains(QStringLiteral("Conflict")));
+        QVERIFY(summary->text().contains(QStringLiteral("Log:")));
+        QCOMPARE(queue->rowCount(), 1);
+        auto *compare = dialog->findChild<QPushButton *>(
+            QStringLiteral("compareSyncConflictButton"));
+        QVERIFY(compare != nullptr);
+        QVERIFY(!compare->isEnabled());
+        auto *metrics = dialog->findChild<QPushButton *>(
+            QStringLiteral("serverMetricsButton"));
+        QVERIFY(metrics != nullptr);
+        QVERIFY(!metrics->isEnabled());
+        queue->selectRow(0);
+        QVERIFY(compare->isEnabled());
+        QTimer::singleShot(50, dialog, [] {
+            auto *comparison =
+                qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (comparison != nullptr
+                && comparison->objectName()
+                    == QStringLiteral("syncConflictComparisonDialog")) {
+                auto *table = comparison->findChild<QTableWidget *>(
+                    QStringLiteral("syncConflictComparison"));
+                QVERIFY(table != nullptr);
+                QVERIFY(table->rowCount() > 0);
+                QVERIFY(comparison->findChild<QPushButton *>(
+                    QStringLiteral("acceptServerConflictButton")) != nullptr);
+                QVERIFY(comparison->findChild<QPushButton *>(
+                    QStringLiteral("keepLocalConflictButton")) != nullptr);
+                comparison->accept();
+            }
+        });
+        compare->click();
+        dialog->accept();
+    });
+    statusAction->trigger();
+    QVERIFY(dialogSeen);
 }
 
 void MainWindowUiTest::dxClusterDialogSelectsDirectoryOrCustomServer()
@@ -249,16 +386,16 @@ void MainWindowUiTest::dxClusterDialogSelectsDirectoryOrCustomServer()
         QVERIFY(server != nullptr);
         QVERIFY(host != nullptr);
         QVERIFY(port != nullptr);
-        QCOMPARE(server->count(), 31);
+        QCOMPARE(server->count(), 28);
         QCOMPARE(server->currentIndex(), 0);
         QCOMPARE(host->text(), QStringLiteral("my.cluster.test"));
         QCOMPARE(port->value(), 7777);
 
-        const int poland = server->findText(QStringLiteral("SP6PWS-2"),
-                                            Qt::MatchStartsWith);
-        QVERIFY(poland > 0);
-        server->setCurrentIndex(poland);
-        QCOMPARE(host->text(), QStringLiteral("sp6xd.weles.pro"));
+        const int cluster = server->findText(QStringLiteral("SR4DXCW"),
+                                             Qt::MatchStartsWith);
+        QVERIFY(cluster > 0);
+        server->setCurrentIndex(cluster);
+        QCOMPARE(host->text(), QStringLiteral("dx.jestok.com"));
         QCOMPARE(port->value(), 7300);
         QVERIFY(!host->isEnabled());
         QVERIFY(!port->isEnabled());
@@ -990,6 +1127,68 @@ void MainWindowUiTest::editDialogValidatesAndSaves()
     QVERIFY(message().contains(QStringLiteral("updated")));
 }
 
+void MainWindowUiTest::deleteQsoUsesConfirmedTombstone()
+{
+    enterQso(QStringLiteral("W1AW"), QStringLiteral("599"), QStringLiteral("1"));
+    QCOMPARE(table()->rowCount(), 1);
+    const qint64 qsoId = table()->item(0, 0)->data(Qt::UserRole).toLongLong();
+
+    runWhenModalAppears([](QDialog *dialog) {
+        auto *confirmation = qobject_cast<QMessageBox *>(dialog);
+        QVERIFY(confirmation != nullptr);
+        confirmation->button(QMessageBox::Yes)->click();
+    });
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "deleteSelectedQso",
+                                      Q_ARG(int, 0)));
+    QCOMPARE(table()->rowCount(), 0);
+    QString error;
+    QVERIFY(!m_repository->qsoById(qsoId, &error).has_value());
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(message().contains(QStringLiteral("deleted")));
+}
+
+void MainWindowUiTest::editStaysOpenWhenOutboxWriteFails()
+{
+    enterQso(QStringLiteral("W1AW"), QStringLiteral("599"), QStringLiteral("1"));
+    const qint64 qsoId = table()->item(0, 0)->data(Qt::UserRole).toLongLong();
+    QString error;
+    const QVector<Contest> contests = m_repository->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const auto selectedLog = std::find_if(
+        contests.cbegin(), contests.cend(), [this](const Contest &contest) {
+            return contest.id == m_window->findChild<QComboBox *>(
+                QStringLiteral("contestSelector"))->currentData().toLongLong();
+        });
+    QVERIFY(selectedLog != contests.cend());
+    QVERIFY2(m_repository->setSynchronizationEnabled(selectedLog->logUuid, true, &error),
+             qPrintable(error));
+    QSqlQuery trigger(QSqlDatabase::database(m_connectionName));
+    QVERIFY2(trigger.exec(QStringLiteral(
+        "CREATE TRIGGER fail_sync_outbox BEFORE INSERT ON sync_outbox "
+        "BEGIN SELECT RAISE(ABORT, 'simulated outbox failure'); END")),
+        qPrintable(trigger.lastError().text()));
+
+    bool stayedOpenWithError = false;
+    runWhenModalAppears([&stayedOpenWithError](QDialog *dialog) {
+        auto *call = dialog->findChild<QLineEdit *>(QStringLiteral("editCallsign"));
+        auto *errors = dialog->findChild<QLabel *>(QStringLiteral("editErrors"));
+        auto *buttons = dialog->findChild<QDialogButtonBox *>();
+        QVERIFY(call && errors && buttons);
+        call->setText(QStringLiteral("K2NEW"));
+        buttons->button(QDialogButtonBox::Save)->click();
+        QCoreApplication::processEvents();
+        stayedOpenWithError = dialog->isVisible() && !errors->text().isEmpty();
+        buttons->button(QDialogButtonBox::Cancel)->click();
+    });
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "editSelectedQso",
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QVERIFY(stayedOpenWithError);
+    QCOMPARE(table()->item(0, 5)->text(), QStringLiteral("W1AW"));
+    const auto unchanged = m_repository->qsoById(qsoId, &error);
+    QVERIFY2(unchanged.has_value(), qPrintable(error));
+    QCOMPARE(unchanged->callsign, QStringLiteral("W1AW"));
+}
+
 void MainWindowUiTest::serialFollowsStoredMaximum()
 {
     enterQso(QStringLiteral("F5AA"), QStringLiteral("599"), QStringLiteral("1"));
@@ -1004,6 +1203,74 @@ void MainWindowUiTest::serialFollowsStoredMaximum()
     });
     QMetaObject::invokeMethod(m_window.get(), "editSelectedQso", Q_ARG(int, 1), Q_ARG(int, 0));
     QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QStringLiteral("011"));
+}
+
+void MainWindowUiTest::serverSerialReservationRequiresConnectionAndReservation()
+{
+    const QString yaml = QStringLiteral(R"(
+schema_version: 1
+id: ui-server-serial
+name: UI server serial test
+description: Server-allocated serial exchange for UI testing.
+bands: [20m]
+modes: [CW]
+exchange:
+  sent:
+    - name: serial
+      label: Serial
+      type: serial
+      generated: true
+      width: 3
+  received:
+    - name: serial
+      label: Serial
+      type: integer
+      min: 1
+      max: 999
+scoring:
+  qso_points: 1
+  serial_start: 1
+  serial_server_required: true
+dupe_key: [callsign, band, mode]
+)");
+    ContestDefinition definition;
+    QString error;
+    QVERIFY2(ContestDefinitionLoader().loadText(
+                 yaml, QStringLiteral("ui-server-serial"), definition, &error),
+             qPrintable(error));
+    QVERIFY2(m_repository->saveContestDefinition(definition, yaml, &error),
+             qPrintable(error));
+    const qint64 logId = m_repository->createContestLog(
+        definition, yaml, QStringLiteral("UI server serial test"), &error);
+    QVERIFY2(logId > 0, qPrintable(error));
+
+    m_window.reset();
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    auto *selector = m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QVERIFY(selector != nullptr);
+    const int index = selector->findData(logId);
+    QVERIFY(index >= 0);
+    selector->setCurrentIndex(index);
+    QCoreApplication::processEvents();
+
+    auto *reserve = m_window->findChild<QPushButton *>(
+        QStringLiteral("reserveSerialButtonV0"));
+    auto *cancel = m_window->findChild<QPushButton *>(
+        QStringLiteral("cancelSerialButtonV0"));
+    QVERIFY(reserve != nullptr);
+    QVERIFY(cancel != nullptr);
+    QVERIFY(!cancel->isEnabled());
+    QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QString());
+    QTest::mouseClick(reserve, Qt::LeftButton);
+    QVERIFY(message().contains(QStringLiteral("central server")));
+
+    callEdit()->setText(QStringLiteral("W1AW"));
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "logQso",
+                                      Qt::DirectConnection));
+    QVERIFY(message().contains(QStringLiteral("central connection")));
+    QCOMPARE(table()->rowCount(), 0);
+    QCOMPARE(callEdit()->text(), QStringLiteral("W1AW"));
 }
 
 void MainWindowUiTest::newLogDialogRequiresCallsignAndContest()

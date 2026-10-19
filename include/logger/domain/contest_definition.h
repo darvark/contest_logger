@@ -62,6 +62,8 @@ struct ContestDefinition {
     QVector<ExchangeFieldDefinition> sentExchange;
     QVector<ExchangeFieldDefinition> receivedExchange;
     int serialStart = 1;
+    QString serialScope = QStringLiteral("global");
+    bool serialServerRequired = false;
     int qsoPoints = 1;
     QVector<QsoPointsRule> qsoPointRules;
     QVector<MultiplierDefinition> multipliers;

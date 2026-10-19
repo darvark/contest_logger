@@ -9,6 +9,13 @@
 
 namespace logger {
 
+enum class QsoSyncStatus {
+    Local,
+    Pending,
+    Synced,
+    Conflict
+};
+
 enum class ConnectionState {
     Disconnected,
     Connecting,
@@ -20,6 +27,12 @@ enum class ConnectionState {
 struct Qso {
     qint64 id = 0;
     qint64 contestId = 0;
+    QString qsoUuid;
+    QString logUuid;
+    QString stationUuid;
+    QString reservationUuid;
+    int qsoVersion = 1;
+    QsoSyncStatus syncStatus = QsoSyncStatus::Local;
     QString callsign;
     QString stationCallsign;
     QString band;
@@ -33,8 +46,51 @@ struct Qso {
     int points = 0;
 };
 
+struct SyncOutboxOperation {
+    QString operationUuid;
+    QString logUuid;
+    QString entityUuid;
+    QString operation;
+    QString payloadJson;
+    QDateTime createdAtUtc;
+    QString status;
+    int attempts = 0;
+    QString lastError;
+};
+
+struct SyncConflict {
+    QString operationUuid;
+    QString logUuid;
+    QString entityUuid;
+    QString localPayloadJson;
+    QString remotePayloadJson;
+    QDateTime createdAtUtc;
+};
+
+struct SerialReservation {
+    QString reservationUuid;
+    QString logUuid;
+    QString stationUuid;
+    QString scopeKey;
+    QString band;
+    QString mode;
+    int serialNumber = 0;
+    QString status;
+    QString qsoUuid;
+};
+
+struct SerialReservationRequest {
+    QString logUuid;
+    QString stationUuid;
+    QString reservationUuid;
+    QString operation;
+    QString band;
+    QString mode;
+};
+
 struct Contest {
     qint64 id = 0;
+    QString logUuid;
     QString code;
     QString name;
     QString description;

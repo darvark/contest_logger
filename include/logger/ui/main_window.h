@@ -4,10 +4,13 @@
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/contest/contest_engine.h"
 #include "logger/cw/cw_keyer_service.h"
+#include "logger/data/central_repository.h"
 #include "logger/data/log_exporter.h"
 #include "logger/data/sqlite_repository.h"
 #include "logger/data/support_data_parser.h"
 #include "logger/domain/types.h"
+#include "logger/network/sync_client.h"
+#include "logger/network/sync_server.h"
 #include "logger/radio/radio_service.h"
 
 #include <QDateTime>
@@ -16,6 +19,8 @@
 #include <QMap>
 #include <QSet>
 #include <QVector>
+
+#include <memory>
 
 class QAction;
 class QComboBox;
@@ -55,6 +60,12 @@ private slots:
     void exportAdif();
     void backupDatabase();
     void configureDxCluster();
+    void configureNetworkConnection();
+    void completeRemoteLogMerge();
+    void configureHostMode();
+    void importLocalLogToHost();
+    void disconnectNetworkConnection();
+    void showNetworkStatus();
     void disconnectDxClusters();
     void sendDxClusterCommand();
     void configureCwKeyer();
@@ -70,6 +81,7 @@ private slots:
     void resetWindowLayout();
     void logQso();
     void editSelectedQso(int row, int column);
+    void deleteSelectedQso(int row);
     void updateDupeIndicator();
     void updateDxClusterStatus(const logger::DxClusterStatus &status);
     void updateDxClusterStatus(logger::DxClusterController *controller,
@@ -90,6 +102,8 @@ private slots:
     void setSo2rEnabled(bool enabled);
     void focusVfo(int vfo);
     void logQsoForVfo(int vfo);
+    void reserveSerialForVfo(int vfo);
+    void cancelSerialForVfo(int vfo);
     void updateDupeIndicatorForVfo(int vfo);
     void updateRadioSnapshotForRadio(int radio, const logger::RadioSnapshot &snapshot);
 
@@ -153,6 +167,17 @@ private:
     QVector<DxClusterController *> m_dxClusterControllers;
     QVector<DxClusterConfig> m_dxClusterConfigs;
     QHash<DxClusterController *, DxClusterStatus> m_dxClusterStatuses;
+    std::unique_ptr<SyncClient> m_syncClient;
+    std::unique_ptr<CentralRepository> m_hostRepository;
+    std::unique_ptr<SyncServer> m_hostServer;
+    Contest m_pendingRemoteContest;
+    QString m_pendingRemoteDefinitionYaml;
+    QString m_pendingSerialHistoryRequestId;
+    bool m_joiningRemoteLog = false;
+    bool m_creatingRemoteLog = false;
+    bool m_mergingRemoteLog = false;
+    QAction *m_hostModeAction = nullptr;
+    QAction *m_hostImportAction = nullptr;
     CwKeyerController m_cwKeyerController;
     // Global station settings; m_station is the effective station of the active log.
     Station m_defaultStation;
@@ -179,6 +204,20 @@ private:
     QMap<QString, QLineEdit *> m_exchangeEdits[2];
     QHBoxLayout *m_sentExchangeLayouts[2]{};
     QMap<QString, QLineEdit *> m_sentExchangeEdits[2];
+    QPushButton *m_reserveSerialButtons[2]{};
+    QPushButton *m_cancelSerialButtons[2]{};
+    QString m_serialReservationUuids[2];
+    QString m_serialReservationBands[2];
+    QString m_serialReservationModes[2];
+    QString m_serialReservationSerials[2];
+    QHash<QString, int> m_serialReservationContexts;
+    QHash<QString, QString> m_serialRequestReservationUuids;
+    QHash<QString, QString> m_serialReservationPendingBands;
+    QHash<QString, QString> m_serialReservationPendingModes;
+    QHash<QString, int> m_serialCancelContexts;
+    QHash<QString, QString> m_serialCancelRequestReservationUuids;
+    QDateTime m_networkLastContactUtc;
+    bool m_networkReadOnly = false;
     QFrame *m_entryGroups[2]{};
     QPushButton *m_focusButtons[2]{};
     int m_activeEntryContext = 0;

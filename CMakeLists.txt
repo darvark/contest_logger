@@ -36,7 +36,10 @@ add_library(logger_core
     include/logger/contest/contest_engine.h
     include/logger/cw/cw_keyer_service.h
     include/logger/data/log_exporter.h
+    include/logger/data/central_repository.h
     include/logger/data/support_data_parser.h
+    include/logger/network/sync_server.h
+    include/logger/network/sync_client.h
     include/logger/radio/radio_service.h
     include/logger/radio/band_plan.h
     include/logger/ui/operator_dialog.h
@@ -45,7 +48,10 @@ add_library(logger_core
     src/contest/contest_engine.cpp
     src/cw/cw_keyer_service.cpp
     src/data/log_exporter.cpp
+    src/data/central_repository.cpp
     src/data/support_data_parser.cpp
+    src/network/sync_server.cpp
+    src/network/sync_client.cpp
     src/cluster/dx_cluster_service.cpp
     src/data/sqlite_repository.cpp
     src/radio/radio_service.cpp
@@ -81,6 +87,11 @@ add_executable(contest_logger
     src/main.cpp
 )
 target_link_libraries(contest_logger PRIVATE logger_ui)
+
+add_executable(contest_logger_server
+    src/server_main.cpp
+)
+target_link_libraries(contest_logger_server PRIVATE logger_core)
 
 option(CONTEST_LOGGER_BUILD_DOC_TOOLS
     "Build the tool that regenerates documentation screenshots" OFF)
@@ -118,8 +129,15 @@ if(WIN32)
                 ".*[/\\\\]Windows[/\\\\]System32[/\\\\].*"
         )
     endif()
+    install(TARGETS contest_logger_server
+        RUNTIME DESTINATION bin
+        RUNTIME_DEPENDENCY_SET contest_logger_runtime
+    )
 else()
     install(TARGETS contest_logger
+        RUNTIME DESTINATION bin
+    )
+    install(TARGETS contest_logger_server
         RUNTIME DESTINATION bin
     )
 endif()
@@ -151,6 +169,12 @@ if(BUILD_TESTING)
 
     add_executable(logger_tests
         tests/test_sqlite_repository.cpp
+    )
+    add_executable(central_repository_tests
+        tests/test_central_repository.cpp
+    )
+    add_executable(sync_server_tests
+        tests/test_sync_server.cpp
     )
     add_executable(contest_tests
         tests/test_contest_definitions.cpp
@@ -185,6 +209,11 @@ if(BUILD_TESTING)
         CONTEST_LOGGER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(logger_tests PRIVATE logger_core Qt6::Test)
+    target_link_libraries(central_repository_tests PRIVATE logger_core Qt6::Test)
+    target_compile_definitions(sync_server_tests PRIVATE
+        SYNC_SERVER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(sync_server_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(contest_tests
         PRIVATE
             logger_core
@@ -197,6 +226,8 @@ if(BUILD_TESTING)
     target_link_libraries(export_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(support_data_tests PRIVATE logger_core Qt6::Test)
     add_test(NAME logger_tests COMMAND logger_tests)
+    add_test(NAME central_repository_tests COMMAND central_repository_tests)
+    add_test(NAME sync_server_tests COMMAND sync_server_tests)
     add_test(NAME contest_tests COMMAND contest_tests)
     add_test(NAME radio_tests COMMAND radio_tests)
     add_test(NAME band_plan_tests COMMAND band_plan_tests)

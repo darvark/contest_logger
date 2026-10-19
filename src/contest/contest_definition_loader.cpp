@@ -600,6 +600,8 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
     if (!scoring || !checkKeys(scoring,
                                {QStringLiteral("qso_points"),
                                 QStringLiteral("serial_start"),
+                                QStringLiteral("serial_scope"),
+                                QStringLiteral("serial_server_required"),
                                 QStringLiteral("multipliers"),
                                 QStringLiteral("qso_point_rules")},
                                QStringLiteral("contest.scoring"), error)
@@ -608,12 +610,37 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                         definition.qsoPoints, error)
         || !optionalInt(scoring, QStringLiteral("serial_start"),
                         QStringLiteral("contest.scoring"), 1,
-                        definition.serialStart, error)) {
+                        definition.serialStart, error)
+        || !optionalString(scoring, QStringLiteral("serial_scope"),
+                           QStringLiteral("contest.scoring"),
+                           definition.serialScope, error)
+        || !optionalBool(scoring, QStringLiteral("serial_server_required"),
+                         QStringLiteral("contest.scoring"), false,
+                         definition.serialServerRequired, error)) {
         return false;
     }
     if (definition.qsoPoints < 0 || definition.serialStart < 1) {
         setError(error, QStringLiteral(
                             "contest.scoring.qso_points must be non-negative and serial_start must be positive."));
+        return false;
+    }
+    static const QStringList serialScopes{
+        QStringLiteral("global"), QStringLiteral("band"),
+        QStringLiteral("mode"), QStringLiteral("band_mode")
+    };
+    if (!serialScopes.contains(definition.serialScope)) {
+        setError(error, QStringLiteral(
+            "contest.scoring.serial_scope must be global, band, mode or band_mode."));
+        return false;
+    }
+    const bool hasGeneratedSerial = std::any_of(
+        definition.sentExchange.cbegin(), definition.sentExchange.cend(),
+        [](const ExchangeFieldDefinition &field) {
+            return field.type == ExchangeFieldType::Serial && field.generated;
+        });
+    if (definition.serialServerRequired && !hasGeneratedSerial) {
+        setError(error, QStringLiteral(
+            "contest.scoring.serial_server_required requires a generated sent serial field."));
         return false;
     }
 

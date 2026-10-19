@@ -25,6 +25,7 @@
 #include <QDialogButtonBox>
 #include <QComboBox>
 #include <QCloseEvent>
+#include <QCryptographicHash>
 #include <QDockWidget>
 #include <QFile>
 #include <QFileDialog>
@@ -49,7 +50,9 @@
 #include <QNetworkRequest>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProgressDialog>
 #include <QPolygonF>
+#include <QRegularExpression>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
@@ -64,6 +67,7 @@
 #include <QTabWidget>
 #include <QTimeZone>
 #include <QToolBar>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -459,6 +463,94 @@ private:
     QCheckBox *m_autoConnect = nullptr;
     QLabel *m_result = nullptr;
     Action m_action = Action::Save;
+};
+
+class SyncConnectionDialog final : public QDialog {
+public:
+    SyncConnectionDialog(const QVector<Contest> &contests,
+                         const QString &savedHost, int savedPort,
+                         const QString &savedLogUuid, QWidget *parent)
+        : QDialog(parent)
+    {
+        setWindowTitle(tr("Central synchronization connection"));
+        auto *layout = new QVBoxLayout(this);
+        auto *form = new QFormLayout;
+        m_host = new QLineEdit(savedHost, this);
+        m_host->setObjectName(QStringLiteral("syncServerHost"));
+        m_host->setPlaceholderText(tr("Server DNS name"));
+        form->addRow(tr("Server host / TLS name:"), m_host);
+
+        m_port = new QSpinBox(this);
+        m_port->setObjectName(QStringLiteral("syncServerPort"));
+        m_port->setRange(1, 65535);
+        m_port->setValue(savedPort > 0 ? savedPort : 7443);
+        form->addRow(tr("Port:"), m_port);
+
+        m_log = new QComboBox(this);
+        m_log->setObjectName(QStringLiteral("syncLogSelector"));
+        for (const Contest &contest : contests) {
+            m_log->addItem(QStringLiteral("%1 — %2")
+                               .arg(contest.name, contest.stationCallsign),
+                           contest.logUuid);
+        }
+        m_log->addItem(tr("Join a remote central log..."),
+                       QStringLiteral("@remote"));
+        m_log->addItem(tr("Create a central log from a local log..."),
+                       QStringLiteral("@create"));
+        const int savedLogIndex = m_log->findData(savedLogUuid);
+        if (savedLogIndex >= 0) {
+            m_log->setCurrentIndex(savedLogIndex);
+        } else if (contests.isEmpty()) {
+            m_log->setCurrentIndex(m_log->count() - 1);
+        }
+        form->addRow(tr("Log to synchronize:"), m_log);
+
+        m_token = new QLineEdit(this);
+        m_token->setObjectName(QStringLiteral("syncAccessToken"));
+        m_token->setEchoMode(QLineEdit::Password);
+        m_token->setPlaceholderText(tr("Enter token; it will not be saved"));
+        form->addRow(tr("Access token:"), m_token);
+        layout->addLayout(form);
+
+        auto *notice = new QLabel(
+            tr("A local log is retained when selected. To join a remote log, "
+               "choose the last option; a local copy will be created without "
+               "changing existing logs. The token is kept in memory only."),
+            this);
+        notice->setWordWrap(true);
+        layout->addWidget(notice);
+
+        auto *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Ok)->setText(tr("Connect"));
+        connect(buttons, &QDialogButtonBox::accepted,
+                this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected,
+                this, &QDialog::reject);
+        layout->addWidget(buttons);
+    }
+
+    QString host() const { return m_host->text().trimmed(); }
+    quint16 port() const { return static_cast<quint16>(m_port->value()); }
+    QString logUuid() const
+    {
+        return joinRemote() ? QString() : m_log->currentData().toString();
+    }
+    bool joinRemote() const
+    {
+        return m_log->currentData().toString() == QStringLiteral("@remote");
+    }
+    bool createRemote() const
+    {
+        return m_log->currentData().toString() == QStringLiteral("@create");
+    }
+    QString token() const { return m_token->text(); }
+
+private:
+    QLineEdit *m_host = nullptr;
+    QSpinBox *m_port = nullptr;
+    QComboBox *m_log = nullptr;
+    QLineEdit *m_token = nullptr;
 };
 
 class DxClusterConfigDialog final : public QDialog {
@@ -1193,6 +1285,96 @@ void appendClusterRow(QTableWidget *table, const Spot &spot)
     }
 }
 
+QString importDupeIdentity(const QStringList &dupeKey, const Qso &qso)
+{
+    QStringList values{qso.callsign.trimmed().toUpper()};
+    if (dupeKey.contains(QStringLiteral("band"), Qt::CaseInsensitive)) {
+        values.append(qso.band.trimmed().toLower());
+    }
+    if (dupeKey.contains(QStringLiteral("mode"), Qt::CaseInsensitive)) {
+        values.append(qso.mode.trimmed().toUpper());
+    }
+    return values.join(QChar(0x1f));
+}
+
+bool validImportUuid(const QString &value)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+                       "[89ab][0-9a-f]{3}-[0-9a-f]{12}$"));
+    return pattern.match(value).hasMatch();
+}
+
+bool sameImportedQso(const Qso &left, const Qso &right,
+                     const QString &fallbackStationUuid)
+{
+    const QString leftStationUuid = left.stationUuid.isEmpty()
+        ? fallbackStationUuid : left.stationUuid;
+    return left.qsoUuid == right.qsoUuid
+        && leftStationUuid == right.stationUuid
+        && left.callsign.compare(right.callsign, Qt::CaseInsensitive) == 0
+        && left.stationCallsign.compare(right.stationCallsign, Qt::CaseInsensitive) == 0
+        && left.band.compare(right.band, Qt::CaseInsensitive) == 0
+        && left.timestampUtc.toUTC() == right.timestampUtc.toUTC()
+        && left.frequencyHz == right.frequencyHz
+        && left.mode.compare(right.mode, Qt::CaseInsensitive) == 0
+        && left.sentExchange == right.sentExchange
+        && left.receivedExchange == right.receivedExchange
+        && left.sentExchangeFields == right.sentExchangeFields
+        && left.receivedExchangeFields == right.receivedExchangeFields
+        && left.reservationUuid == right.reservationUuid
+        && left.points == right.points;
+}
+
+QJsonObject importExchangeObject(const QMap<QString, QString> &fields)
+{
+    QJsonObject result;
+    for (auto it = fields.cbegin(); it != fields.cend(); ++it) {
+        result.insert(it.key(), it.value());
+    }
+    return result;
+}
+
+QJsonObject importOperation(const Qso &qso, const QString &logUuid,
+                            const QString &stationUuid)
+{
+    const QString operationUuid =
+        QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    const QJsonObject snapshot{
+        {QStringLiteral("qso_uuid"), qso.qsoUuid},
+        {QStringLiteral("log_uuid"), logUuid},
+        {QStringLiteral("station_uuid"), stationUuid},
+        {QStringLiteral("callsign"), qso.callsign.trimmed().toUpper()},
+        {QStringLiteral("station_callsign"), qso.stationCallsign.trimmed().toUpper()},
+        {QStringLiteral("band"), qso.band.trimmed().toLower()},
+        {QStringLiteral("timestamp_utc"),
+         qso.timestampUtc.toUTC().toString(Qt::ISODateWithMs)},
+        {QStringLiteral("frequency_hz"), qso.frequencyHz},
+        {QStringLiteral("mode"), qso.mode.trimmed().toUpper()},
+        {QStringLiteral("sent_exchange"), qso.sentExchange},
+        {QStringLiteral("received_exchange"), qso.receivedExchange},
+        {QStringLiteral("sent_exchange_fields"),
+         importExchangeObject(qso.sentExchangeFields)},
+        {QStringLiteral("received_exchange_fields"),
+         importExchangeObject(qso.receivedExchangeFields)},
+        {QStringLiteral("points"), qso.points}
+    };
+    QJsonObject operation{
+        {QStringLiteral("operation_uuid"), operationUuid},
+        {QStringLiteral("log_uuid"), logUuid},
+        {QStringLiteral("station_uuid"), stationUuid},
+        {QStringLiteral("created_at_utc"),
+         QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+        {QStringLiteral("kind"), QStringLiteral("qso.create")},
+        {QStringLiteral("expected_version"), 0},
+        {QStringLiteral("qso"), snapshot}
+    };
+    if (!qso.reservationUuid.isEmpty()) {
+        operation.insert(QStringLiteral("reservation_uuid"), qso.reservationUuid);
+    }
+    return operation;
+}
+
 } // namespace
 
 MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
@@ -1266,6 +1448,33 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     runModeGroup->actions().at(savedRunMode)->setChecked(true);
     auto *radioMenu = menuBar()->addMenu(tr("&Radio"));
     auto *settingsMenu = menuBar()->addMenu(tr("&Options"));
+    auto *networkAction = settingsMenu->addAction(tr("Central network connection..."));
+    networkAction->setObjectName(QStringLiteral("configureNetworkConnectionAction"));
+    connect(networkAction, &QAction::triggered,
+            this, &MainWindow::configureNetworkConnection);
+    m_hostModeAction =
+        settingsMenu->addAction(tr("Host central server on this station..."));
+    m_hostModeAction->setObjectName(QStringLiteral("configureHostModeAction"));
+    connect(m_hostModeAction, &QAction::triggered,
+            this, &MainWindow::configureHostMode);
+    m_hostImportAction = settingsMenu->addAction(
+        tr("Create central log / import local log..."));
+    m_hostImportAction->setObjectName(QStringLiteral("hostImportLogAction"));
+    m_hostImportAction->setEnabled(false);
+    connect(m_hostImportAction, &QAction::triggered,
+            this, &MainWindow::importLocalLogToHost);
+    auto *disconnectNetworkAction =
+        settingsMenu->addAction(tr("Disconnect central network"));
+    disconnectNetworkAction->setObjectName(
+        QStringLiteral("disconnectNetworkConnectionAction"));
+    connect(disconnectNetworkAction, &QAction::triggered,
+            this, &MainWindow::disconnectNetworkConnection);
+    auto *networkStatusAction =
+        settingsMenu->addAction(tr("Network status and queue..."));
+    networkStatusAction->setObjectName(QStringLiteral("networkStatusAction"));
+    connect(networkStatusAction, &QAction::triggered,
+            this, &MainWindow::showNetworkStatus);
+    settingsMenu->addSeparator();
     auto *operatorAction = settingsMenu->addAction(tr("&Operator and station..."));
     connect(operatorAction, &QAction::triggered,
             this, &MainWindow::configureOperator);
@@ -1689,6 +1898,24 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_recentQsos->setToolTip(tr("Double-click a QSO to edit it."));
     connect(m_recentQsos, &QTableWidget::cellDoubleClicked,
             this, &MainWindow::editSelectedQso);
+    m_recentQsos->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_recentQsos, &QTableWidget::customContextMenuRequested,
+            this, [this](const QPoint &position) {
+        const int row = m_recentQsos->rowAt(position.y());
+        if (row < 0 || m_recentQsos->item(row, 0) == nullptr) {
+            return;
+        }
+        m_recentQsos->setCurrentCell(row, 0);
+        QMenu menu(this);
+        QAction *editAction = menu.addAction(tr("Edit QSO..."));
+        QAction *deleteAction = menu.addAction(tr("Delete QSO..."));
+        QAction *selected = menu.exec(m_recentQsos->viewport()->mapToGlobal(position));
+        if (selected == editAction) {
+            editSelectedQso(row, 0);
+        } else if (selected == deleteAction) {
+            deleteSelectedQso(row);
+        }
+    });
     layout->addWidget(m_recentQsos, 1);
 
     auto *entryContexts = new QHBoxLayout;
@@ -1803,6 +2030,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 this, [this, vfo] {
                     updateDupeIndicatorForVfo(vfo);
                     updateEntryHeaders();
+                    updateSerialFields();
                     if (vfo == currentEntryContext() || m_so2vToggle->isChecked()
                         || m_so2rToggle->isChecked()) {
                         refreshBandmap();
@@ -1818,6 +2046,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                     updateDupeIndicatorForVfo(vfo);
                     updateSentReportForMode(vfo);
                     updateEntryHeaders();
+                    updateSerialFields();
                 });
         connect(m_focusButtons[vfo], &QPushButton::clicked,
                 this, [this, vfo] { focusVfo(vfo); });
@@ -2410,7 +2639,2121 @@ void MainWindow::resetWindowLayout()
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     saveWindowLayout();
+    if (m_syncClient) {
+        m_syncClient->stopSynchronization();
+        m_syncClient->disconnectFromServer();
+    }
+    if (m_hostServer) {
+        m_hostServer->close();
+        m_hostServer.reset();
+    }
+    m_hostRepository.reset();
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::configureHostMode()
+{
+    QString error;
+    if (m_hostServer) {
+        m_hostServer->close();
+        m_hostServer.reset();
+        m_hostRepository.reset();
+        m_hostModeAction->setText(tr("Host central server on this station..."));
+        m_hostImportAction->setEnabled(false);
+        statusBar()->showMessage(tr("Central server stopped on this station."), 5000);
+        return;
+    }
+
+    QSettings settings;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Host central server on this station"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *address = new QLineEdit(
+        settings.value(QStringLiteral("network/host/address"),
+                       QStringLiteral("0.0.0.0")).toString(), &dialog);
+    address->setObjectName(QStringLiteral("hostBindAddress"));
+    form->addRow(tr("Bind address:"), address);
+    auto *port = new QSpinBox(&dialog);
+    port->setObjectName(QStringLiteral("hostBindPort"));
+    port->setRange(1, 65535);
+    port->setValue(settings.value(QStringLiteral("network/host/port"), 7443).toInt());
+    form->addRow(tr("TCP port:"), port);
+
+    const auto addFileRow = [&dialog, form](
+                                const QString &label, const QString &objectName,
+                                const QString &setting, const QString &filter) {
+        auto *container = new QWidget(&dialog);
+        auto *row = new QHBoxLayout(container);
+        row->setContentsMargins(0, 0, 0, 0);
+        auto *path = new QLineEdit(
+            QSettings().value(setting).toString(), container);
+        path->setObjectName(objectName);
+        auto *browse = new QPushButton(QObject::tr("Browse..."), container);
+        QObject::connect(browse, &QPushButton::clicked, container,
+                         [path, &dialog, filter] {
+                             const QString selected = QFileDialog::getOpenFileName(
+                                 &dialog, QObject::tr("Select server file"),
+                                 path->text(), filter);
+                             if (!selected.isEmpty()) {
+                                 path->setText(selected);
+                             }
+                         });
+        row->addWidget(path);
+        row->addWidget(browse);
+        form->addRow(label, container);
+        return path;
+    };
+    auto *certificate = addFileRow(
+        tr("TLS certificate (PEM):"), QStringLiteral("hostTlsCertificate"),
+        QStringLiteral("network/host/certificate"),
+        tr("PEM certificates (*.pem *.crt);;All files (*)"));
+    auto *privateKey = addFileRow(
+        tr("Unencrypted RSA key (PEM):"), QStringLiteral("hostTlsPrivateKey"),
+        QStringLiteral("network/host/privateKey"),
+        tr("PEM private keys (*.pem *.key);;All files (*)"));
+    auto *tokens = addFileRow(
+        tr("Station credentials JSON:"), QStringLiteral("hostStationCredentials"),
+        QStringLiteral("network/host/tokens"), tr("JSON files (*.json);;All files (*)"));
+    layout->addLayout(form);
+    auto *notice = new QLabel(
+        tr("This station will host the central TLS server. Its credentials file "
+           "must contain this installation's station UUID with read, write and "
+           "admin permissions. The server database is stored in the application "
+           "data directory."),
+        &dialog);
+    notice->setWordWrap(true);
+    layout->addWidget(notice);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Start server"));
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const QString bindAddress = address->text().trimmed();
+    const QString certificatePath = certificate->text().trimmed();
+    const QString keyPath = privateKey->text().trimmed();
+    const QString tokenPath = tokens->text().trimmed();
+    if (bindAddress.isEmpty() || certificatePath.isEmpty() || keyPath.isEmpty()
+        || tokenPath.isEmpty()) {
+        QMessageBox::warning(this, tr("Incomplete server settings"),
+                             tr("Enter the bind address and select the TLS certificate, "
+                                "private key and station credentials file."));
+        return;
+    }
+
+    const QString stationUuid = m_repository.localStationUuid(&error);
+    if (stationUuid.isEmpty() || !error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to identify this station"), error);
+        return;
+    }
+    QFile tokenFile(tokenPath);
+    if (!tokenFile.open(QIODevice::ReadOnly) || tokenFile.size() <= 0
+        || tokenFile.size() > 1024 * 1024) {
+        QMessageBox::critical(
+            this, tr("Unable to read station credentials"),
+            tokenFile.errorString().isEmpty()
+                ? tr("The credentials file size is invalid.")
+                : tokenFile.errorString());
+        return;
+    }
+    const QJsonDocument credentialsDocument =
+        QJsonDocument::fromJson(tokenFile.readAll());
+    const QJsonArray stations = credentialsDocument.isObject()
+        ? credentialsDocument.object().value(QStringLiteral("stations")).toArray()
+        : QJsonArray{};
+    const auto stationCredential = std::find_if(
+        stations.cbegin(), stations.cend(), [&stationUuid](const QJsonValue &value) {
+            return value.isObject()
+                && value.toObject().value(QStringLiteral("station_uuid")).toString()
+                    == stationUuid;
+        });
+    if (stationCredential == stations.cend()
+        || !stationCredential->toObject().value(QStringLiteral("permissions"))
+                .toArray().contains(QStringLiteral("admin"))
+        || !stationCredential->toObject().value(QStringLiteral("permissions"))
+                .toArray().contains(QStringLiteral("read"))
+        || !stationCredential->toObject().value(QStringLiteral("permissions"))
+                .toArray().contains(QStringLiteral("write"))) {
+        QMessageBox::critical(
+            this, tr("Host credentials required"),
+            tr("The credentials file must include this station (%1) with read, "
+               "write and admin permissions.").arg(stationUuid));
+        return;
+    }
+
+    auto repository = std::make_unique<CentralRepository>();
+    const QString centralDataDirectory = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+        .filePath(QStringLiteral("central-server"));
+    if (!repository->initialize(centralDataDirectory, &error)) {
+        QMessageBox::critical(this, tr("Unable to initialize central database"), error);
+        return;
+    }
+    auto server = std::make_unique<SyncServer>(*repository);
+    if (!server->listen(bindAddress, static_cast<quint16>(port->value()),
+                        certificatePath, keyPath, tokenPath, 16, &error)) {
+        QMessageBox::critical(this, tr("Unable to start central server"), error);
+        return;
+    }
+
+    settings.setValue(QStringLiteral("network/host/address"), bindAddress);
+    settings.setValue(QStringLiteral("network/host/port"), port->value());
+    settings.setValue(QStringLiteral("network/host/certificate"), certificatePath);
+    settings.setValue(QStringLiteral("network/host/privateKey"), keyPath);
+    settings.setValue(QStringLiteral("network/host/tokens"), tokenPath);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        server->close();
+        QMessageBox::critical(this, tr("Unable to save host settings"),
+                              tr("The server has been stopped because its settings "
+                                 "could not be saved."));
+        return;
+    }
+    m_hostRepository = std::move(repository);
+    m_hostServer = std::move(server);
+    m_hostModeAction->setText(tr("Stop hosted central server"));
+    m_hostImportAction->setEnabled(true);
+    statusBar()->showMessage(
+        tr("This station is hosting the central server on %1:%2.")
+            .arg(bindAddress).arg(m_hostServer->serverPort()),
+        15000);
+}
+
+void MainWindow::importLocalLogToHost()
+{
+    if (!m_hostServer || !m_hostRepository) {
+        QMessageBox::warning(
+            this, tr("Host mode is not active"),
+            tr("Start the central server on this station before creating or importing "
+               "a central log."));
+        return;
+    }
+    const Contest *sourceLog = activeContest();
+    if (sourceLog == nullptr) {
+        QMessageBox::warning(this, tr("No local log selected"),
+                             tr("Select a local log to import."));
+        return;
+    }
+    const Contest source = *sourceLog;
+
+    QString error;
+    const QString yaml = m_repository.contestDefinitionYaml(source.id, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to load contest definition"), error);
+        return;
+    }
+    ContestDefinition definition;
+    if (yaml.trimmed().isEmpty()
+        || !ContestDefinitionLoader().loadText(
+            yaml, QStringLiteral("local log import"), definition, &error)) {
+        QMessageBox::critical(
+            this, tr("Invalid contest definition"),
+            error.isEmpty()
+                ? tr("A contest definition is required before importing a log.")
+                : error);
+        return;
+    }
+
+    QVector<Qso> sourceQsos = m_repository.qsosForContest(source.id, 0, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to read local QSOs"), error);
+        return;
+    }
+    const QString sourceStationUuid = m_repository.localStationUuid(&error);
+    if (sourceStationUuid.isEmpty() || !error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to identify this station"), error);
+        return;
+    }
+
+    ContestEngine engine;
+    QVector<Qso> validatedSourceQsos;
+    QSet<QString> sourceQsoUuids;
+    for (const Qso &qso : sourceQsos) {
+        const bool validIdentity = validImportUuid(qso.qsoUuid)
+            && qso.logUuid == source.logUuid
+            && !qso.callsign.trimmed().isEmpty()
+            && ContestEngine::isValidCallsign(qso.callsign)
+            && !qso.stationCallsign.trimmed().isEmpty()
+            && (qso.stationUuid.isEmpty() || validImportUuid(qso.stationUuid))
+            && qso.timestampUtc.isValid() && qso.frequencyHz > 0 && qso.points >= 0;
+        const bool validBand = definition.bands.contains(
+            qso.band, Qt::CaseInsensitive);
+        const bool validMode = definition.modes.contains(
+            qso.mode, Qt::CaseInsensitive);
+        if (!validIdentity || !validBand || !validMode
+            || sourceQsoUuids.contains(qso.qsoUuid)) {
+            QMessageBox::critical(
+                this, tr("Local log failed validation"),
+                tr("QSO %1 has an invalid UUID, callsign, time, frequency, band, "
+                   "mode or duplicate UUID. No data was imported.")
+                    .arg(qso.qsoUuid));
+            return;
+        }
+        sourceQsoUuids.insert(qso.qsoUuid);
+        QMap<QString, QString> sentFields = qso.sentExchangeFields;
+        if (sentFields.isEmpty()) {
+            sentFields = LogExporter::mapLegacyExchange(
+                qso.sentExchange, definition.sentExchange);
+        }
+        QMap<QString, QString> receivedFields = qso.receivedExchangeFields;
+        if (receivedFields.isEmpty()) {
+            receivedFields = LogExporter::mapLegacyExchange(
+                qso.receivedExchange, definition.receivedExchange);
+        }
+        std::optional<int> serialNumber;
+        for (const ExchangeFieldDefinition &field : definition.sentExchange) {
+            if (field.type != ExchangeFieldType::Serial || !field.generated) {
+                continue;
+            }
+            bool serialValid = false;
+            const int serial = sentFields.value(field.name).toInt(&serialValid);
+            if (!serialValid || serial < definition.serialStart) {
+                QMessageBox::critical(
+                    this, tr("Local log failed validation"),
+                    tr("QSO %1 has no valid stored generated serial.")
+                        .arg(qso.qsoUuid));
+                return;
+            }
+            serialNumber = serial;
+            break;
+        }
+        if (definition.serialServerRequired && qso.reservationUuid.isEmpty()) {
+            QMessageBox::critical(
+                this, tr("Serial reservation required"),
+                tr("QSO %1 belongs to a contest that requires central serial "
+                   "reservations. Its reservation cannot be safely imported.")
+                    .arg(qso.qsoUuid));
+            return;
+        }
+        const ContestEvaluationContext context = engine.buildContext(
+            definition, validatedSourceQsos, multiplierResolver());
+        const ContestEvaluationResult evaluation = engine.evaluate(
+            definition, qso.callsign, qso.band, qso.mode, receivedFields,
+            context, serialNumber, sentFields, true);
+        if (!evaluation.valid) {
+            const QString issue = evaluation.issues.isEmpty()
+                ? tr("Contest exchange validation failed.")
+                : QStringLiteral("%1: %2")
+                      .arg(evaluation.issues.first().field,
+                           evaluation.issues.first().message);
+            QMessageBox::critical(
+                this, tr("Local log failed validation"),
+                tr("QSO %1 does not satisfy the contest definition: %2")
+                    .arg(qso.qsoUuid, issue));
+            return;
+        }
+        validatedSourceQsos.append(qso);
+    }
+
+    QVector<Contest> centralLogs = m_hostRepository->repository()->contests(&error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to list central logs"), error);
+        return;
+    }
+    auto centralLog = std::find_if(
+        centralLogs.begin(), centralLogs.end(), [&source](const Contest &log) {
+            return log.logUuid == source.logUuid;
+        });
+    const bool createCentralLog = centralLog == centralLogs.end();
+    qint64 centralContestId = 0;
+    if (!createCentralLog) {
+        centralContestId = centralLog->id;
+        const QString centralYaml =
+            m_hostRepository->repository()->contestDefinitionYaml(centralLog->id, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to read central definition"), error);
+            return;
+        }
+        const auto hash = [](const QString &text) {
+            return QCryptographicHash::hash(text.toUtf8(), QCryptographicHash::Sha256);
+        };
+        if (hash(centralYaml) != hash(yaml)) {
+            QMessageBox::critical(
+                this, tr("Contest definition mismatch"),
+                tr("The existing central log has a different contest definition. "
+                   "The local source was left unchanged."));
+            return;
+        }
+    }
+
+    QVector<Qso> centralQsos;
+    if (!createCentralLog) {
+        centralQsos = m_hostRepository->repository()->qsosForContest(
+            centralContestId, 0, &error);
+    }
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to read central QSOs"), error);
+        return;
+    }
+    QHash<QString, Qso> centralByUuid;
+    QHash<QString, Qso> centralByDupeKey;
+    QSet<QString> centralServerDuplicateKeys;
+    for (const Qso &qso : centralQsos) {
+        centralByUuid.insert(qso.qsoUuid, qso);
+        centralByDupeKey.insert(importDupeIdentity(definition.dupeKey, qso), qso);
+        centralServerDuplicateKeys.insert(
+            qso.callsign.trimmed().toUpper() + QChar(0x1f)
+            + qso.band.trimmed().toLower() + QChar(0x1f)
+            + qso.mode.trimmed().toUpper());
+    }
+
+    QVector<Qso> toImport;
+    int alreadyPresent = 0;
+    int skippedConflicts = 0;
+    QStringList conflictCalls;
+    QSet<QString> seenSourceDupeKeys;
+    QSet<QString> seenSourceServerDuplicateKeys;
+    for (const Qso &qso : sourceQsos) {
+        const auto sameUuid = centralByUuid.constFind(qso.qsoUuid);
+        if (sameUuid != centralByUuid.cend()) {
+            if (sameImportedQso(qso, sameUuid.value(), sourceStationUuid)) {
+                ++alreadyPresent;
+            } else {
+                ++skippedConflicts;
+                if (conflictCalls.size() < 5) {
+                    conflictCalls.append(qso.callsign);
+                }
+            }
+            continue;
+        }
+        const QString dupeKey = importDupeIdentity(definition.dupeKey, qso);
+        if (centralByDupeKey.contains(dupeKey)) {
+            ++skippedConflicts;
+            if (conflictCalls.size() < 5) {
+                conflictCalls.append(qso.callsign);
+            }
+            continue;
+        }
+        const QString serverDuplicateKey = qso.callsign.trimmed().toUpper()
+            + QChar(0x1f) + qso.band.trimmed().toLower()
+            + QChar(0x1f) + qso.mode.trimmed().toUpper();
+        if (centralServerDuplicateKeys.contains(serverDuplicateKey)
+            || seenSourceDupeKeys.contains(dupeKey)
+            || seenSourceServerDuplicateKeys.contains(serverDuplicateKey)) {
+            ++skippedConflicts;
+            if (conflictCalls.size() < 5) {
+                conflictCalls.append(qso.callsign);
+            }
+            continue;
+        }
+        toImport.append(qso);
+        seenSourceDupeKeys.insert(dupeKey);
+        seenSourceServerDuplicateKeys.insert(serverDuplicateKey);
+    }
+
+    for (const Qso &qso : toImport) {
+        if (qso.reservationUuid.isEmpty() && !definition.serialServerRequired) {
+            continue;
+        }
+        const QJsonArray reservations =
+            m_hostRepository->serialReservations(source.logUuid, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to validate serial reservation"), error);
+            return;
+        }
+        const auto reservation = std::find_if(
+            reservations.cbegin(), reservations.cend(),
+            [&qso](const QJsonValue &value) {
+                return value.isObject()
+                    && value.toObject()
+                           .value(QStringLiteral("reservation_uuid")).toString()
+                        == qso.reservationUuid;
+            });
+        QMap<QString, QString> sentFields = qso.sentExchangeFields;
+        if (sentFields.isEmpty()) {
+            sentFields = LogExporter::mapLegacyExchange(
+                qso.sentExchange, definition.sentExchange);
+        }
+        QString serialField;
+        for (const ExchangeFieldDefinition &field : definition.sentExchange) {
+            if (field.type == ExchangeFieldType::Serial && field.generated) {
+                serialField = field.name;
+                break;
+            }
+        }
+        bool serialValid = false;
+        const int serialNumber = serialField.isEmpty()
+            ? 0 : sentFields.value(serialField).toInt(&serialValid);
+        const QString expectedStationUuid = qso.stationUuid.isEmpty()
+            ? sourceStationUuid : qso.stationUuid;
+        const QJsonObject reservationObject =
+            reservation == reservations.cend() ? QJsonObject{} : reservation->toObject();
+        if (reservation == reservations.cend()
+            || reservationObject.value(QStringLiteral("status")).toString()
+                != QStringLiteral("reserved")
+            || reservationObject.value(QStringLiteral("station_uuid")).toString()
+                != expectedStationUuid
+            || reservationObject.value(QStringLiteral("band")).toString()
+                .compare(qso.band, Qt::CaseInsensitive) != 0
+            || reservationObject.value(QStringLiteral("mode")).toString()
+                .compare(qso.mode, Qt::CaseInsensitive) != 0
+            || !serialValid
+            || reservationObject.value(QStringLiteral("serial")).toInt() != serialNumber) {
+            QMessageBox::critical(
+                this, tr("Serial reservation unavailable"),
+                tr("QSO %1 uses a serial reservation that is not available and "
+                   "matching on the central server. Historical used serials cannot "
+                   "be recreated safely; no QSO was imported.")
+                    .arg(qso.qsoUuid));
+            return;
+        }
+    }
+
+    const ContestScore preview = engine.score(
+        definition, sourceQsos, multiplierResolver());
+    const QString conflictSummary = skippedConflicts == 0
+        ? tr("No duplicate or conflicting QSOs were found.")
+        : tr("%1 QSO(s) conflict with an existing or duplicate contact and will "
+             "be skipped if you continue. Examples: %2")
+              .arg(skippedConflicts)
+              .arg(conflictCalls.join(QStringLiteral(", ")));
+    QMessageBox previewDialog(QMessageBox::Question, tr("Review log import"),
+        tr("Source: %1\nDestination: %2\n"
+           "Source QSOs: %3\nAlready imported: %4\nTo import: %5\n"
+           "Contest multipliers in preview: %6\n\n%7\n\n"
+           "The local source log will not be changed.")
+            .arg(source.name, source.logUuid)
+            .arg(sourceQsos.size())
+            .arg(alreadyPresent)
+            .arg(toImport.size())
+            .arg(preview.totalMultipliers)
+            .arg(conflictSummary),
+        QMessageBox::NoButton, this);
+    auto *continueButton = previewDialog.addButton(
+        skippedConflicts == 0 ? tr("Import") : tr("Skip conflicts and import"),
+        QMessageBox::AcceptRole);
+    previewDialog.addButton(QMessageBox::Cancel);
+    previewDialog.exec();
+    if (previewDialog.clickedButton() != continueButton) {
+        return;
+    }
+
+    if (createCentralLog) {
+        Contest copy = source;
+        copy.id = 0;
+        copy.logUuid = source.logUuid;
+        centralContestId = m_hostRepository->repository()->createContestLog(
+            definition, yaml, copy, &error);
+        if (centralContestId <= 0) {
+            QMessageBox::critical(this, tr("Unable to create central log"), error);
+            return;
+        }
+    }
+
+    QString importUuid = m_hostRepository->beginLogImport(
+        source.logUuid, source.logUuid, source.name,
+        sourceStationUuid, sourceQsos.size(), &error);
+    if (importUuid.isEmpty() || !error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to start import audit"), error);
+        return;
+    }
+    int importedCount = alreadyPresent;
+    int skippedCount = skippedConflicts;
+    if (!m_hostRepository->updateLogImport(
+            importUuid, importedCount, skippedCount, QStringLiteral("in_progress"),
+            {}, &error)) {
+        QMessageBox::critical(this, tr("Unable to update import audit"), error);
+        return;
+    }
+
+    QProgressDialog progress(
+        tr("Importing QSO batches..."), tr("Pause and resume later"),
+        0, toImport.size(), this);
+    progress.setWindowTitle(tr("Central log import"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setValue(0);
+    for (int offset = 0; offset < toImport.size(); offset += 100) {
+        if (progress.wasCanceled()) {
+            break;
+        }
+        QJsonArray operations;
+        const int end = qMin(offset + 100, toImport.size());
+        for (int index = offset; index < end; ++index) {
+            const Qso &qso = toImport.at(index);
+            const QString operationStationUuid = qso.stationUuid.isEmpty()
+                ? sourceStationUuid : qso.stationUuid;
+            operations.append(importOperation(
+                qso, source.logUuid, operationStationUuid));
+        }
+        QJsonArray results;
+        if (!m_hostRepository->submitBatch(
+                source.logUuid, operations, &results, &error)) {
+            const QString status = error.contains(QStringLiteral("DUPLICATE_QSO"))
+                ? QStringLiteral("conflict") : QStringLiteral("failed");
+            QString auditError;
+            if (!m_hostRepository->updateLogImport(
+                    importUuid, importedCount, skippedCount, status, error,
+                    &auditError)) {
+                error += tr("\nImport audit could not be updated: %1").arg(auditError);
+            }
+            QMessageBox::critical(
+                this, tr("Log import stopped"),
+                tr("The central server rejected a batch. The source is unchanged; "
+                   "the audit records the failure and the import can be retried "
+                   "after resolving it.\n\n%1").arg(error));
+            return;
+        }
+        if (results.size() != operations.size()) {
+            error = tr("The central repository returned an incomplete batch result.");
+            QString auditError;
+            if (!m_hostRepository->updateLogImport(
+                    importUuid, importedCount, skippedCount,
+                    QStringLiteral("failed"), error, &auditError)) {
+                error += tr("\nImport audit could not be updated: %1").arg(auditError);
+            }
+            QMessageBox::critical(this, tr("Log import stopped"), error);
+            return;
+        }
+        importedCount += end - offset;
+        if (!m_hostRepository->updateLogImport(
+                importUuid, importedCount, skippedCount,
+                QStringLiteral("in_progress"), {}, &error)) {
+            QMessageBox::critical(this, tr("Unable to update import audit"), error);
+            return;
+        }
+        progress.setValue(importedCount - alreadyPresent);
+        QApplication::processEvents();
+    }
+    if (progress.wasCanceled()) {
+        statusBar()->showMessage(
+            tr("Import paused. Choose the same local log later to resume it."), 10000);
+        return;
+    }
+    if (!m_hostRepository->updateLogImport(
+            importUuid, importedCount, skippedCount,
+            QStringLiteral("completed"), {}, &error)) {
+        QMessageBox::critical(this, tr("Unable to complete import audit"), error);
+        return;
+    }
+    progress.setValue(toImport.size());
+    QMessageBox::information(
+        this, tr("Central log import complete"),
+        tr("Import audit: %1\nImported or already present: %2\nSkipped by operator: %3")
+            .arg(importUuid).arg(importedCount).arg(skippedCount));
+}
+
+void MainWindow::configureNetworkConnection()
+{
+    QString error;
+    const QVector<Contest> contests = m_repository.contests(&error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to load local logs"), error);
+        return;
+    }
+    QVector<Contest> connectableLogs;
+    for (const Contest &contest : contests) {
+        if (!contest.logUuid.trimmed().isEmpty()) {
+            connectableLogs.append(contest);
+        }
+    }
+    QSettings settings;
+    const Contest *active = activeContest();
+    const QString defaultLogUuid = active != nullptr && !active->logUuid.isEmpty()
+        ? active->logUuid
+        : (connectableLogs.isEmpty() ? QString() : connectableLogs.first().logUuid);
+    SyncConnectionDialog dialog(
+        connectableLogs,
+        settings.value(QStringLiteral("network/client/host")).toString(),
+        settings.value(QStringLiteral("network/client/port"), 7443).toInt(),
+        settings.value(QStringLiteral("network/client/logUuid"),
+                       defaultLogUuid).toString(),
+        this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (dialog.host().isEmpty()
+        || (!dialog.joinRemote() && !dialog.createRemote()
+            && dialog.logUuid().isEmpty())
+        || dialog.token().size() < 32) {
+        QMessageBox::warning(
+            this, tr("Invalid network settings"),
+            tr("Enter a server host, choose a local or remote log and provide a "
+               "token of at least 32 characters."));
+        return;
+    }
+    const QString stationUuid = m_repository.localStationUuid(&error);
+    if (stationUuid.isEmpty() || !error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to identify this station"), error);
+        return;
+    }
+    QString definitionYaml;
+    if (!dialog.joinRemote() && !dialog.createRemote()) {
+        const auto selectedLog = std::find_if(
+            connectableLogs.cbegin(), connectableLogs.cend(),
+            [&dialog](const Contest &contest) {
+                return contest.logUuid == dialog.logUuid();
+            });
+        if (selectedLog == connectableLogs.cend()) {
+            QMessageBox::critical(
+                this, tr("Unable to select local log"),
+                tr("The selected local log is no longer available."));
+            return;
+        }
+        definitionYaml =
+            m_repository.contestDefinitionYaml(selectedLog->id, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to load contest definition"), error);
+            return;
+        }
+    }
+
+    settings.setValue(QStringLiteral("network/client/host"), dialog.host());
+    settings.setValue(QStringLiteral("network/client/port"), dialog.port());
+    if (!dialog.joinRemote() && !dialog.createRemote()) {
+        settings.setValue(QStringLiteral("network/client/logUuid"), dialog.logUuid());
+    }
+    settings.remove(QStringLiteral("network/client/token"));
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(
+            this, tr("Unable to save network settings"),
+            tr("The server address and selected log could not be saved."));
+        return;
+    }
+
+    if (!dialog.joinRemote() && !dialog.createRemote()
+        && !m_repository.setSynchronizationEnabled(dialog.logUuid(), true, &error)) {
+        QMessageBox::critical(this, tr("Unable to enable synchronization"), error);
+        return;
+    }
+    m_joiningRemoteLog = dialog.joinRemote();
+    m_creatingRemoteLog = dialog.createRemote();
+    m_mergingRemoteLog = false;
+    m_pendingRemoteContest = {};
+    m_pendingRemoteDefinitionYaml.clear();
+    if (m_syncClient) {
+        m_syncClient->stopSynchronization();
+        m_syncClient->disconnectFromServer();
+    } else {
+        m_syncClient = std::make_unique<SyncClient>();
+        connect(m_syncClient.get(), &SyncClient::readOnlyChanged,
+                this, [this](bool readOnly) {
+                    m_networkReadOnly = readOnly;
+                    if (readOnly) {
+                        statusBar()->showMessage(
+                            tr("Connected with read-only access; QSO changes and "
+                               "serial reservations are disabled."),
+                            15000);
+                    }
+                });
+        connect(m_syncClient.get(), &SyncClient::stateChanged,
+                this, [this](SyncClient::State state, const QString &message) {
+                    if (state == SyncClient::State::Ready) {
+                        m_networkLastContactUtc = QDateTime::currentDateTimeUtc();
+                    }
+                    if (m_joiningRemoteLog
+                        && (state == SyncClient::State::Error
+                            || state == SyncClient::State::Disconnected)) {
+                        m_joiningRemoteLog = false;
+                        m_pendingRemoteContest = {};
+                        m_pendingRemoteDefinitionYaml.clear();
+                    }
+                    if (!message.isEmpty()) {
+                        statusBar()->showMessage(message, 10000);
+                    } else if (state == SyncClient::State::Disconnected) {
+                        statusBar()->showMessage(tr("Central synchronization disconnected."),
+                                                 5000);
+                    }
+                });
+        connect(m_syncClient.get(), &SyncClient::ready,
+                this, [this](const QString &, qint64 revision, const QString &) {
+                    m_networkLastContactUtc = QDateTime::currentDateTimeUtc();
+                    if (m_joiningRemoteLog) {
+                        QString joinError;
+                        ContestDefinition definition;
+                        if (m_pendingRemoteContest.logUuid.isEmpty()
+                            || !ContestDefinitionLoader().loadText(
+                                m_pendingRemoteDefinitionYaml,
+                                QStringLiteral("remote central log"),
+                                definition, &joinError)) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to join central log"),
+                                joinError.isEmpty()
+                                    ? tr("The selected central log is no longer available.")
+                                    : joinError);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        Contest remoteLog = m_pendingRemoteContest;
+                        qint64 localId = 0;
+                        if (!m_repository.withTransaction(
+                                [this, &definition, &remoteLog,
+                                 &localId, &joinError](QString *operationError) {
+                                    localId = m_repository.createContestLog(
+                                        definition, m_pendingRemoteDefinitionYaml,
+                                        remoteLog, operationError);
+                                    return localId > 0
+                                        && m_repository.setSynchronizationEnabled(
+                                            remoteLog.logUuid, true, operationError);
+                                }, &joinError)) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to create local log"), joinError);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        QSettings settings;
+                        settings.setValue(
+                            QStringLiteral("network/client/logUuid"),
+                            remoteLog.logUuid);
+                        settings.sync();
+                        if (settings.status() != QSettings::NoError) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to save joined log settings"),
+                                tr("The local copy was created, but its selected-log "
+                                   "setting could not be saved."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        m_joiningRemoteLog = false;
+                        loadContests();
+                        const int logIndex = m_contestSelector->findData(localId);
+                        if (logIndex >= 0) {
+                            m_contestSelector->setCurrentIndex(logIndex);
+                        }
+                        if (!m_syncClient->startSynchronization(
+                                m_repository, &joinError)) {
+                            QMessageBox::critical(
+                                this, tr("Unable to start synchronization"), joinError);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        statusBar()->showMessage(
+                            tr("Joined central log %1; downloading its current state.")
+                                .arg(remoteLog.name), 12000);
+                        return;
+                    }
+                    if (m_creatingRemoteLog || m_mergingRemoteLog) {
+                        QString mergeError;
+                        const QVector<SerialReservation> reservations =
+                            m_repository.serialReservations(
+                                m_pendingRemoteContest.logUuid, &mergeError);
+                        if (!mergeError.isEmpty()) {
+                            QMessageBox::critical(
+                                this, tr("Unable to read serial history"), mergeError);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        if (reservations.size() > 1000) {
+                            QMessageBox::critical(
+                                this, tr("Serial history is too large"),
+                                tr("This log has more than 1000 serial reservations. "
+                                   "Use Host import, which can transfer the history "
+                                   "in bounded batches."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        QJsonArray history;
+                        for (const SerialReservation &reservation : reservations) {
+                            history.append(QJsonObject{
+                                {QStringLiteral("reservation_uuid"),
+                                 reservation.reservationUuid},
+                                {QStringLiteral("station_uuid"),
+                                 reservation.stationUuid},
+                                {QStringLiteral("scope_key"), reservation.scopeKey},
+                                {QStringLiteral("band"), reservation.band},
+                                {QStringLiteral("mode"), reservation.mode},
+                                {QStringLiteral("serial"), reservation.serialNumber},
+                                {QStringLiteral("status"), reservation.status},
+                                {QStringLiteral("qso_uuid"), reservation.qsoUuid}
+                            });
+                        }
+                        if (history.isEmpty()) {
+                            completeRemoteLogMerge();
+                        } else {
+                            m_pendingSerialHistoryRequestId =
+                                m_syncClient->importSerialHistory(
+                                    m_pendingRemoteContest.logUuid, history);
+                            if (m_pendingSerialHistoryRequestId.isEmpty()) {
+                                QMessageBox::critical(
+                                    this, tr("Unable to transfer serial history"),
+                                    tr("The client could not submit serial history "
+                                       "to the central server."));
+                                m_syncClient->disconnectFromServer();
+                            }
+                        }
+                        return;
+                    }
+                    statusBar()->showMessage(
+                        tr("Connected to central log; server revision %1.")
+                            .arg(revision), 10000);
+                });
+        connect(m_syncClient.get(), &SyncClient::logsDiscovered,
+                this, [this](const QJsonArray &logs) {
+                    if (!m_joiningRemoteLog && !m_creatingRemoteLog) {
+                        return;
+                    }
+                    QString error;
+                    const QVector<Contest> localLogs = m_repository.contests(&error);
+                    if (!error.isEmpty()) {
+                        m_joiningRemoteLog = false;
+                        m_creatingRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Unable to inspect local logs"), error);
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    if (m_creatingRemoteLog) {
+                        QStringList localChoices;
+                        for (const Contest &local : localLogs) {
+                            localChoices.append(QStringLiteral("%1 — %2")
+                                .arg(local.name, local.stationCallsign));
+                        }
+                        bool accepted = false;
+                        const QString selected = QInputDialog::getItem(
+                            this, tr("Create central log"),
+                            tr("Choose the local log to create centrally:"),
+                            localChoices, 0, false, &accepted);
+                        if (!accepted) {
+                            m_creatingRemoteLog = false;
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        const int localIndex = localChoices.indexOf(selected);
+                        if (localIndex < 0 || localIndex >= localLogs.size()) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to select local log"),
+                                tr("The selected local log is no longer available."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        const Contest local = localLogs.at(localIndex);
+                        m_pendingRemoteDefinitionYaml =
+                            m_repository.contestDefinitionYaml(local.id, &error);
+                        if (!error.isEmpty()) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to load contest definition"), error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        QVector<Qso> sourceQsos = m_repository.qsosForContest(
+                            local.id, 0, &error);
+                        if (!error.isEmpty()) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to read local QSOs"), error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        const QString stationUuid =
+                            m_repository.localStationUuid(&error);
+                        if (!error.isEmpty()) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to identify this station"), error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        if (std::any_of(
+                                sourceQsos.cbegin(), sourceQsos.cend(),
+                                [&stationUuid](const Qso &qso) {
+                                    return qso.stationUuid != stationUuid;
+                                })) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::warning(
+                                this, tr("Administrator import required"),
+                                tr("This local log contains QSOs recorded by other "
+                                   "stations. Create it through Host import so their "
+                                   "origin identities can be preserved."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        QMessageBox confirm(
+                            QMessageBox::Question, tr("Create central log"),
+                            tr("Create a central log from “%1” and import its %2 "
+                               "local QSO(s)? Existing local data will be retained. "
+                               "This operation requires administrator permission.")
+                                .arg(local.name).arg(sourceQsos.size()),
+                            QMessageBox::NoButton, this);
+                        auto *createButton = confirm.addButton(
+                            tr("Create and import"), QMessageBox::AcceptRole);
+                        confirm.addButton(QMessageBox::Cancel);
+                        confirm.exec();
+                        if (confirm.clickedButton() != createButton) {
+                            m_creatingRemoteLog = false;
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        m_pendingRemoteContest = local;
+                        const QString requestId = m_syncClient->createRemoteLog(
+                            local, m_pendingRemoteDefinitionYaml);
+                        if (requestId.isEmpty()) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to create central log"),
+                                tr("The client is no longer waiting for a log selection."));
+                            m_syncClient->disconnectFromServer();
+                        }
+                        return;
+                    }
+                    QStringList choices;
+                    QVector<QJsonObject> candidates;
+                    QSet<QString> seenUuids;
+                    for (const QJsonValue &value : logs) {
+                        const QJsonObject remote = value.toObject();
+                        const QString logUuid =
+                            remote.value(QStringLiteral("log_uuid")).toString();
+                        if (seenUuids.contains(logUuid)) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Invalid central log list"),
+                                tr("The server listed a central log more than once."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        seenUuids.insert(logUuid);
+                        const bool alreadyLocal = std::any_of(
+                            localLogs.cbegin(), localLogs.cend(),
+                            [&logUuid](const Contest &local) {
+                                return local.logUuid == logUuid;
+                            });
+                        const QString label = QStringLiteral("%1 — %2%3")
+                            .arg(remote.value(QStringLiteral("name")).toString(),
+                                 logUuid,
+                                 alreadyLocal
+                                     ? tr(" (merge into existing local log)")
+                                     : QString());
+                        choices.append(label);
+                        candidates.append(remote);
+                    }
+                    if (choices.isEmpty()) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::information(
+                            this, tr("No remote logs to join"),
+                            tr("Every accessible central log already has a local "
+                               "log. Select that local log in the connection dialog "
+                               "to synchronize it."));
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    bool accepted = false;
+                    const QString selected = QInputDialog::getItem(
+                        this, tr("Join or merge central log"),
+                        tr("Choose a central log to copy or merge locally:"),
+                        choices, 0, false, &accepted);
+                    if (!accepted) {
+                        m_joiningRemoteLog = false;
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    const int index = choices.indexOf(selected);
+                    if (index < 0 || index >= candidates.size()) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Unable to select central log"),
+                            tr("The selected central log is not in the server list."));
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    const QJsonObject remote = candidates.at(index);
+                    const QString yaml =
+                        remote.value(QStringLiteral("definition_yaml")).toString();
+                    const QString selectedUuid =
+                        remote.value(QStringLiteral("log_uuid")).toString();
+                    const auto existingLocal = std::find_if(
+                        localLogs.cbegin(), localLogs.cend(),
+                        [&selectedUuid](const Contest &local) {
+                            return local.logUuid == selectedUuid;
+                        });
+                    if (existingLocal != localLogs.cend()) {
+                        const QString localYaml =
+                            m_repository.contestDefinitionYaml(existingLocal->id, &error);
+                        if (!error.isEmpty()) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to compare contest definitions"), error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        if (QCryptographicHash::hash(
+                                localYaml.toUtf8(), QCryptographicHash::Sha256)
+                            != QCryptographicHash::hash(
+                                yaml.toUtf8(), QCryptographicHash::Sha256)) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Contest definition mismatch"),
+                                tr("The local and central logs use different contest "
+                                   "definitions. They cannot be merged automatically."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        const QVector<Qso> localQsos =
+                            m_repository.qsosForContest(existingLocal->id, 0, &error);
+                        if (!error.isEmpty()) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Unable to inspect local QSOs"), error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        const QString stationUuid =
+                            m_repository.localStationUuid(&error);
+                        if (!error.isEmpty()
+                            || std::any_of(
+                                localQsos.cbegin(), localQsos.cend(),
+                                [&stationUuid](const Qso &qso) {
+                                    return qso.stationUuid != stationUuid;
+                                })) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Administrator import required"),
+                                error.isEmpty()
+                                    ? tr("This local log contains QSOs from other "
+                                         "stations; safe automatic merge is unavailable.")
+                                    : error);
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        QMessageBox confirm(
+                            QMessageBox::Question, tr("Merge local log"),
+                            tr("Merge %1 local QSO(s) into central log “%2”? "
+                               "Identical records will be kept once. Divergent "
+                               "records will remain local as synchronization "
+                               "conflicts; neither side is silently overwritten.")
+                                .arg(localQsos.size())
+                                .arg(existingLocal->name),
+                            QMessageBox::NoButton, this);
+                        auto *mergeButton = confirm.addButton(
+                            tr("Merge and synchronize"), QMessageBox::AcceptRole);
+                        confirm.addButton(QMessageBox::Cancel);
+                        confirm.exec();
+                        if (confirm.clickedButton() != mergeButton) {
+                            m_joiningRemoteLog = false;
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        m_mergingRemoteLog = true;
+                        m_joiningRemoteLog = false;
+                        m_pendingRemoteContest = *existingLocal;
+                        m_pendingRemoteDefinitionYaml = localYaml;
+                    } else {
+                        m_joiningRemoteLog = true;
+                        m_mergingRemoteLog = false;
+                    }
+                    ContestDefinition definition;
+                    if (yaml.trimmed().isEmpty()
+                        || !ContestDefinitionLoader().loadText(
+                            yaml, QStringLiteral("remote central log"),
+                            definition, &error)) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Invalid central log definition"),
+                            error.isEmpty()
+                                ? tr("The central log has no contest definition.")
+                                : error);
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    Contest remoteLog;
+                    remoteLog.logUuid =
+                        remote.value(QStringLiteral("log_uuid")).toString();
+                    if (existingLocal != localLogs.cend()) {
+                        remoteLog.id = existingLocal->id;
+                    }
+                    remoteLog.name = remote.value(QStringLiteral("name")).toString();
+                    remoteLog.stationCallsign =
+                        remote.value(QStringLiteral("station_callsign")).toString();
+                    const QJsonValue startsAt =
+                        remote.value(QStringLiteral("starts_at_utc"));
+                    if (startsAt.isString()) {
+                        const QDateTime parsed = QDateTime::fromString(
+                            startsAt.toString(), Qt::ISODateWithMs);
+                        if (!parsed.isValid()) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Invalid central log metadata"),
+                                tr("The central log start time is invalid."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        remoteLog.startsAtUtc = parsed.toUTC();
+                    } else if (!startsAt.isNull()) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Invalid central log metadata"),
+                            tr("The central log start time is invalid."));
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    const QJsonValue properties =
+                        remote.value(QStringLiteral("properties"));
+                    if (!properties.isObject()) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Invalid central log metadata"),
+                            tr("The central log properties are invalid."));
+                        m_syncClient->disconnectFromServer();
+                        return;
+                    }
+                    const QJsonObject propertyObject = properties.toObject();
+                    for (auto property = propertyObject.constBegin();
+                         property != propertyObject.constEnd(); ++property) {
+                        if (!property.value().isString()) {
+                            m_joiningRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Invalid central log metadata"),
+                                tr("The central log properties are invalid."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        remoteLog.properties.insert(
+                            property.key(), property.value().toString());
+                    }
+                    m_pendingRemoteContest = remoteLog;
+                    m_pendingRemoteDefinitionYaml = yaml;
+                    const QString definitionHash = QString::fromLatin1(
+                        QCryptographicHash::hash(
+                            yaml.toUtf8(), QCryptographicHash::Sha256).toHex());
+                    if (!m_syncClient->selectRemoteLog(
+                            remoteLog.logUuid, definitionHash)) {
+                        m_joiningRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Unable to select central log"),
+                            tr("The connection is no longer waiting for a log selection."));
+                        m_syncClient->disconnectFromServer();
+                    }
+                });
+        connect(m_syncClient.get(), &SyncClient::requestFailed,
+        this, [this](const QString &requestId, const QString &code,
+                     const QString &message, bool retryable) {
+                    if (requestId == m_pendingSerialHistoryRequestId) {
+                        m_pendingSerialHistoryRequestId.clear();
+                        m_creatingRemoteLog = false;
+                        m_mergingRemoteLog = false;
+                        QMessageBox::critical(
+                            this, tr("Serial history transfer failed"),
+                            tr("%1\nNo local data was removed. Check administrator "
+                               "permissions and serial conflicts before retrying.")
+                                .arg(message));
+                        return;
+                    }
+                    statusBar()->showMessage(
+                        tr("Network request failed (%1): %2").arg(code, message),
+                        15000);
+            const QString reservationUuid =
+                m_serialRequestReservationUuids.value(requestId);
+            const QString cancelReservationUuid =
+                m_serialCancelRequestReservationUuids.value(requestId);
+            if (!cancelReservationUuid.isEmpty()
+                && m_serialCancelContexts.contains(cancelReservationUuid)) {
+                const int context =
+                    m_serialCancelContexts.value(cancelReservationUuid);
+                if (!retryable) {
+                    m_serialCancelContexts.remove(cancelReservationUuid);
+                    for (auto it =
+                             m_serialCancelRequestReservationUuids.begin();
+                         it != m_serialCancelRequestReservationUuids.end();) {
+                        if (it.key() == requestId
+                            || it.value() == cancelReservationUuid) {
+                            it = m_serialCancelRequestReservationUuids.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    if (m_cancelSerialButtons[context] != nullptr) {
+                        m_cancelSerialButtons[context]->setEnabled(true);
+                        m_cancelSerialButtons[context]->setText(
+                            tr("Cancel serial"));
+                    }
+                }
+                showOperatorMessage(
+                    retryable
+                        ? tr("Serial cancellation is queued for retry: %1")
+                              .arg(message)
+                        : tr("Serial cancellation failed: %1").arg(message),
+                    !retryable);
+                return;
+            }
+            if (reservationUuid.isEmpty()
+                || !m_serialReservationContexts.contains(reservationUuid)) {
+                return;
+            }
+            if (!retryable) {
+                m_serialReservationContexts.remove(reservationUuid);
+                for (auto it = m_serialRequestReservationUuids.begin();
+                     it != m_serialRequestReservationUuids.end();) {
+                    if (it.key() == requestId || it.value() == reservationUuid) {
+                        it = m_serialRequestReservationUuids.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                m_serialReservationPendingBands.remove(reservationUuid);
+                m_serialReservationPendingModes.remove(reservationUuid);
+            }
+            showOperatorMessage(
+                retryable
+                    ? tr("Serial request is queued and will be retried: %1")
+                          .arg(message)
+                    : tr("Serial reservation failed: %1").arg(message),
+                !retryable);
+        });
+        connect(m_syncClient.get(), &SyncClient::responseReceived,
+                this, [this](const QString &requestId, const QString &type,
+                             const QJsonObject &payload) {
+                    m_networkLastContactUtc = QDateTime::currentDateTimeUtc();
+                    if (type == QStringLiteral("log_created")
+                        && m_creatingRemoteLog) {
+                        const QString logUuid =
+                            payload.value(QStringLiteral("log_uuid")).toString();
+                        const QString yaml =
+                            payload.value(QStringLiteral("definition_yaml")).toString();
+                        const QString expectedHash = QString::fromLatin1(
+                            QCryptographicHash::hash(
+                                m_pendingRemoteDefinitionYaml.toUtf8(),
+                                QCryptographicHash::Sha256).toHex());
+                        const QString returnedHash = QString::fromLatin1(
+                            QCryptographicHash::hash(
+                                yaml.toUtf8(), QCryptographicHash::Sha256).toHex());
+                        if (logUuid != m_pendingRemoteContest.logUuid
+                            || yaml != m_pendingRemoteDefinitionYaml
+                            || expectedHash != returnedHash
+                            || payload.value(QStringLiteral("current_revision"))
+                                   .toInteger(-1) != 0
+                            || !m_syncClient->selectRemoteLog(logUuid, expectedHash)) {
+                            m_creatingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Invalid central log response"),
+                                tr("The server did not confirm the expected log "
+                                   "identity and contest definition."));
+                            m_syncClient->disconnectFromServer();
+                        }
+                        return;
+                    }
+                    if (requestId == m_pendingSerialHistoryRequestId) {
+                        m_pendingSerialHistoryRequestId.clear();
+                        if (type != QStringLiteral("serial_history_imported")
+                            || payload.value(QStringLiteral("log_uuid")).toString()
+                                   != m_pendingRemoteContest.logUuid
+                            || payload.value(QStringLiteral("count")).toInt(-1) < 0) {
+                            m_creatingRemoteLog = false;
+                            m_mergingRemoteLog = false;
+                            QMessageBox::critical(
+                                this, tr("Invalid serial history response"),
+                                tr("The central server returned an invalid serial "
+                                   "history confirmation."));
+                            m_syncClient->disconnectFromServer();
+                            return;
+                        }
+                        completeRemoteLogMerge();
+                        return;
+                    }
+                    if (type == QStringLiteral("metrics")) {
+                        QMessageBox::information(
+                            this, tr("Central synchronization metrics"),
+                            QString::fromUtf8(QJsonDocument(payload).toJson(
+                                QJsonDocument::Indented)));
+                        return;
+                    }
+                    if (type == QStringLiteral("serial_cancelled")) {
+                        const QString reservationUuid =
+                            payload.value(QStringLiteral("reservation_uuid")).toString();
+                        if (!m_serialCancelContexts.contains(reservationUuid)) {
+                            return;
+                        }
+                        const int context =
+                            m_serialCancelContexts.take(reservationUuid);
+                        for (auto it =
+                                 m_serialCancelRequestReservationUuids.begin();
+                             it != m_serialCancelRequestReservationUuids.end();) {
+                            if (it.key() == requestId
+                                || it.value() == reservationUuid) {
+                                it = m_serialCancelRequestReservationUuids.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                        const Contest *contest = activeContest();
+                        const bool reservationIsActive =
+                            m_serialReservationUuids[context] == reservationUuid
+                            && contest != nullptr
+                            && contest->logUuid
+                                == payload.value(QStringLiteral("log_uuid")).toString();
+                        if (reservationIsActive) {
+                            m_serialReservationUuids[context].clear();
+                            m_serialReservationBands[context].clear();
+                            m_serialReservationModes[context].clear();
+                            m_serialReservationSerials[context].clear();
+                        }
+                        if (reservationIsActive) {
+                            const ContestDefinition *definition = activeDefinition();
+                            if (definition == nullptr
+                                || !definition->serialServerRequired) {
+                                updateSerialFields();
+                                showOperatorMessage(
+                                    tr("Unused serial reservation cancelled; the number "
+                                       "will not be reused."));
+                                return;
+                            }
+                            for (const ExchangeFieldDefinition &field :
+                                 definition->sentExchange) {
+                                if (field.type == ExchangeFieldType::Serial
+                                    && field.generated) {
+                                    if (QLineEdit *edit =
+                                            m_sentExchangeEdits[context].value(
+                                                field.name, nullptr)) {
+                                        edit->clear();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        updateSerialFields();
+                        showOperatorMessage(
+                            tr("Unused serial reservation cancelled; the number will "
+                               "not be reused."));
+                        return;
+                    }
+                    if (type != QStringLiteral("serial_reserved")) {
+                        return;
+                    }
+                    const QString reservationUuid =
+                        payload.value(QStringLiteral("reservation_uuid")).toString();
+                    if (!m_serialReservationContexts.contains(reservationUuid)) {
+                        return;
+                    }
+                    const int context =
+                        m_serialReservationContexts.take(reservationUuid);
+                    const QString expectedBand =
+                        m_serialReservationPendingBands.take(reservationUuid);
+                    const QString expectedMode =
+                        m_serialReservationPendingModes.take(reservationUuid);
+                    m_serialRequestReservationUuids.remove(requestId);
+                    for (auto it = m_serialRequestReservationUuids.begin();
+                         it != m_serialRequestReservationUuids.end();) {
+                        if (it.value() == reservationUuid) {
+                            it = m_serialRequestReservationUuids.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    const QString responseBand =
+                        payload.value(QStringLiteral("band")).toString().trimmed()
+                            .toLower();
+                    const QString responseMode =
+                        payload.value(QStringLiteral("mode")).toString().trimmed()
+                            .toUpper();
+                    if (payload.value(QStringLiteral("status")).toString()
+                            != QStringLiteral("reserved")
+                        || payload.value(QStringLiteral("formatted_serial"))
+                               .toString().isEmpty()
+                        || responseBand != expectedBand
+                        || responseMode != expectedMode) {
+                        showOperatorMessage(
+                            tr("Central server returned an invalid serial reservation."),
+                            true);
+                        return;
+                    }
+                    const Contest *contest = activeContest();
+                    if (contest == nullptr
+                        || contest->logUuid
+                            != payload.value(QStringLiteral("log_uuid")).toString()) {
+                        showOperatorMessage(
+                            tr("Serial reserved for a different log; select that log "
+                               "before using it."),
+                            true);
+                        return;
+                    }
+                    QString repositoryError;
+                    const QString stationUuid =
+                        m_repository.localStationUuid(&repositoryError);
+                    if (!repositoryError.isEmpty()
+                        || payload.value(QStringLiteral("station_uuid")).toString()
+                            != stationUuid) {
+                        showOperatorMessage(
+                            repositoryError.isEmpty()
+                                ? tr("The serial was reserved for a different station.")
+                                : tr("Unable to verify station identity: %1")
+                                      .arg(repositoryError),
+                            true);
+                        return;
+                    }
+                    const ContestDefinition *definition = activeDefinition();
+                    if (definition == nullptr) {
+                        showOperatorMessage(
+                            tr("The active contest definition is unavailable."), true);
+                        return;
+                    }
+                    QString serialFieldName;
+                    int serialFieldWidth = 0;
+                    for (const ExchangeFieldDefinition &field :
+                         definition->sentExchange) {
+                        if (field.type == ExchangeFieldType::Serial && field.generated) {
+                            serialFieldName = field.name;
+                            serialFieldWidth = field.width;
+                            break;
+                        }
+                    }
+                    const QString formattedSerial =
+                        payload.value(QStringLiteral("formatted_serial")).toString();
+                    const std::optional<SerialReservation> stored =
+                        m_repository.serialReservation(contest->logUuid,
+                                                       reservationUuid,
+                                                       &repositoryError);
+                    if (!repositoryError.isEmpty()
+                        || !stored.has_value()
+                        || serialFieldName.isEmpty()
+                        || stored->status != QStringLiteral("reserved")
+                        || stored->stationUuid != stationUuid
+                        || stored->band != responseBand
+                        || stored->mode != responseMode
+                        || QString::number(stored->serialNumber)
+                               .rightJustified(serialFieldWidth, QLatin1Char('0'))
+                               != formattedSerial
+                        || stored->serialNumber
+                            != payload.value(QStringLiteral("serial")).toInt(-1)) {
+                        showOperatorMessage(
+                            repositoryError.isEmpty()
+                                ? tr("The reserved serial could not be verified in the "
+                                     "local cache.")
+                                : tr("Unable to verify the reserved serial: %1")
+                                      .arg(repositoryError),
+                            true);
+                        return;
+                    }
+                    m_serialReservationUuids[context] = reservationUuid;
+                    m_serialReservationBands[context] = responseBand;
+                    m_serialReservationModes[context] = responseMode;
+                    m_serialReservationSerials[context] = formattedSerial;
+                    if (QLineEdit *edit =
+                            m_sentExchangeEdits[context].value(serialFieldName, nullptr)) {
+                        edit->setText(formattedSerial);
+                    }
+                    updateSerialFields();
+                    showOperatorMessage(
+                        tr("Server reserved serial %1.")
+                            .arg(m_serialReservationSerials[context]));
+                });
+    }
+
+    if (!dialog.joinRemote() && !dialog.createRemote()
+        && !m_syncClient->startSynchronization(m_repository, &error)) {
+        QMessageBox::critical(this, tr("Unable to start synchronization"), error);
+        return;
+    }
+    SyncClientConfiguration configuration;
+    configuration.host = dialog.host();
+    configuration.port = dialog.port();
+    configuration.peerName = dialog.host();
+    configuration.stationUuid = stationUuid;
+    configuration.token = dialog.token();
+    configuration.logUuid = dialog.joinRemote() || dialog.createRemote()
+        ? QString() : dialog.logUuid();
+    if (!definitionYaml.trimmed().isEmpty()) {
+        configuration.contestDefinitionSha256 = QString::fromLatin1(
+            QCryptographicHash::hash(definitionYaml.toUtf8(),
+                                     QCryptographicHash::Sha256).toHex());
+    }
+    m_syncClient->connectToServer(configuration);
+    statusBar()->showMessage(
+        dialog.joinRemote()
+            || dialog.createRemote()
+            ? tr("Connecting securely to discover accessible central logs.")
+            : tr("Connecting to central log %1 over verified TLS.")
+                  .arg(dialog.logUuid()),
+        10000);
+}
+
+void MainWindow::completeRemoteLogMerge()
+{
+    if (!m_syncClient || m_pendingRemoteContest.logUuid.isEmpty()) {
+        QMessageBox::critical(
+            this, tr("Unable to complete log merge"),
+            tr("The selected local log identity is unavailable."));
+        return;
+    }
+    QString error;
+    const QString logUuid = m_pendingRemoteContest.logUuid;
+    if (!m_repository.setSynchronizationEnabled(logUuid, true, &error)
+        || !m_repository.enqueueExistingQsosForSync(logUuid, &error)) {
+        QMessageBox::critical(this, tr("Unable to prepare local log merge"), error);
+        m_syncClient->disconnectFromServer();
+        m_creatingRemoteLog = false;
+        m_mergingRemoteLog = false;
+        return;
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("network/client/logUuid"), logUuid);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(
+            this, tr("Unable to save joined log settings"),
+            tr("Local log data has been retained, but the selected-log setting "
+               "could not be saved."));
+        m_syncClient->disconnectFromServer();
+        m_creatingRemoteLog = false;
+        m_mergingRemoteLog = false;
+        return;
+    }
+    const qint64 localId = m_pendingRemoteContest.id;
+    const QString logName = m_pendingRemoteContest.name;
+    m_creatingRemoteLog = false;
+    m_mergingRemoteLog = false;
+    m_pendingRemoteContest = {};
+    m_pendingRemoteDefinitionYaml.clear();
+    loadContests();
+    const int logIndex = m_contestSelector->findData(localId);
+    if (logIndex >= 0) {
+        m_contestSelector->setCurrentIndex(logIndex);
+    }
+    if (!m_syncClient->startSynchronization(m_repository, &error)) {
+        QMessageBox::critical(
+            this, tr("Unable to start synchronization"), error);
+        m_syncClient->disconnectFromServer();
+        return;
+    }
+    statusBar()->showMessage(
+        tr("Local log “%1” is merging with its central copy; synchronization "
+           "will reconcile identical records and report conflicts.")
+            .arg(logName), 15000);
+}
+
+void MainWindow::disconnectNetworkConnection()
+{
+    if (!m_syncClient) {
+        statusBar()->showMessage(tr("No central network connection is active."), 5000);
+        return;
+    }
+    m_syncClient->stopSynchronization();
+    m_syncClient->disconnectFromServer();
+    statusBar()->showMessage(
+        tr("Disconnected. Local logs and pending synchronization data were retained."),
+        7000);
+}
+
+void MainWindow::showNetworkStatus()
+{
+    const Contest *active = activeContest();
+    const QString configuredLogUuid =
+        QSettings().value(QStringLiteral("network/client/logUuid")).toString();
+    const QString logUuid = active != nullptr && !active->logUuid.isEmpty()
+        ? active->logUuid : configuredLogUuid;
+    if (logUuid.isEmpty()) {
+        QMessageBox::information(
+            this, tr("Network status"),
+            tr("No synchronized log is selected or configured."));
+        return;
+    }
+
+    QString error;
+    const QVector<Contest> logs = m_repository.contests(&error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to load local logs"), error);
+        return;
+    }
+    const auto log = std::find_if(logs.cbegin(), logs.cend(),
+        [&logUuid](const Contest &candidate) { return candidate.logUuid == logUuid; });
+    const QString logName = log == logs.cend() ? logUuid : log->name;
+    const QString stationUuid = m_repository.localStationUuid(&error);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to identify this station"), error);
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("networkStatusDialog"));
+    dialog.setWindowTitle(tr("Network status and synchronization queue"));
+    dialog.resize(900, 520);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *summary = new QLabel(&dialog);
+    summary->setObjectName(QStringLiteral("networkStatusSummary"));
+    summary->setWordWrap(true);
+    layout->addWidget(summary);
+
+    auto *queue = new QTableWidget(&dialog);
+    queue->setObjectName(QStringLiteral("networkOutboxTable"));
+    queue->setColumnCount(5);
+    queue->setHorizontalHeaderLabels(
+        {tr("Operation"), tr("Entity"), tr("State"), tr("Attempts"), tr("Last error")});
+    queue->setSelectionBehavior(QAbstractItemView::SelectRows);
+    queue->setSelectionMode(QAbstractItemView::SingleSelection);
+    queue->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    queue->horizontalHeader()->setStretchLastSection(true);
+    layout->addWidget(queue, 1);
+
+    auto *buttons = new QHBoxLayout;
+    auto *refresh = new QPushButton(tr("Refresh"), &dialog);
+    refresh->setObjectName(QStringLiteral("refreshNetworkStatusButton"));
+    auto *syncNow = new QPushButton(tr("Sync now"), &dialog);
+    syncNow->setObjectName(QStringLiteral("syncNowButton"));
+    auto *serverMetrics = new QPushButton(tr("Server metrics..."), &dialog);
+    serverMetrics->setObjectName(QStringLiteral("serverMetricsButton"));
+    auto *retryFailed = new QPushButton(tr("Retry selected failed operation"), &dialog);
+    retryFailed->setObjectName(QStringLiteral("retrySyncOperationButton"));
+    auto *compareConflict = new QPushButton(tr("Compare conflict..."), &dialog);
+    compareConflict->setObjectName(QStringLiteral("compareSyncConflictButton"));
+    compareConflict->setEnabled(false);
+    auto *exportReport = new QPushButton(tr("Export diagnostics..."), &dialog);
+    exportReport->setObjectName(QStringLiteral("exportSyncDiagnosticsButton"));
+    auto *close = new QPushButton(tr("Close"), &dialog);
+    buttons->addWidget(refresh);
+    buttons->addWidget(syncNow);
+    buttons->addWidget(serverMetrics);
+    buttons->addWidget(retryFailed);
+    buttons->addWidget(compareConflict);
+    buttons->addWidget(exportReport);
+    buttons->addStretch();
+    buttons->addWidget(close);
+    layout->addLayout(buttons);
+    connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    QVector<SyncOutboxOperation> operations;
+    QVector<SyncConflict> conflicts;
+    const auto connectionStateText = [this] {
+        if (!m_syncClient) {
+            return tr("Offline (not connected)");
+        }
+        switch (m_syncClient->state()) {
+        case SyncClient::State::Disconnected:
+        case SyncClient::State::Backoff:
+        case SyncClient::State::Error:
+            return tr("Offline");
+        case SyncClient::State::Connecting:
+        case SyncClient::State::Handshaking:
+        case SyncClient::State::Authenticating:
+        case SyncClient::State::SelectingLog:
+            return tr("Connecting");
+        case SyncClient::State::Ready:
+            return tr("Connected");
+        }
+        return tr("Unknown");
+    };
+    const auto refreshView = [this, summary, queue, retryFailed, syncNow,
+                              serverMetrics, compareConflict, &operations,
+                              &conflicts, &error,
+                              logName, logUuid, stationUuid,
+                              connectionStateText] {
+        operations = m_repository.syncOutbox(logUuid, false, &error);
+        if (!error.isEmpty()) {
+            summary->setText(tr("Unable to load synchronization queue: %1").arg(error));
+            queue->setRowCount(0);
+            retryFailed->setEnabled(false);
+            compareConflict->setEnabled(false);
+            return;
+        }
+        conflicts = m_repository.syncConflicts(logUuid, &error);
+        if (!error.isEmpty()) {
+            summary->setText(tr("Unable to load synchronization conflicts: %1")
+                                 .arg(error));
+            queue->setRowCount(0);
+            retryFailed->setEnabled(false);
+            compareConflict->setEnabled(false);
+            return;
+        }
+        int pendingCount = 0;
+        int conflictCount = 0;
+        int failedCount = 0;
+        int inFlightCount = 0;
+        for (const SyncOutboxOperation &operation : operations) {
+            if (operation.status != QStringLiteral("accepted")) {
+                ++pendingCount;
+            }
+            if (operation.status == QStringLiteral("conflict")) {
+                ++conflictCount;
+            } else if (operation.status == QStringLiteral("failed")) {
+                ++failedCount;
+            } else if (operation.status == QStringLiteral("in-flight")) {
+                ++inFlightCount;
+            }
+        }
+        const qint64 cursor = m_repository.syncCursor(logUuid, &error);
+        if (!error.isEmpty()) {
+            summary->setText(tr("Unable to read synchronization cursor: %1").arg(error));
+            queue->setRowCount(0);
+            retryFailed->setEnabled(false);
+            compareConflict->setEnabled(false);
+            return;
+        }
+        const qint64 serverRevision =
+            m_syncClient ? m_syncClient->currentRevision() : 0;
+        QString operatorState = connectionStateText();
+        if (operatorState == QLatin1String("Connected")) {
+            if (m_networkReadOnly) {
+                operatorState = tr("Read-only");
+            } else if (conflictCount > 0) {
+                operatorState = tr("Conflict");
+            } else if (inFlightCount > 0) {
+                operatorState = tr("Syncing");
+            } else if (pendingCount > 0) {
+                operatorState = tr("Pending");
+            } else {
+                operatorState = tr("Connected");
+            }
+        } else if (operatorState.startsWith(QLatin1String("Offline"))
+                   && pendingCount > 0) {
+            operatorState = tr("Offline (%1 pending)").arg(pendingCount);
+        }
+        const QString lastContact = m_networkLastContactUtc.isValid()
+            ? m_networkLastContactUtc.toLocalTime().toString(Qt::ISODate)
+            : tr("never");
+        summary->setText(
+            tr("State: %1    Log: %2 (%3)    Station UUID: %4\n"
+               "Applied revision: %5    Server revision: %6    Last contact: %7\n"
+               "Pending operations: %8    Conflicts: %9    Failed: %10")
+                .arg(operatorState, logName, logUuid, stationUuid)
+                .arg(cursor)
+                .arg(serverRevision)
+                .arg(lastContact)
+                .arg(pendingCount)
+                .arg(conflictCount)
+                .arg(failedCount));
+        queue->setRowCount(operations.size());
+        for (int row = 0; row < operations.size(); ++row) {
+            const SyncOutboxOperation &operation = operations.at(row);
+            const QStringList values{
+                operation.operation, operation.entityUuid, operation.status,
+                QString::number(operation.attempts), operation.lastError
+            };
+            for (int column = 0; column < values.size(); ++column) {
+                queue->setItem(row, column, new QTableWidgetItem(values.at(column)));
+            }
+        }
+        queue->resizeColumnsToContents();
+        retryFailed->setEnabled(false);
+        syncNow->setEnabled(m_syncClient
+                            && m_syncClient->state() == SyncClient::State::Ready
+                            && QSettings().value(
+                                   QStringLiteral("network/client/logUuid")).toString()
+                                == logUuid);
+        serverMetrics->setEnabled(m_syncClient
+                                  && m_syncClient->state()
+                                      == SyncClient::State::Ready
+                                  && QSettings().value(
+                                         QStringLiteral("network/client/logUuid"))
+                                         .toString() == logUuid);
+    };
+    connect(refresh, &QPushButton::clicked, &dialog, refreshView);
+    connect(serverMetrics, &QPushButton::clicked, &dialog, [this] {
+        if (!m_syncClient || m_syncClient->getMetrics().isEmpty()) {
+            showOperatorMessage(
+                tr("Server metrics are unavailable while disconnected."), true);
+        }
+    });
+    connect(queue, &QTableWidget::itemSelectionChanged, &dialog,
+            [this, queue, retryFailed, compareConflict, &operations, &conflicts] {
+                const int row = queue->currentRow();
+                retryFailed->setEnabled(
+                    !m_networkReadOnly && row >= 0 && row < operations.size()
+                    && operations.at(row).status == QStringLiteral("failed"));
+                compareConflict->setEnabled(
+                    row >= 0 && row < operations.size()
+                    && operations.at(row).status == QStringLiteral("conflict")
+                    && std::any_of(conflicts.cbegin(), conflicts.cend(),
+                        [&operations, row](const SyncConflict &conflict) {
+                            return conflict.operationUuid
+                                == operations.at(row).operationUuid;
+                        }));
+            });
+    connect(compareConflict, &QPushButton::clicked, &dialog,
+            [this, &dialog, queue, &operations, &conflicts, refreshView, logUuid] {
+                const int row = queue->currentRow();
+                if (row < 0 || row >= operations.size()
+                    || operations.at(row).status != QStringLiteral("conflict")) {
+                    return;
+                }
+                const auto conflict = std::find_if(
+                    conflicts.cbegin(), conflicts.cend(),
+                    [&operations, row](const SyncConflict &candidate) {
+                        return candidate.operationUuid
+                            == operations.at(row).operationUuid;
+                    });
+                if (conflict == conflicts.cend()) {
+                    QMessageBox::warning(
+                        &dialog, QObject::tr("Conflict details unavailable"),
+                        QObject::tr("The conflict record is not present in the local "
+                                    "database."));
+                    return;
+                }
+                const QJsonDocument localDocument =
+                    QJsonDocument::fromJson(conflict->localPayloadJson.toUtf8());
+                const QJsonDocument remoteDocument =
+                    QJsonDocument::fromJson(conflict->remotePayloadJson.toUtf8());
+                if (!localDocument.isObject() || !remoteDocument.isObject()) {
+                    QMessageBox::critical(
+                        &dialog, QObject::tr("Invalid conflict data"),
+                        QObject::tr("Stored conflict payload is not valid JSON."));
+                    return;
+                }
+                QJsonObject local = localDocument.object();
+                QJsonObject remote = remoteDocument.object();
+                if (local.value(QStringLiteral("qso")).isObject()) {
+                    local = local.value(QStringLiteral("qso")).toObject();
+                }
+                if (remote.value(QStringLiteral("qso")).isObject()) {
+                    remote = remote.value(QStringLiteral("qso")).toObject();
+                }
+                QSet<QString> fieldSet;
+                for (const QString &key : local.keys()) {
+                    fieldSet.insert(key);
+                }
+                for (const QString &key : remote.keys()) {
+                    fieldSet.insert(key);
+                }
+                QStringList fields = fieldSet.values();
+                std::sort(fields.begin(), fields.end());
+
+                QDialog comparison(&dialog);
+                comparison.setObjectName(QStringLiteral("syncConflictComparisonDialog"));
+                comparison.setWindowTitle(QObject::tr("Local and server versions"));
+                comparison.resize(850, 520);
+                auto *comparisonLayout = new QVBoxLayout(&comparison);
+                auto *caption = new QLabel(
+                    QObject::tr("Conflict for entity %1. This view is read-only; "
+                                "resolve the conflict only after reviewing both versions.")
+                        .arg(conflict->entityUuid),
+                    &comparison);
+                caption->setWordWrap(true);
+                comparisonLayout->addWidget(caption);
+                auto *comparisonTable = new QTableWidget(&comparison);
+                comparisonTable->setObjectName(QStringLiteral("syncConflictComparison"));
+                comparisonTable->setColumnCount(3);
+                comparisonTable->setHorizontalHeaderLabels(
+                    {QObject::tr("Field"), QObject::tr("Local"), QObject::tr("Server")});
+                comparisonTable->setRowCount(fields.size());
+                comparisonTable->horizontalHeader()->setStretchLastSection(true);
+                comparisonTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                const auto displayValue = [](const QJsonValue &value) {
+                    if (value.isUndefined()) {
+                        return QObject::tr("<missing>");
+                    }
+                    if (value.isObject()) {
+                        return QString::fromUtf8(
+                            QJsonDocument(value.toObject())
+                                .toJson(QJsonDocument::Compact));
+                    }
+                    if (value.isArray()) {
+                        return QString::fromUtf8(
+                            QJsonDocument(value.toArray())
+                                .toJson(QJsonDocument::Compact));
+                    }
+                    return value.toVariant().toString();
+                };
+                for (int fieldRow = 0; fieldRow < fields.size(); ++fieldRow) {
+                    const QString &field = fields.at(fieldRow);
+                    comparisonTable->setItem(
+                        fieldRow, 0, new QTableWidgetItem(field));
+                    comparisonTable->setItem(
+                        fieldRow, 1,
+                        new QTableWidgetItem(displayValue(local.value(field))));
+                    comparisonTable->setItem(
+                        fieldRow, 2,
+                        new QTableWidgetItem(displayValue(remote.value(field))));
+                }
+                comparisonTable->resizeColumnsToContents();
+                comparisonLayout->addWidget(comparisonTable, 1);
+                auto *acceptServer = new QPushButton(
+                    QObject::tr("Accept server version"), &comparison);
+                acceptServer->setObjectName(QStringLiteral("acceptServerConflictButton"));
+                acceptServer->setEnabled(!m_networkReadOnly);
+                auto *keepLocal = new QPushButton(
+                    QObject::tr("Keep local as new edit"), &comparison);
+                keepLocal->setObjectName(QStringLiteral("keepLocalConflictButton"));
+                keepLocal->setEnabled(!m_networkReadOnly);
+                auto *closeComparison =
+                    new QPushButton(QObject::tr("Close"), &comparison);
+                QObject::connect(closeComparison, &QPushButton::clicked,
+                                 &comparison, &QDialog::accept);
+                auto *comparisonButtons = new QHBoxLayout;
+                comparisonButtons->addWidget(acceptServer);
+                comparisonButtons->addWidget(keepLocal);
+                comparisonButtons->addStretch();
+                comparisonButtons->addWidget(closeComparison);
+                comparisonLayout->addLayout(comparisonButtons);
+                const QString conflictOperationUuid = conflict->operationUuid;
+                QObject::connect(acceptServer, &QPushButton::clicked,
+                                 &comparison,
+                                 [this, &comparison, &dialog, refreshView,
+                                  conflictOperationUuid] {
+                    const auto answer = QMessageBox::question(
+                        &comparison, tr("Accept server version"),
+                        tr("Replace the local QSO with the server version? The "
+                           "conflicting local edit will remain in the resolution audit."),
+                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                    if (answer != QMessageBox::Yes) {
+                        return;
+                    }
+                    QString resolutionError;
+                    if (!m_repository.resolveSyncConflictAcceptServer(
+                            conflictOperationUuid, &resolutionError)) {
+                        QMessageBox::critical(
+                            &comparison, tr("Unable to resolve conflict"),
+                            resolutionError);
+                        return;
+                    }
+                    refreshRecentQsos();
+                    refreshBandmap();
+                    refreshScoreSummary();
+                    refreshView();
+                    comparison.accept();
+                    dialog.setProperty("lastConflictResolution",
+                                       QStringLiteral("accept_server"));
+                });
+                QObject::connect(keepLocal, &QPushButton::clicked,
+                                 &comparison,
+                                 [this, &comparison, &dialog, refreshView, logUuid,
+                                  conflictOperationUuid] {
+                    const auto answer = QMessageBox::question(
+                        &comparison, tr("Keep local version"),
+                        tr("Create a new update using the local QSO against the "
+                           "latest server version? The server may still reject it "
+                           "if another station changes the QSO first."),
+                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                    if (answer != QMessageBox::Yes) {
+                        return;
+                    }
+                    QString resolutionError;
+                    if (!m_repository.resolveSyncConflictKeepLocal(
+                            conflictOperationUuid, &resolutionError)) {
+                        QMessageBox::critical(
+                            &comparison, tr("Unable to resolve conflict"),
+                            resolutionError);
+                        return;
+                    }
+                    refreshRecentQsos();
+                    refreshBandmap();
+                    refreshScoreSummary();
+                    refreshView();
+                    if (m_syncClient
+                        && QSettings().value(
+                               QStringLiteral("network/client/logUuid")).toString()
+                            == logUuid
+                        && m_syncClient->state() == SyncClient::State::Ready) {
+                        m_syncClient->synchronizeNow();
+                    }
+                    comparison.accept();
+                    dialog.setProperty("lastConflictResolution",
+                                       QStringLiteral("keep_local"));
+                });
+                comparison.exec();
+            });
+    connect(retryFailed, &QPushButton::clicked, &dialog,
+            [this, &dialog, queue, &operations, logUuid, refreshView] {
+                if (m_networkReadOnly) {
+                    showOperatorMessage(
+                        tr("This station has read-only access; queued changes cannot "
+                           "be retried."),
+                        true);
+                    return;
+                }
+                const int row = queue->currentRow();
+                if (row < 0 || row >= operations.size()
+                    || operations.at(row).status != QStringLiteral("failed")) {
+                    return;
+                }
+                QString retryError;
+                if (!m_repository.retrySyncOperation(
+                        operations.at(row).operationUuid, &retryError)) {
+                    QMessageBox::critical(&dialog, tr("Unable to retry operation"),
+                                          retryError);
+                    return;
+                }
+                refreshView();
+                if (m_syncClient
+                    && QSettings().value(QStringLiteral("network/client/logUuid"))
+                           .toString() == logUuid
+                    && m_syncClient->state() == SyncClient::State::Ready) {
+                    m_syncClient->synchronizeNow();
+                }
+            });
+    connect(syncNow, &QPushButton::clicked, &dialog,
+            [this, &dialog, logUuid, refreshView] {
+                if (!m_syncClient
+                    || QSettings().value(QStringLiteral("network/client/logUuid"))
+                           .toString() != logUuid
+                    || !m_syncClient->synchronizeNow()) {
+                    QMessageBox::warning(
+                        &dialog, tr("Synchronization unavailable"),
+                        tr("Connect this log to its central server before synchronizing."));
+                }
+                refreshView();
+            });
+    connect(exportReport, &QPushButton::clicked, &dialog,
+            [this, &dialog, logName, logUuid, stationUuid, &operations,
+             connectionStateText] {
+                const QString path = QFileDialog::getSaveFileName(
+                    &dialog, tr("Export synchronization diagnostics"),
+                    QStringLiteral("sync-diagnostics.json"),
+                    tr("JSON files (*.json)"));
+                if (path.isEmpty()) {
+                    return;
+                }
+                QJsonArray operationSummary;
+                for (const SyncOutboxOperation &operation : operations) {
+                    operationSummary.append(QJsonObject{
+                        {QStringLiteral("operation_uuid"), operation.operationUuid},
+                        {QStringLiteral("entity_uuid"), operation.entityUuid},
+                        {QStringLiteral("operation"), operation.operation},
+                        {QStringLiteral("status"), operation.status},
+                        {QStringLiteral("attempts"), operation.attempts},
+                        {QStringLiteral("last_error"), operation.lastError}
+                    });
+                }
+                QString cursorError;
+                const qint64 cursor = m_repository.syncCursor(logUuid, &cursorError);
+                if (!cursorError.isEmpty()) {
+                    QMessageBox::critical(&dialog,
+                                          tr("Unable to export diagnostics"),
+                                          cursorError);
+                    return;
+                }
+                const QJsonObject report{
+                    {QStringLiteral("generated_at_utc"),
+                     QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+                    {QStringLiteral("connection_state"), connectionStateText()},
+                    {QStringLiteral("host"),
+                     QSettings().value(QStringLiteral("network/client/host")).toString()},
+                    {QStringLiteral("port"),
+                     QSettings().value(QStringLiteral("network/client/port")).toInt()},
+                    {QStringLiteral("log_name"), logName},
+                    {QStringLiteral("log_uuid"), logUuid},
+                    {QStringLiteral("station_uuid"), stationUuid},
+                    {QStringLiteral("server_uuid"),
+                     m_syncClient ? m_syncClient->serverUuid() : QString()},
+                    {QStringLiteral("server_revision"),
+                     m_syncClient ? m_syncClient->currentRevision() : 0},
+                    {QStringLiteral("applied_revision"), cursor},
+                    {QStringLiteral("last_contact_utc"),
+                     m_networkLastContactUtc.isValid()
+                         ? m_networkLastContactUtc.toString(Qt::ISODateWithMs)
+                         : QString()},
+                    {QStringLiteral("operations"), operationSummary}
+                };
+                const QByteArray reportBytes =
+                    QJsonDocument(report).toJson(QJsonDocument::Indented);
+                QSaveFile file(path);
+                if (!file.open(QIODevice::WriteOnly)
+                    || file.write(reportBytes) != reportBytes.size()
+                    || !file.commit()) {
+                    QMessageBox::critical(&dialog,
+                                          tr("Unable to export diagnostics"),
+                                          file.errorString());
+                }
+            });
+    if (m_syncClient) {
+        connect(m_syncClient.get(), &SyncClient::stateChanged, &dialog,
+                [refreshView](SyncClient::State, const QString &) { refreshView(); });
+        connect(m_syncClient.get(), &SyncClient::responseReceived, &dialog,
+                [this, refreshView](const QString &, const QString &,
+                                    const QJsonObject &) {
+                    m_networkLastContactUtc = QDateTime::currentDateTimeUtc();
+                    refreshView();
+                });
+        connect(m_syncClient.get(), &SyncClient::requestFailed, &dialog,
+                [refreshView](const QString &, const QString &,
+                              const QString &, bool) { refreshView(); });
+    }
+    refreshView();
+    dialog.exec();
 }
 
 void MainWindow::configureOperator()
@@ -3329,6 +5672,12 @@ void MainWindow::focusVfo(int vfo)
 void MainWindow::selectContest(int index)
 {
     if (index < 0 || index >= m_contests.size()) {
+        for (int vfo = 0; vfo < 2; ++vfo) {
+            m_serialReservationUuids[vfo].clear();
+            m_serialReservationBands[vfo].clear();
+            m_serialReservationModes[vfo].clear();
+            m_serialReservationSerials[vfo].clear();
+        }
         applyActiveLogStation();
         m_activeContestLabel->setText(tr("No log is available."));
         rebuildQsoForm();
@@ -3339,6 +5688,15 @@ void MainWindow::selectContest(int index)
 
     const Contest &contest = m_contests.at(index);
     QSettings settings;
+    if (settings.value(QStringLiteral("session/activeContestId")).toLongLong()
+        != contest.id) {
+        for (int vfo = 0; vfo < 2; ++vfo) {
+            m_serialReservationUuids[vfo].clear();
+            m_serialReservationBands[vfo].clear();
+            m_serialReservationModes[vfo].clear();
+            m_serialReservationSerials[vfo].clear();
+        }
+    }
     settings.setValue(QStringLiteral("session/activeContestId"), contest.id);
     applyActiveLogStation();
     const auto definition = m_definitions.constFind(contest.id);
@@ -4297,6 +6655,8 @@ void MainWindow::rebuildQsoForm(int vfo)
     }
     m_exchangeEdits[vfo].clear();
     m_sentExchangeEdits[vfo].clear();
+    m_reserveSerialButtons[vfo] = nullptr;
+    m_cancelSerialButtons[vfo] = nullptr;
     if (m_contestSelector->currentIndex() < 0) {
         return;
     }
@@ -4342,19 +6702,47 @@ void MainWindow::rebuildQsoForm(int vfo)
         QString configured = settings.value(settingKey, field.defaultValue).toString();
         edit->setText(configured);
         if (field.type == ExchangeFieldType::Serial && field.generated) {
-            configured = QString::number(nextSerial);
-            if (field.width > 0) {
-                configured = configured.rightJustified(field.width, QLatin1Char('0'));
+            if (definition->serialServerRequired) {
+                configured.clear();
+            } else {
+                configured = QString::number(nextSerial);
+                if (field.width > 0) {
+                    configured = configured.rightJustified(field.width, QLatin1Char('0'));
+                }
             }
             edit->setText(configured);
             edit->setReadOnly(true);
-            edit->setToolTip(tr("Sent serial number, generated on logging"));
+            edit->setToolTip(definition->serialServerRequired
+                ? tr("Reserve this serial from the central server before transmission")
+                : tr("Sent serial number, generated on logging"));
         }
         const QString sentLabel = field.label.size() > 10 ? field.name.toUpper() : field.label;
         QWidget *sentColumn = fieldColumn(tr("Snt %1").arg(sentLabel), edit, panel);
         sentColumn->setToolTip(tr("Sent %1").arg(field.label));
         m_sentExchangeLayouts[vfo]->addWidget(sentColumn);
         m_sentExchangeEdits[vfo].insert(field.name, edit);
+        if (field.type == ExchangeFieldType::Serial && field.generated
+            && definition->serialServerRequired) {
+            auto *reserveButton = new QPushButton(tr("Reserve"), panel);
+            reserveButton->setObjectName(
+                QStringLiteral("reserveSerialButtonV%1").arg(vfo));
+            reserveButton->setToolTip(
+                tr("Request the next serial number from the central server"));
+            connect(reserveButton, &QPushButton::clicked, this,
+                    [this, vfo] { reserveSerialForVfo(vfo); });
+            m_sentExchangeLayouts[vfo]->addWidget(reserveButton);
+            m_reserveSerialButtons[vfo] = reserveButton;
+            auto *cancelButton = new QPushButton(tr("Cancel serial"), panel);
+            cancelButton->setObjectName(
+                QStringLiteral("cancelSerialButtonV%1").arg(vfo));
+            cancelButton->setToolTip(
+                tr("Permanently cancel this unused serial; it will not be reused"));
+            cancelButton->setEnabled(false);
+            connect(cancelButton, &QPushButton::clicked, this,
+                    [this, vfo] { cancelSerialForVfo(vfo); });
+            m_sentExchangeLayouts[vfo]->addWidget(cancelButton);
+            m_cancelSerialButtons[vfo] = cancelButton;
+        }
         if (!(field.type == ExchangeFieldType::Serial && field.generated)) {
             installUppercase(edit);
             connect(edit, &QLineEdit::textChanged, this,
@@ -4391,6 +6779,7 @@ void MainWindow::rebuildQsoForm(int vfo)
                 this, [this, vfo] { updateDupeIndicatorForVfo(vfo); });
     }
     updateSentExchangeVisibility(vfo);
+    updateSerialFields();
 }
 
 void MainWindow::updateSentReportForMode(int vfo)
@@ -4863,6 +7252,36 @@ void MainWindow::updateSerialFields()
     if (definition == nullptr) {
         return;
     }
+    if (definition->serialServerRequired) {
+        for (int entry = 0; entry < 2; ++entry) {
+            if (m_cancelSerialButtons[entry] != nullptr) {
+                const bool cancelling = m_serialCancelContexts.contains(
+                    m_serialReservationUuids[entry]);
+                m_cancelSerialButtons[entry]->setEnabled(
+                    !m_serialReservationUuids[entry].isEmpty() && !cancelling);
+                m_cancelSerialButtons[entry]->setText(
+                    cancelling ? tr("Cancelling...") : tr("Cancel serial"));
+            }
+            for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+                if (field.type == ExchangeFieldType::Serial && field.generated) {
+                    if (QLineEdit *edit =
+                            m_sentExchangeEdits[entry].value(field.name, nullptr)) {
+                        const bool reservationMatches =
+                            m_serialReservationBands[entry]
+                                == m_bandSelectors[entry]->currentText().trimmed()
+                                       .toLower()
+                            && m_serialReservationModes[entry]
+                                == m_modeSelectors[entry]->currentText().trimmed()
+                                       .toUpper();
+                        edit->setText(reservationMatches
+                            ? m_serialReservationSerials[entry] : QString());
+                    }
+
+                }
+            }
+        }
+        return;
+    }
     const int nextSerial = ContestEngine().nextSerialNumber(*definition, m_logQsos);
     for (const ExchangeFieldDefinition &field : definition->sentExchange) {
         if (field.type != ExchangeFieldType::Serial || !field.generated) {
@@ -4878,6 +7297,176 @@ void MainWindow::updateSerialFields()
             }
         }
     }
+}
+
+void MainWindow::cancelSerialForVfo(int vfo)
+{
+    vfo = qBound(0, vfo, 1);
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; serial reservations cannot be changed."),
+            true);
+        return;
+    }
+    const Contest *contest = activeContest();
+    const QString reservationUuid = m_serialReservationUuids[vfo];
+    if (contest == nullptr || reservationUuid.isEmpty()) {
+        showOperatorMessage(tr("There is no active serial reservation to cancel."),
+                            true);
+        return;
+    }
+    if (!m_syncClient || m_syncClient->state() != SyncClient::State::Ready
+        || QSettings().value(QStringLiteral("network/client/logUuid")).toString()
+            != contest->logUuid) {
+        showOperatorMessage(
+            tr("Connect to the central server for this log before cancelling the "
+               "reservation."),
+            true);
+        return;
+    }
+    if (m_serialCancelContexts.contains(reservationUuid)) {
+        showOperatorMessage(tr("Cancellation of this serial is already pending."));
+        return;
+    }
+
+    const auto result = QMessageBox::question(
+        this, tr("Cancel serial reservation"),
+        tr("Cancel serial %1? It will be permanently consumed and will not be "
+           "reused, even if no QSO is logged.")
+            .arg(m_serialReservationSerials[vfo]),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (result != QMessageBox::Yes) {
+        return;
+    }
+
+    const QString requestId = m_syncClient->cancelSerial(reservationUuid);
+    if (requestId.isEmpty()) {
+        showOperatorMessage(
+            tr("The cancellation request could not be queued. The reservation "
+               "remains active."),
+            true);
+        return;
+    }
+    m_serialCancelContexts.insert(reservationUuid, vfo);
+    m_serialCancelRequestReservationUuids.insert(requestId, reservationUuid);
+    updateSerialFields();
+    showOperatorMessage(tr("Cancelling serial %1 on the central server...")
+                            .arg(m_serialReservationSerials[vfo]));
+}
+
+void MainWindow::reserveSerialForVfo(int vfo)
+{
+    vfo = qBound(0, vfo, 1);
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; serial reservations cannot be changed."),
+            true);
+        return;
+    }
+    const Contest *contest = activeContest();
+    const ContestDefinition *definition = activeDefinition();
+    if (contest == nullptr || definition == nullptr
+        || !definition->serialServerRequired) {
+        showOperatorMessage(tr("The selected contest does not require a server serial."),
+                            true);
+        return;
+    }
+    if (!m_syncClient || m_syncClient->state() != SyncClient::State::Ready
+        || QSettings().value(QStringLiteral("network/client/logUuid")).toString()
+            != contest->logUuid) {
+        showOperatorMessage(
+            tr("Connect this log to its central server before reserving a serial."),
+            true);
+        return;
+    }
+    const QString band = m_bandSelectors[vfo]->currentText().trimmed().toLower();
+    const QString mode = m_modeSelectors[vfo]->currentText().trimmed().toUpper();
+    if (!m_serialReservationUuids[vfo].isEmpty()) {
+        if (m_serialReservationBands[vfo] == band
+            && m_serialReservationModes[vfo] == mode) {
+            showOperatorMessage(
+                tr("Serial %1 is already reserved for this band and mode.")
+                    .arg(m_serialReservationSerials[vfo]));
+        } else {
+            showOperatorMessage(
+                tr("Use or return to the existing reservation before requesting "
+                   "another serial for this entry."),
+                true);
+        }
+        return;
+    }
+
+    QString error;
+    const QVector<SerialReservation> reservations =
+        m_repository.serialReservations(contest->logUuid, &error);
+    if (!error.isEmpty()) {
+        showOperatorMessage(tr("Unable to load serial reservations: %1").arg(error),
+                            true);
+        return;
+    }
+    const QString stationUuid = m_repository.localStationUuid(&error);
+    if (!error.isEmpty() || stationUuid.isEmpty()) {
+        showOperatorMessage(
+            error.isEmpty() ? tr("The local station identity is unavailable.")
+                            : tr("Unable to identify station: %1").arg(error),
+            true);
+        return;
+    }
+    for (const SerialReservation &reservation : reservations) {
+        if (reservation.reservationUuid == m_serialReservationUuids[1 - vfo]) {
+            continue;
+        }
+        if (reservation.stationUuid == stationUuid
+            && reservation.status == QStringLiteral("reserved")
+            && reservation.band == band && reservation.mode == mode) {
+            m_serialReservationUuids[vfo] = reservation.reservationUuid;
+            m_serialReservationBands[vfo] = band;
+            m_serialReservationModes[vfo] = mode;
+            m_serialReservationSerials[vfo] =
+                QString::number(reservation.serialNumber)
+                    .rightJustified([definition] {
+                        for (const ExchangeFieldDefinition &field :
+                             definition->sentExchange) {
+                            if (field.type == ExchangeFieldType::Serial
+                                && field.generated) {
+                                return field.width;
+                            }
+                        }
+                        return 0;
+                    }(), QLatin1Char('0'));
+            updateSerialFields();
+            showOperatorMessage(
+                tr("Restored reserved serial %1 from the local cache.")
+                    .arg(m_serialReservationSerials[vfo]));
+            return;
+        }
+    }
+    for (auto it = m_serialReservationContexts.cbegin();
+         it != m_serialReservationContexts.cend(); ++it) {
+        if (it.value() == vfo) {
+            showOperatorMessage(tr("A serial reservation request is already pending."));
+            return;
+        }
+    }
+
+    const QString reservationUuid = QUuid::createUuid()
+        .toString(QUuid::WithoutBraces).toLower();
+    m_serialReservationContexts.insert(reservationUuid, vfo);
+    m_serialReservationPendingBands.insert(reservationUuid, band);
+    m_serialReservationPendingModes.insert(reservationUuid, mode);
+    const QString requestId = m_syncClient->reserveSerial(reservationUuid, band, mode);
+    if (requestId.isEmpty()) {
+        m_serialReservationContexts.remove(reservationUuid);
+        m_serialReservationPendingBands.remove(reservationUuid);
+        m_serialReservationPendingModes.remove(reservationUuid);
+        showOperatorMessage(
+            tr("Could not queue the serial reservation request. Check the network "
+               "connection and synchronization state."),
+            true);
+        return;
+    }
+    m_serialRequestReservationUuids.insert(requestId, reservationUuid);
+    showOperatorMessage(tr("Requesting the next serial from the central server..."));
 }
 
 void MainWindow::autoConnectRadios()
@@ -5076,6 +7665,12 @@ void MainWindow::logQso()
 
 void MainWindow::logQsoForVfo(int vfo)
 {
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; QSO changes are disabled."),
+            true);
+        return;
+    }
     vfo = qBound(0, vfo, 1);
     const int radio = m_so2rToggle->isChecked()
         ? vfo : m_activeRadioSelector->currentData().toInt();
@@ -5148,7 +7743,83 @@ void MainWindow::logQsoForVfo(int vfo)
     const bool allowDupeLogging = QSettings().value(
         QStringLiteral("operating/allowDupeLogging"), false).toBool();
     const auto definition = m_definitions.constFind(contestId);
+    QString reservationUuid;
+    std::optional<int> requestedSerial;
     if (definition != m_definitions.cend()) {
+        if (definition->serialServerRequired) {
+            const Contest *contest = activeContest();
+            const QString band = bandSelector->currentText().trimmed().toLower();
+            const QString mode = modeSelector->currentText().trimmed().toUpper();
+            if (contest == nullptr || !m_syncClient
+                || m_syncClient->state() != SyncClient::State::Ready
+                || QSettings().value(QStringLiteral("network/client/logUuid"))
+                       .toString() != contest->logUuid) {
+                showOperatorMessage(
+                    tr("A ready central connection for this log is required to use "
+                       "server serials."),
+                    true);
+                return;
+            }
+            reservationUuid = m_serialReservationUuids[vfo];
+            if (reservationUuid.isEmpty()
+                || m_serialReservationBands[vfo] != band
+                || m_serialReservationModes[vfo] != mode) {
+                showOperatorMessage(
+                    tr("Reserve a serial for the selected band and mode before "
+                       "logging this QSO."),
+                    true);
+                return;
+            }
+            if (m_serialCancelContexts.contains(reservationUuid)) {
+                showOperatorMessage(
+                    tr("The serial reservation is being cancelled and cannot be "
+                       "used for a QSO."),
+                    true);
+                return;
+            }
+            const std::optional<SerialReservation> reservation =
+                m_repository.serialReservation(contest->logUuid, reservationUuid,
+                                               &error);
+            if (!error.isEmpty()) {
+                showOperatorMessage(
+                    tr("Unable to verify serial reservation: %1").arg(error), true);
+                return;
+            }
+            QString serialFieldName;
+            int serialFieldWidth = 0;
+            for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+                if (field.type == ExchangeFieldType::Serial && field.generated) {
+                    serialFieldName = field.name;
+                    serialFieldWidth = field.width;
+                    break;
+                }
+            }
+            if (!reservation.has_value()
+                || reservation->status != QStringLiteral("reserved")
+                || reservation->stationUuid
+                    != m_repository.localStationUuid(&error)
+                || reservation->band != band || reservation->mode != mode
+                || serialFieldName.isEmpty()) {
+                showOperatorMessage(
+                    error.isEmpty()
+                        ? tr("The serial reservation is missing, expired, or does not "
+                             "match this station, band, and mode.")
+                        : tr("Unable to verify station identity: %1").arg(error),
+                    true);
+                return;
+            }
+            const QString formattedSerial =
+                QString::number(reservation->serialNumber)
+                    .rightJustified(serialFieldWidth, QLatin1Char('0'));
+            if (m_serialReservationSerials[vfo] != formattedSerial
+                || sentOverrides.value(serialFieldName) != formattedSerial) {
+                showOperatorMessage(
+                    tr("The entered serial does not match the reserved serial."),
+                    true);
+                return;
+            }
+            requestedSerial = reservation->serialNumber;
+        }
         const ContestEngine engine;
         const auto resolver = multiplierResolver();
         ContestEvaluationContext context =
@@ -5163,7 +7834,7 @@ void MainWindow::logQsoForVfo(int vfo)
             engine.evaluate(*definition, callsign,
                             bandSelector->currentText().trimmed().toLower(),
                             modeSelector->currentText().trimmed().toUpper(),
-                            receivedFields, context, std::nullopt,
+                            receivedFields, context, requestedSerial,
                             sentOverrides, allowDupeLogging);
         isDupe = evaluation.duplicate;
         if (evaluation.duplicate && !allowDupeLogging) {
@@ -5260,9 +7931,16 @@ void MainWindow::logQsoForVfo(int vfo)
     qso.sentExchange = exchangeText(sentFields);
     qso.receivedExchange = exchangeText(receivedFields);
     qso.points = points;
+    qso.reservationUuid = reservationUuid;
     if (!m_repository.saveQso(qso, &error)) {
         QMessageBox::critical(this, tr("Unable to save QSO"), error);
         return;
+    }
+    if (!reservationUuid.isEmpty()) {
+        m_serialReservationUuids[vfo].clear();
+        m_serialReservationBands[vfo].clear();
+        m_serialReservationModes[vfo].clear();
+        m_serialReservationSerials[vfo].clear();
     }
     callsignEdit->clear();
     for (QLineEdit *edit : exchangeEdits) {
@@ -5290,6 +7968,12 @@ void MainWindow::logQsoForVfo(int vfo)
 
 void MainWindow::editSelectedQso(int row, int)
 {
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; QSO changes are disabled."),
+            true);
+        return;
+    }
     const QTableWidgetItem *idItem = m_recentQsos->item(row, 0);
     if (idItem == nullptr) {
         return;
@@ -5511,26 +8195,70 @@ void MainWindow::editSelectedQso(int row, int)
         edited = candidate;
         return {};
     };
+    bool saved = false;
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         const QStringList problems = validate();
-        if (problems.isEmpty()) {
-            dialog.accept();
+        if (!problems.isEmpty()) {
+            errorLabel->setText(problems.join(QLatin1Char('\n')));
+            errorLabel->show();
             return;
         }
-        errorLabel->setText(problems.join(QLatin1Char('\n')));
-        errorLabel->show();
+        if (!m_repository.updateQso(edited, &error)) {
+            errorLabel->setText(tr("Unable to update QSO: %1").arg(error));
+            errorLabel->show();
+            return;
+        }
+        saved = true;
+        dialog.accept();
     });
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    if (!m_repository.updateQso(edited, &error)) {
-        QMessageBox::critical(this, tr("Unable to update QSO"), error);
+    if (!saved) {
         return;
     }
     refreshRecentQsos();
     updateSerialFields();
     updateDupeIndicator();
     showOperatorMessage(tr("QSO #%1 %2 updated").arg(edited.id).arg(edited.callsign));
+}
+
+void MainWindow::deleteSelectedQso(int row)
+{
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; QSO changes are disabled."),
+            true);
+        return;
+    }
+    const QTableWidgetItem *idItem = m_recentQsos->item(row, 0);
+    if (idItem == nullptr) {
+        return;
+    }
+    const qint64 id = idItem->data(Qt::UserRole).toLongLong();
+    const auto qso = m_repository.qsoById(id);
+    if (!qso.has_value()) {
+        QMessageBox::critical(this, tr("Unable to delete QSO"),
+                              tr("The selected QSO no longer exists."));
+        return;
+    }
+    if (QMessageBox::question(
+            this, tr("Delete QSO"),
+            tr("Delete QSO #%1 with %2?").arg(id).arg(qso->callsign),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+        != QMessageBox::Yes) {
+        return;
+    }
+    QString error;
+    if (!m_repository.deleteQso(id, &error)) {
+        QMessageBox::critical(this, tr("Unable to delete QSO"), error);
+        return;
+    }
+    refreshRecentQsos();
+    updateSerialFields();
+    updateDupeIndicator();
+    showOperatorMessage(tr("QSO #%1 with %2 deleted").arg(id).arg(qso->callsign));
+    statusBar()->showMessage(tr("QSO #%1 deleted.").arg(id), 3000);
 }
 
 void MainWindow::updateDupeIndicator()
