@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QHostAddress>
 #include <QHostInfo>
+#include <QSerialPort>
 #include <QUdpSocket>
 
 #include <memory>
@@ -245,6 +246,205 @@ private:
     std::unique_ptr<QUdpSocket> m_socket;
 };
 
+class SerialLineCwKeyer final : public ICwKeyer {
+public:
+    SerialLineCwKeyer()
+    {
+        m_timer.setSingleShot(true);
+        QObject::connect(&m_timer, &QTimer::timeout, &m_timer,
+                         [this] { advance(); });
+    }
+
+    bool connect(const CwKeyerConfig &config, QString *error) override
+    {
+        if (config.serialDevicePath.trimmed().isEmpty()) {
+            if (error != nullptr) {
+                *error = QStringLiteral("A serial device path is required.");
+            }
+            return false;
+        }
+        m_line = config.serialLine;
+        m_wpm = qBound(5, config.wpm, 80);
+        m_port.setPortName(config.serialDevicePath.trimmed());
+        if (!m_port.open(QIODevice::ReadWrite)) {
+            if (error != nullptr) {
+                *error = m_port.errorString();
+            }
+            return false;
+        }
+        if (!m_port.setBaudRate(QSerialPort::Baud9600) || !setKeyed(false)) {
+            if (error != nullptr) {
+                *error = m_port.errorString();
+            }
+            m_port.close();
+            return false;
+        }
+        m_connected = true;
+        return true;
+    }
+
+    void disconnect() override
+    {
+        m_timer.stop();
+        m_signals.clear();
+        m_signalIndex = 0;
+        m_busy = false;
+        m_completed = false;
+        if (m_port.isOpen()) {
+            setKeyed(false);
+            m_port.close();
+        }
+        m_connected = false;
+    }
+
+    bool sendText(const QString &text, int, QString *error) override
+    {
+        if (!m_connected || text.isEmpty() || m_busy) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Serial CW keyer is unavailable or busy.");
+            }
+            return false;
+        }
+        m_signals = encode(text);
+        if (m_signals.isEmpty()) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Message contains no supported CW characters.");
+            }
+            return false;
+        }
+        m_signalIndex = 0;
+        m_completed = false;
+        m_busy = true;
+        advance();
+        return true;
+    }
+
+    bool abort(QString *error) override
+    {
+        m_timer.stop();
+        m_signals.clear();
+        m_signalIndex = 0;
+        m_busy = false;
+        m_completed = false;
+        if (!m_connected || !setKeyed(false)) {
+            if (error != nullptr) {
+                *error = m_port.errorString();
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool supportsCompletion() const override { return true; }
+
+    bool pollCompleted(QString *) override
+    {
+        const bool completed = m_completed;
+        m_completed = false;
+        return completed;
+    }
+
+    bool setWpm(int wpm, QString *error) override
+    {
+        if (wpm < 5 || wpm > 80) {
+            if (error != nullptr) {
+                *error = QStringLiteral("WPM must be between 5 and 80.");
+            }
+            return false;
+        }
+        m_wpm = wpm;
+        return true;
+    }
+
+private:
+    struct Signal {
+        bool keyed = false;
+        int units = 1;
+    };
+
+    bool setKeyed(bool keyed)
+    {
+        return m_line == CwKeyerSerialLine::Dtr
+            ? m_port.setDataTerminalReady(keyed)
+            : m_port.setRequestToSend(keyed);
+    }
+
+    QVector<Signal> encode(const QString &text) const
+    {
+        static const QMap<QChar, QString> morse{
+            {'A', ".-"}, {'B', "-..."}, {'C', "-.-."}, {'D', "-.."},
+            {'E', "."}, {'F', "..-."}, {'G', "--."}, {'H', "...."},
+            {'I', ".."}, {'J', ".---"}, {'K', "-.-"}, {'L', ".-.."},
+            {'M', "--"}, {'N', "-."}, {'O', "---"}, {'P', ".--."},
+            {'Q', "--.-"}, {'R', ".-."}, {'S', "..."}, {'T', "-"},
+            {'U', "..-"}, {'V', "...-"}, {'W', ".--"}, {'X', "-..-"},
+            {'Y', "-.--"}, {'Z', "--.."}, {'0', "-----"}, {'1', ".----"},
+            {'2', "..---"}, {'3', "...--"}, {'4', "....-"}, {'5', "....."},
+            {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."},
+            {'.', ".-.-.-"}, {',', "--..--"}, {'?', "..--.."}, {'/', "-..-."},
+            {'=', "-...-"}, {'+', ".-.-."}, {'-', "-....-"},
+        };
+        QVector<Signal> result;
+        bool hasPreviousCharacter = false;
+        int pendingGap = 3;
+        for (const QChar input : text) {
+            if (input.isSpace()) {
+                if (hasPreviousCharacter) {
+                    pendingGap = 7;
+                }
+                continue;
+            }
+            const auto code = morse.constFind(input.toUpper());
+            if (code == morse.cend()) {
+                continue;
+            }
+            if (hasPreviousCharacter) {
+                result.append({false, pendingGap});
+            }
+            for (qsizetype index = 0; index < code->size(); ++index) {
+                result.append({true, code->at(index) == QLatin1Char('-') ? 3 : 1});
+                if (index + 1 < code->size()) {
+                    result.append({false, 1});
+                }
+            }
+            hasPreviousCharacter = true;
+            pendingGap = 3;
+        }
+        if (hasPreviousCharacter) {
+            result.append({false, 3});
+        }
+        return result;
+    }
+
+    void advance()
+    {
+        if (m_signalIndex >= m_signals.size()) {
+            setKeyed(false);
+            m_busy = false;
+            m_completed = true;
+            return;
+        }
+        const Signal signal = m_signals.at(m_signalIndex++);
+        if (!setKeyed(signal.keyed)) {
+            m_port.close();
+            m_connected = false;
+            m_busy = false;
+            return;
+        }
+        m_timer.start(qMax(1, signal.units * 1200 / m_wpm));
+    }
+
+    QSerialPort m_port;
+    QTimer m_timer;
+    QVector<Signal> m_signals;
+    CwKeyerSerialLine m_line = CwKeyerSerialLine::Dtr;
+    qsizetype m_signalIndex = 0;
+    int m_wpm = 25;
+    bool m_connected = false;
+    bool m_busy = false;
+    bool m_completed = false;
+};
+
 #ifdef LOGGER_WITH_HAMLIB
 class HamlibCwKeyer final : public ICwKeyer {
 public:
@@ -465,6 +665,8 @@ ICwKeyer *createKeyer(CwKeyerType type)
 #else
         return nullptr;
 #endif
+    case CwKeyerType::Serial:
+        return new SerialLineCwKeyer;
     }
     return nullptr;
 }

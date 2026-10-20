@@ -725,65 +725,17 @@ public:
         setWindowTitle(tr("CW keyer configuration"));
         auto *layout = new QVBoxLayout(this);
         auto *form = new QFormLayout;
-        m_type = new QComboBox(this);
-        m_type->setObjectName(QStringLiteral("cwKeyerProvider"));
-        m_type->addItem(tr("Hamlib radio"), static_cast<int>(CwKeyerType::Hamlib));
-        m_type->addItem(tr("cwdaemon (UDP)"), static_cast<int>(CwKeyerType::Cwdaemon));
-        m_type->addItem(tr("Mock (testing)"), static_cast<int>(CwKeyerType::Mock));
-        m_type->setCurrentIndex(m_type->findData(static_cast<int>(config.type)));
-        form->addRow(tr("Provider:"), m_type);
-        m_host = new QLineEdit(config.type == CwKeyerType::Cwdaemon
-                                   ? config.host : config.radio.host, this);
-        m_host->setPlaceholderText(QStringLiteral("127.0.0.1"));
-        form->addRow(tr("Host:"), m_host);
-        m_port = new QSpinBox(this);
-        m_port->setRange(1, 65535);
-        m_port->setValue(config.type == CwKeyerType::Cwdaemon
-                             ? config.port : config.radio.port);
-        form->addRow(tr("UDP / rigctld port:"), m_port);
-        m_modelId = new QSpinBox(this);
-        m_modelId->setRange(1, 100000);
-        m_modelId->setValue(config.radio.modelId);
-        form->addRow(tr("Hamlib model ID:"), m_modelId);
-        m_transport = new QComboBox(this);
-        m_transport->setObjectName(QStringLiteral("cwHamlibTransport"));
-        m_transport->addItem(tr("Serial"), static_cast<int>(RadioTransport::Serial));
-        m_transport->addItem(tr("TCP / rigctld"), static_cast<int>(RadioTransport::Tcp));
-        m_transport->setCurrentIndex(
-            m_transport->findData(static_cast<int>(config.radio.transport)));
-        form->addRow(tr("Hamlib transport:"), m_transport);
-        m_device = new QLineEdit(config.radio.devicePath, this);
+        m_device = new QLineEdit(config.serialDevicePath, this);
+        m_device->setObjectName(QStringLiteral("cwSerialDevice"));
+        m_device->setPlaceholderText(QStringLiteral("/dev/ttyUSB0"));
         form->addRow(tr("Serial device:"), m_device);
-        m_baud = new QSpinBox(this);
-        m_baud->setRange(1200, 115200);
-        m_baud->setSingleStep(1200);
-        m_baud->setValue(config.radio.baudRate);
-        form->addRow(tr("Baud rate:"), m_baud);
-        m_rtsState = new QComboBox(this);
-        m_rtsState->setObjectName(QStringLiteral("cwHamlibRtsState"));
-        populateSerialControlSelector(m_rtsState, config.radio.rtsState);
-        form->addRow(tr("Hamlib serial RTS:"), m_rtsState);
-        m_dtrState = new QComboBox(this);
-        m_dtrState->setObjectName(QStringLiteral("cwHamlibDtrState"));
-        populateSerialControlSelector(m_dtrState, config.radio.dtrState);
-        form->addRow(tr("Hamlib serial DTR:"), m_dtrState);
-        m_wpm = new QSpinBox(this);
-        m_wpm->setRange(5, 80);
-        m_wpm->setValue(config.wpm);
-        form->addRow(tr("Speed (WPM):"), m_wpm);
+        m_line = new QComboBox(this);
+        m_line->setObjectName(QStringLiteral("cwSerialLine"));
+        m_line->addItem(tr("DTR"), static_cast<int>(CwKeyerSerialLine::Dtr));
+        m_line->addItem(tr("RTS"), static_cast<int>(CwKeyerSerialLine::Rts));
+        m_line->setCurrentIndex(m_line->findData(static_cast<int>(config.serialLine)));
+        form->addRow(tr("CW output:"), m_line);
         layout->addLayout(form);
-        updateSerialControlVisibility(form);
-        connect(m_type, &QComboBox::currentIndexChanged,
-                this, [this, form] { updateSerialControlVisibility(form); });
-        connect(m_transport, &QComboBox::currentIndexChanged,
-                this, [this, form] { updateSerialControlVisibility(form); });
-        auto *note = new QLabel(
-            tr("Hamlib opens its configured rig connection. Use rigctld if CAT "
-               "already owns the radio's serial port. cwdaemon uses UDP port 6789 "
-               "by default and does not provide a delivery acknowledgement."),
-            this);
-        note->setWordWrap(true);
-        layout->addWidget(note);
         auto *buttons = new QDialogButtonBox(
             QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
         buttons->button(QDialogButtonBox::Ok)->setText(tr("Connect"));
@@ -795,52 +747,16 @@ public:
     CwKeyerConfig config() const
     {
         CwKeyerConfig result;
-        result.type = static_cast<CwKeyerType>(m_type->currentData().toInt());
-        result.host = m_host->text().trimmed();
-        result.port = m_port->value();
-        result.wpm = m_wpm->value();
-        result.radio.backend = RadioBackendType::Hamlib;
-        result.radio.transport =
-            static_cast<RadioTransport>(m_transport->currentData().toInt());
-        result.radio.modelId = m_modelId->value();
-        result.radio.host = m_host->text().trimmed();
-        result.radio.port = m_port->value();
-        result.radio.devicePath = m_device->text().trimmed();
-        result.radio.baudRate = m_baud->value();
-        result.radio.rtsState =
-            static_cast<SerialControlState>(m_rtsState->currentData().toInt());
-        result.radio.dtrState =
-            static_cast<SerialControlState>(m_dtrState->currentData().toInt());
+        result.type = CwKeyerType::Serial;
+        result.serialDevicePath = m_device->text().trimmed();
+        result.serialLine =
+            static_cast<CwKeyerSerialLine>(m_line->currentData().toInt());
         return result;
     }
 
 private:
-    void updateSerialControlVisibility(QFormLayout *form)
-    {
-        const bool visible =
-            m_type->currentData().toInt() == static_cast<int>(CwKeyerType::Hamlib)
-            && m_transport->currentData().toInt()
-                == static_cast<int>(RadioTransport::Serial);
-        m_rtsState->setVisible(visible);
-        m_dtrState->setVisible(visible);
-        if (QWidget *label = form->labelForField(m_rtsState)) {
-            label->setVisible(visible);
-        }
-        if (QWidget *label = form->labelForField(m_dtrState)) {
-            label->setVisible(visible);
-        }
-    }
-
-    QComboBox *m_type = nullptr;
-    QLineEdit *m_host = nullptr;
-    QSpinBox *m_port = nullptr;
-    QSpinBox *m_modelId = nullptr;
-    QComboBox *m_transport = nullptr;
     QLineEdit *m_device = nullptr;
-    QSpinBox *m_baud = nullptr;
-    QComboBox *m_rtsState = nullptr;
-    QComboBox *m_dtrState = nullptr;
-    QSpinBox *m_wpm = nullptr;
+    QComboBox *m_line = nullptr;
 };
 
 // Day/night map (equirectangular); points are (longitude, latitude) in degrees.
@@ -1056,12 +972,19 @@ CwKeyerConfig cwKeyerConfigFromSettings(const QSettings &settings, int radioInde
     CwKeyerConfig config;
     config.type = static_cast<CwKeyerType>(
         settings.value(QStringLiteral("cw/type"),
-                       static_cast<int>(CwKeyerType::Mock)).toInt());
+                       static_cast<int>(CwKeyerType::Serial)).toInt());
     config.host = settings.value(QStringLiteral("cw/host"),
                                  QStringLiteral("127.0.0.1")).toString();
     config.port = settings.value(QStringLiteral("cw/port"), 6789).toInt();
     config.wpm = settings.value(QStringLiteral("cw/wpm"), 25).toInt();
     config.radio = std::move(radio);
+    config.serialDevicePath = settings.value(
+        QStringLiteral("cw/serial/devicePath"),
+        settings.value(QStringLiteral("cw/hamlib/devicePath"),
+                       config.radio.devicePath)).toString();
+    config.serialLine = static_cast<CwKeyerSerialLine>(
+        settings.value(QStringLiteral("cw/serial/line"),
+                       static_cast<int>(CwKeyerSerialLine::Dtr)).toInt());
     if (previousRadioIndex == radioIndex) {
         config.radio.modelId = settings.value(QStringLiteral("cw/hamlib/modelId"),
                                               config.radio.modelId).toInt();
@@ -6072,29 +5995,17 @@ void MainWindow::configureCwKeyer()
         return;
     }
     config = dialog.config();
-    if (config.type == CwKeyerType::Hamlib
-        && config.radio.transport == RadioTransport::Serial
-        && config.radio.devicePath.isEmpty()) {
+    if (config.serialDevicePath.isEmpty()) {
         QMessageBox::warning(this, tr("Serial device required"),
-                             tr("Select a serial device for the Hamlib keyer."));
+                             tr("Enter the serial device for the CW keyer."));
         return;
     }
     settings.setValue(QStringLiteral("cw/type"), static_cast<int>(config.type));
-    settings.setValue(QStringLiteral("cw/host"), config.host);
-    settings.setValue(QStringLiteral("cw/port"), config.port);
     settings.setValue(QStringLiteral("cw/wpm"), config.wpm);
-    settings.setValue(QStringLiteral("cw/radioIndex"), radioIndex);
-    settings.setValue(QStringLiteral("cw/hamlib/modelId"), config.radio.modelId);
-    settings.setValue(QStringLiteral("cw/hamlib/transport"),
-                      static_cast<int>(config.radio.transport));
-    settings.setValue(QStringLiteral("cw/hamlib/devicePath"), config.radio.devicePath);
-    settings.setValue(QStringLiteral("cw/hamlib/baudRate"), config.radio.baudRate);
-    settings.setValue(QStringLiteral("cw/hamlib/rtsState"),
-                      static_cast<int>(config.radio.rtsState));
-    settings.setValue(QStringLiteral("cw/hamlib/dtrState"),
-                      static_cast<int>(config.radio.dtrState));
-    settings.setValue(QStringLiteral("cw/hamlib/host"), config.radio.host);
-    settings.setValue(QStringLiteral("cw/hamlib/port"), config.radio.port);
+    settings.setValue(QStringLiteral("cw/serial/devicePath"),
+                      config.serialDevicePath);
+    settings.setValue(QStringLiteral("cw/serial/line"),
+                      static_cast<int>(config.serialLine));
     setCwWpm(config.wpm);
     m_cwConfiguredRadio = radioIndex;
     m_cwKeyerController.connectKeyer(config);

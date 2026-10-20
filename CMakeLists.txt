@@ -14,7 +14,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets Sql Network)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets Sql Network SerialPort)
 find_package(yaml-cpp CONFIG REQUIRED)
 
 option(LOGGER_ENABLE_HAMLIB "Build Hamlib radio and CW support when available" ON)
@@ -74,6 +74,7 @@ target_link_libraries(logger_core
         Qt6::Sql
         Qt6::Widgets
         Qt6::Network
+        Qt6::SerialPort
         yaml-cpp::yaml-cpp
 )
 if(WIN32)

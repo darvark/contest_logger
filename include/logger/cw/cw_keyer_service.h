@@ -12,12 +12,20 @@ namespace logger {
 enum class CwKeyerType {
     Hamlib,
     Cwdaemon,
-    Mock
+    Mock,
+    Serial
+};
+
+enum class CwKeyerSerialLine {
+    Dtr,
+    Rts
 };
 
 struct CwKeyerConfig {
-    CwKeyerType type = CwKeyerType::Mock;
+    CwKeyerType type = CwKeyerType::Serial;
     RadioConfig radio;
+    QString serialDevicePath;
+    CwKeyerSerialLine serialLine = CwKeyerSerialLine::Dtr;
     QString host = QStringLiteral("127.0.0.1");
     int port = 6789;
     int wpm = 25;

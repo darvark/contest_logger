@@ -65,7 +65,7 @@ private slots:
     void networkStatusListsConnectedStations();
     void dxClusterDialogSelectsDirectoryOrCustomServer();
     void radioConfigDialogPersistsHamlibAndCatTimingOptions();
-    void cwKeyerDialogPersistsHamlibSerialControlOptions();
+    void cwKeyerDialogPersistsSerialDeviceAndOutputLine();
     void functionKeyMessagesAreManuallyConfigurable();
     void esmSendsCallAndLogsOnExchangeEnter();
     void esmMessagesAreConfiguredPerContest();
@@ -799,7 +799,7 @@ void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
     QVERIFY(!settings.contains(QStringLiteral("radio/A/modelId")));
 }
 
-void MainWindowUiTest::cwKeyerDialogPersistsHamlibSerialControlOptions()
+void MainWindowUiTest::cwKeyerDialogPersistsSerialDeviceAndOutputLine()
 {
     QAction *configureCw = nullptr;
     for (QAction *action : m_window->findChildren<QAction *>()) {
@@ -813,39 +813,26 @@ void MainWindowUiTest::cwKeyerDialogPersistsHamlibSerialControlOptions()
     bool dialogSeen = false;
     runWhenModalAppears([&dialogSeen](QDialog *dialog) {
         dialogSeen = true;
-        auto *type = dialog->findChild<QComboBox *>(QStringLiteral("cwKeyerProvider"));
-        auto *transport =
-            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibTransport"));
-        auto *rtsState =
-            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibRtsState"));
-        auto *dtrState =
-            dialog->findChild<QComboBox *>(QStringLiteral("cwHamlibDtrState"));
-        QVERIFY(type != nullptr);
-        QVERIFY(transport != nullptr);
-        QVERIFY(rtsState != nullptr);
-        QVERIFY(dtrState != nullptr);
-        type->setCurrentIndex(type->findData(static_cast<int>(CwKeyerType::Hamlib)));
-        transport->setCurrentIndex(
-            transport->findData(static_cast<int>(RadioTransport::Serial)));
-        QVERIFY(rtsState->isVisible());
-        QVERIFY(dtrState->isVisible());
-        rtsState->setCurrentIndex(
-            rtsState->findData(static_cast<int>(SerialControlState::Off)));
-        dtrState->setCurrentIndex(
-            dtrState->findData(static_cast<int>(SerialControlState::On)));
-        type->setCurrentIndex(type->findData(static_cast<int>(CwKeyerType::Mock)));
+        auto *device = dialog->findChild<QLineEdit *>(QStringLiteral("cwSerialDevice"));
+        auto *line = dialog->findChild<QComboBox *>(QStringLiteral("cwSerialLine"));
+        QVERIFY(device != nullptr);
+        QVERIFY(line != nullptr);
+        QVERIFY(dialog->findChild<QComboBox *>(QStringLiteral("cwKeyerProvider"))
+                == nullptr);
+        device->setText(QStringLiteral("/dev/ttyUSB0"));
+        line->setCurrentIndex(line->findData(static_cast<int>(CwKeyerSerialLine::Rts)));
         dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
     });
     configureCw->trigger();
     QVERIFY(dialogSeen);
 
     QSettings settings;
-    QCOMPARE(settings.value(QStringLiteral("cw/hamlib/rtsState")).toInt(),
-             static_cast<int>(SerialControlState::Off));
-    QCOMPARE(settings.value(QStringLiteral("cw/hamlib/dtrState")).toInt(),
-             static_cast<int>(SerialControlState::On));
+    QCOMPARE(settings.value(QStringLiteral("cw/serial/devicePath")).toString(),
+             QStringLiteral("/dev/ttyUSB0"));
+    QCOMPARE(settings.value(QStringLiteral("cw/serial/line")).toInt(),
+             static_cast<int>(CwKeyerSerialLine::Rts));
     QCOMPARE(settings.value(QStringLiteral("cw/type")).toInt(),
-             static_cast<int>(CwKeyerType::Mock));
+             static_cast<int>(CwKeyerType::Serial));
 }
 
 void MainWindowUiTest::functionKeyMessagesAreManuallyConfigurable()
