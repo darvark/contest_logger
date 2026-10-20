@@ -4,6 +4,8 @@
 
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -55,6 +57,8 @@ constexpr qsizetype MaximumCredentialFileSize = 1024 * 1024;
 constexpr int MaximumBatchSize = 100;
 constexpr int MaximumPageSize = 500;
 constexpr int IdleTimeoutMs = 60'000;
+constexpr int EventRetentionDays = 30;
+constexpr int EventRetentionIntervalMs = 24 * 60 * 60 * 1000;
 
 QString uuidString()
 {
@@ -122,6 +126,34 @@ QByteArray frameBytes(const QJsonObject &message)
 
 } // namespace
 
+namespace {
+
+bool isStationIdentity(const QJsonValue &value)
+{
+    if (!value.isObject()) {
+        return false;
+    }
+    const QJsonObject identity = value.toObject();
+    if (identity.keys() != QStringList{
+            QStringLiteral("computer_name"), QStringLiteral("operator_name"),
+            QStringLiteral("station_callsign")}) {
+        return false;
+    }
+    for (auto it = identity.begin(); it != identity.end(); ++it) {
+        if (!it.value().isString() || it.value().toString().size() > 255) {
+            return false;
+        }
+        for (const QChar character : it.value().toString()) {
+            if (character.category() == QChar::Other_Control) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 struct SyncServer::ClientSession {
     QByteArray input;
     QTimer *idleTimer = nullptr;
@@ -130,10 +162,13 @@ struct SyncServer::ClientSession {
     bool authenticated = false;
     QString stationUuid;
     QString sessionUuid;
+    QJsonObject identity;
     QString activeLogUuid;
     QStringList permissions;
     QStringList allowedLogUuids;
+    QSet<QString> capabilities;
     QSet<QString> requestIds;
+    qint64 lastNotifiedRevision = 0;
     int protocolVersion = ProtocolVersion;
 };
 
@@ -141,8 +176,16 @@ SyncServer::SyncServer(CentralRepository &repository, QObject *parent)
     : QObject(parent),
       m_repository(repository),
       m_server(std::make_unique<TlsTcpServer>(
-          [this](QSslSocket *socket) { beginTls(socket); }))
+          [this](QSslSocket *socket) { beginTls(socket); })),
+      m_eventRetentionTimer(std::make_unique<QTimer>(this))
 {
+    m_eventRetentionTimer->setInterval(EventRetentionIntervalMs);
+    connect(m_eventRetentionTimer.get(), &QTimer::timeout, this, [this] {
+        QString error;
+        if (!runEventRetention(&error)) {
+            qWarning().noquote() << "Synchronization event retention failed:" << error;
+        }
+    });
 }
 
 SyncServer::~SyncServer()
@@ -301,6 +344,14 @@ bool SyncServer::listen(const QString &address, quint16 port,
         m_credentials.clear();
         return false;
     }
+    QString retentionError;
+    if (!runEventRetention(&retentionError)) {
+        if (error != nullptr) {
+            *error = retentionError;
+        }
+        m_credentials.clear();
+        return false;
+    }
     if (!m_server->listen(host, port)) {
         if (error != nullptr) {
             *error = m_server->errorString();
@@ -310,11 +361,13 @@ bool SyncServer::listen(const QString &address, quint16 port,
     }
     m_certificate = certificate;
     m_privateKey = privateKey;
+    m_eventRetentionTimer->start();
     return true;
 }
 
 void SyncServer::close()
 {
+    m_eventRetentionTimer->stop();
     if (m_server) {
         m_server->close();
     }
@@ -325,6 +378,40 @@ void SyncServer::close()
     m_credentials.clear();
 }
 
+bool SyncServer::runEventRetention(QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    SqliteRepository *repository = m_repository.repository();
+    if (repository == nullptr) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Central repository is not initialized.");
+        }
+        return false;
+    }
+    QString repositoryError;
+    const QVector<Contest> logs = repository->contests(&repositoryError);
+    if (!repositoryError.isEmpty()) {
+        if (error != nullptr) {
+            *error = repositoryError;
+        }
+        return false;
+    }
+    const QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(
+        -EventRetentionDays);
+    for (const Contest &log : logs) {
+        if (!m_repository.compactSyncEvents(
+                log.logUuid, cutoff, nullptr, &repositoryError)) {
+            if (error != nullptr) {
+                *error = repositoryError;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 quint16 SyncServer::serverPort() const
 {
     return m_server->serverPort();
@@ -333,6 +420,29 @@ quint16 SyncServer::serverPort() const
 int SyncServer::activeConnections() const
 {
     return m_sessions.size();
+}
+
+QJsonArray SyncServer::connectedStations(const QString &logUuid) const
+{
+    QJsonArray stations;
+    if (logUuid.isEmpty()) {
+        return stations;
+    }
+    for (const ClientSession *session : m_sessions) {
+        if (session->authenticated && session->activeLogUuid == logUuid) {
+            stations.append(QJsonObject{
+                {QStringLiteral("station_uuid"), session->stationUuid},
+                {QStringLiteral("session_uuid"), session->sessionUuid},
+                {QStringLiteral("computer_name"),
+                 session->identity.value(QStringLiteral("computer_name")).toString()},
+                {QStringLiteral("station_callsign"),
+                 session->identity.value(QStringLiteral("station_callsign")).toString()},
+                {QStringLiteral("operator_name"),
+                 session->identity.value(QStringLiteral("operator_name")).toString()}
+            });
+        }
+    }
+    return stations;
 }
 
 bool SyncServer::stationCanAccessLog(
@@ -535,6 +645,10 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         }
         session->protocolSelected = true;
         session->protocolVersion = ProtocolVersion;
+        for (const QJsonValue &capability
+             : payload.value(QStringLiteral("capabilities")).toArray()) {
+            session->capabilities.insert(capability.toString());
+        }
         sendMessage(socket, ProtocolVersion, requestId, QStringLiteral("hello_ack"),
                     QJsonObject{
                         {QStringLiteral("protocol_version"), ProtocolVersion},
@@ -549,7 +663,9 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                             QStringLiteral("cancel_serial"),
                             QStringLiteral("get_serial_reservations"),
                             QStringLiteral("ack_revision"), QStringLiteral("heartbeat"),
-                            QStringLiteral("get_status"), QStringLiteral("get_metrics")}}
+                            QStringLiteral("get_status"), QStringLiteral("get_metrics"),
+                            QStringLiteral("station_identity"),
+                            QStringLiteral("event_notifications")}}
                     });
         return;
     }
@@ -562,9 +678,14 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
     }
 
     if (!session->authenticated) {
+        QJsonObject authentication = payload;
+        const QJsonValue identity = authentication.take(QStringLiteral("station_identity"));
         if (type != QStringLiteral("authenticate")
-            || payload.keys() != QStringList{
-                QStringLiteral("station_uuid"), QStringLiteral("token")}) {
+            || authentication.keys() != QStringList{
+                QStringLiteral("station_uuid"), QStringLiteral("token")}
+            || (!identity.isUndefined()
+                && (!session->capabilities.contains(QStringLiteral("station_identity"))
+                    || !isStationIdentity(identity)))) {
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("UNAUTHENTICATED"),
                       QStringLiteral("Authenticate before sending other requests."));
@@ -585,6 +706,7 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
             return;
         }
         session->stationUuid = stationUuid;
+        session->identity = identity.toObject();
         session->sessionUuid = uuidString();
         session->permissions.clear();
         for (const QJsonValue &permission
@@ -606,16 +728,67 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         return;
     }
 
+    if (type == QStringLiteral("set_station_identity")) {
+        if (!session->capabilities.contains(QStringLiteral("station_identity"))
+            || !isStationIdentity(payload)) {
+            sendError(socket, protocolVersion, requestId,
+                      QStringLiteral("INVALID_MESSAGE"),
+                      QStringLiteral("Station identity is invalid."));
+            return;
+        }
+        session->identity = payload;
+        sendMessage(socket, protocolVersion, requestId,
+                    QStringLiteral("station_identity_updated"), {});
+        return;
+    }
     if (type == QStringLiteral("heartbeat")) {
-        if (payload.keys() != QStringList{
-                QStringLiteral("last_applied_revision"), QStringLiteral("session_uuid")}
+        const QStringList legacyHeartbeatKeys{
+            QStringLiteral("last_applied_revision"), QStringLiteral("session_uuid")};
+        const QStringList diagnosticHeartbeatKeys{
+            QStringLiteral("conflict_count"), QStringLiteral("error_count"),
+            QStringLiteral("last_applied_revision"), QStringLiteral("pending_count"),
+            QStringLiteral("session_uuid")};
+        const bool includesDiagnostics =
+            payload.keys() == diagnosticHeartbeatKeys;
+        if ((payload.keys() != legacyHeartbeatKeys && !includesDiagnostics)
             || !isNonNegativeInteger(
                 payload.value(QStringLiteral("last_applied_revision")))
+            || (includesDiagnostics
+                && (!isNonNegativeInteger(
+                        payload.value(QStringLiteral("pending_count")))
+                    || !isNonNegativeInteger(
+                        payload.value(QStringLiteral("error_count")))
+                    || !isNonNegativeInteger(
+                        payload.value(QStringLiteral("conflict_count")))))
             || payload.value(QStringLiteral("session_uuid")).toString()
                    != session->sessionUuid) {
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("INVALID_MESSAGE"), QStringLiteral("Heartbeat is invalid."));
             return;
+        }
+        if (!session->activeLogUuid.isEmpty()
+            && session->permissions.contains(QStringLiteral("read"))) {
+            QString error;
+            const bool recorded = includesDiagnostics
+                ? m_repository.recordClientHeartbeat(
+                      session->activeLogUuid, session->stationUuid,
+                      payload.value(QStringLiteral("last_applied_revision")).toInteger(),
+                      payload.value(QStringLiteral("pending_count")).toInt(),
+                      payload.value(QStringLiteral("error_count")).toInt(),
+                      payload.value(QStringLiteral("conflict_count")).toInt(),
+                      &error)
+                : m_repository.recordClientHeartbeat(
+                      session->activeLogUuid, session->stationUuid,
+                      payload.value(QStringLiteral("last_applied_revision")).toInteger(),
+                      &error);
+            if (!recorded) {
+                const QString code = error.startsWith(
+                    QStringLiteral("Heartbeat revision exceeds"))
+                    ? QStringLiteral("INVALID_REVISION")
+                    : QStringLiteral("INTERNAL_ERROR");
+                sendError(socket, protocolVersion, requestId, code, error);
+                return;
+            }
         }
         sendMessage(socket, protocolVersion, requestId,
                     QStringLiteral("heartbeat_ack"),
@@ -662,17 +835,6 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                       QStringLiteral("Could not read synchronization status."));
             return;
         }
-        QJsonArray connectedStations;
-        for (auto it = m_sessions.cbegin(); it != m_sessions.cend(); ++it) {
-            const ClientSession *connected = it.value();
-            if (connected->authenticated
-                && connected->activeLogUuid == session->activeLogUuid) {
-                connectedStations.append(QJsonObject{
-                    {QStringLiteral("station_uuid"), connected->stationUuid},
-                    {QStringLiteral("session_uuid"), connected->sessionUuid}
-                });
-            }
-        }
         sendMessage(socket, protocolVersion, requestId, QStringLiteral("status"),
                     QJsonObject{
                         {QStringLiteral("server_uuid"), serverUuid},
@@ -680,7 +842,8 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                         {QStringLiteral("current_revision"), revision},
                         {QStringLiteral("station_uuid"), session->stationUuid},
                         {QStringLiteral("station_cursor"), cursor},
-                        {QStringLiteral("connected_stations"), connectedStations}
+                        {QStringLiteral("connected_stations"),
+                         connectedStations(session->activeLogUuid)}
                     });
         return;
     }
@@ -1016,6 +1179,7 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                       QStringLiteral("Could not read log revision range."));
             return;
         }
+        session->lastNotifiedRevision = revision;
         sendMessage(socket, protocolVersion, requestId, QStringLiteral("welcome"),
                     QJsonObject{
                         {QStringLiteral("server_uuid"), serverUuid},
@@ -1030,7 +1194,8 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                         {QStringLiteral("capabilities"), QJsonArray{
                             QStringLiteral("submit_batch"), QStringLiteral("get_changes"),
                             QStringLiteral("ack_revision"), QStringLiteral("heartbeat"),
-                            QStringLiteral("get_status"), QStringLiteral("get_metrics")}}
+                            QStringLiteral("get_status"), QStringLiteral("get_metrics"),
+                            QStringLiteral("event_notifications")}}
                     });
         return;
     }
@@ -1084,7 +1249,25 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         }
         QJsonArray results;
         QString error;
-        if (!m_repository.submitBatch(session->activeLogUuid, operations, &results, &error)) {
+        QElapsedTimer transactionTimer;
+        transactionTimer.start();
+        const bool submitted = m_repository.submitBatch(
+            session->activeLogUuid, operations, &results, &error);
+        if (!historicalImport) {
+            const QString outcome = submitted
+                ? QStringLiteral("success")
+                : error.startsWith(QStringLiteral("VERSION_CONFLICT"))
+                    ? QStringLiteral("conflict") : QStringLiteral("error");
+            QString metricError;
+            if (!m_repository.recordSyncTransactionMetric(
+                    session->activeLogUuid, session->stationUuid,
+                    transactionTimer.elapsed(), outcome, operations.size(),
+                    &metricError)) {
+                qWarning().noquote() << "Could not persist sync transaction metric:"
+                                     << metricError;
+            }
+        }
+        if (!submitted) {
             QString code = QStringLiteral("VALIDATION_FAILED");
             QJsonObject context;
             if (error.startsWith(QStringLiteral("UNKNOWN_LOG"))) {
@@ -1129,6 +1312,14 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         sendMessage(socket, protocolVersion, requestId,
                     QStringLiteral("batch_result"),
                     QJsonObject{{QStringLiteral("results"), results}});
+        const qint64 currentRevision =
+            m_repository.currentRevision(session->activeLogUuid, &error);
+        if (!error.isEmpty()) {
+            qWarning().noquote() << "Could not read committed sync revision:"
+                                 << error;
+            return;
+        }
+        notifyLogRevision(session->activeLogUuid, currentRevision);
         return;
     }
 
@@ -1377,6 +1568,67 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         return;
     }
 
+    if (type == QStringLiteral("adjust_serial")) {
+        if (!session->permissions.contains(QStringLiteral("admin"))) {
+            sendError(socket, protocolVersion, requestId,
+                      QStringLiteral("FORBIDDEN"),
+                      QStringLiteral("Administrator permission is required."));
+            return;
+        }
+        const QJsonValue expectedValue =
+            payload.value(QStringLiteral("expected_serial"));
+        const QJsonValue correctedValue =
+            payload.value(QStringLiteral("corrected_serial"));
+        const QString reason = payload.value(QStringLiteral("reason")).toString();
+        if (payload.keys() != QStringList{
+                QStringLiteral("corrected_serial"), QStringLiteral("expected_serial"),
+                QStringLiteral("log_uuid"), QStringLiteral("reason"),
+                QStringLiteral("reservation_uuid")}
+            || payload.value(QStringLiteral("log_uuid")).toString()
+                   != session->activeLogUuid
+            || !isUuid(payload.value(QStringLiteral("reservation_uuid")).toString())
+            || !isNonNegativeInteger(expectedValue)
+            || expectedValue.toInteger() < 1
+            || expectedValue.toInteger() > std::numeric_limits<int>::max()
+            || !isNonNegativeInteger(correctedValue)
+            || correctedValue.toInteger() < 1
+            || correctedValue.toInteger() > std::numeric_limits<int>::max()
+            || !payload.value(QStringLiteral("reason")).isString()
+            || reason.trimmed().isEmpty() || reason.size() > 500) {
+            sendError(socket, protocolVersion, requestId,
+                      QStringLiteral("INVALID_MESSAGE"),
+                      QStringLiteral("adjust_serial payload is invalid."));
+            return;
+        }
+        QString error;
+        if (!m_repository.adjustSerialReservation(
+                session->activeLogUuid, session->stationUuid,
+                payload.value(QStringLiteral("reservation_uuid")).toString(),
+                static_cast<int>(expectedValue.toInteger()),
+                static_cast<int>(correctedValue.toInteger()), reason, &error)) {
+            const QString code = error.startsWith(QStringLiteral("SERIAL_CHANGED"))
+                ? QStringLiteral("SERIAL_CHANGED")
+                : error.startsWith(QStringLiteral("SERIAL_UNAVAILABLE"))
+                    ? QStringLiteral("SERIAL_UNAVAILABLE")
+                    : error.startsWith(QStringLiteral("UNKNOWN_LOG"))
+                        ? QStringLiteral("UNKNOWN_LOG")
+                        : QStringLiteral("INTERNAL_ERROR");
+            sendError(socket, protocolVersion, requestId, code, error);
+            return;
+        }
+        sendMessage(socket, protocolVersion, requestId,
+                    QStringLiteral("serial_adjusted"),
+                    QJsonObject{
+                        {QStringLiteral("log_uuid"), session->activeLogUuid},
+                        {QStringLiteral("reservation_uuid"),
+                         payload.value(QStringLiteral("reservation_uuid"))},
+                        {QStringLiteral("previous_serial"), expectedValue},
+                        {QStringLiteral("corrected_serial"), correctedValue},
+                        {QStringLiteral("reason"), reason.trimmed()}
+                    });
+        return;
+    }
+
     if (type == QStringLiteral("ack_revision")) {
         if (!session->permissions.contains(QStringLiteral("read"))) {
             sendError(socket, protocolVersion, requestId,
@@ -1454,6 +1706,30 @@ void SyncServer::sendMessage(QSslSocket *socket, int protocolVersion,
         return;
     }
     socket->write(frame);
+}
+
+void SyncServer::notifyLogRevision(const QString &logUuid, qint64 revision)
+{
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        ClientSession *session = it.value();
+        QSslSocket *socket = it.key();
+        if (!session->authenticated || !session->tlsReady
+            || session->activeLogUuid != logUuid
+            || !session->permissions.contains(QStringLiteral("read"))
+            || !session->capabilities.contains(
+                QStringLiteral("event_notifications"))
+            || session->lastNotifiedRevision >= revision
+            || socket->state() != QAbstractSocket::ConnectedState) {
+            continue;
+        }
+        sendMessage(socket, session->protocolVersion, QString(),
+                    QStringLiteral("event_available"),
+                    QJsonObject{
+                        {QStringLiteral("log_uuid"), logUuid},
+                        {QStringLiteral("current_revision"), revision}
+                    });
+        session->lastNotifiedRevision = revision;
+    }
 }
 
 void SyncServer::sendError(QSslSocket *socket, int protocolVersion,

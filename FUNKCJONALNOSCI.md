@@ -46,8 +46,27 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 - Układ operatorski z formularzami QSO, tabelą logu i panelami bandmapy, CW oraz informacji contestu; panele można zarządzać z menu, a ich układ jest zapamiętywany.
 - Dwa panele wejściowe dla SO2V/SO2R, obsługa klawiatury i wskaźniki dupe/mult.
 
+## Synchronizacja sieciowa i status stacji
+
+- Domyślny tryb Local oraz opcjonalne Client i GUI Host; oddzielny serwer headless `contest_logger_server`. Każda instalacja używa własnej bazy SQLite, bez współdzielenia pliku przez sieć.
+- TCP/TLS z weryfikacją certyfikatu/nazwy serwera, tokenami stacji i uprawnieniami `read`, `write`, `admin`; dodatkowe CA i opt-in autostart Client/Host.
+- Opcjonalny zapis tokenu Clienta w Windows Credential Manager lub Linux Secret Service przez `secret-tool`. Plik poświadczeń serwera jest zarządzany oddzielnie przez administratora.
+- Trwały outbox, idempotentny replay, synchronizacja przyrostowa, snapshot, retencja zdarzeń i powiadomienia push z pollingiem awaryjnym.
+- Dołączanie do centralnego logu, tworzenie logu przez administratora oraz addytywne scalanie/import lokalnego logu z historią rezerwacji i audytem.
+- Klient tylko do odczytu oraz porównywanie konfliktów QSO: przyjęcie serwera, ponowienie lokalnej zmiany lub ręczne scalanie pól z trwałym audytem.
+- Centralne rezerwacje numerów seryjnych, lokalny cache i trwała kolejka żądań; korekta niewykorzystanej rezerwacji przez administratora z uzasadnieniem. Nowe numery wymagają serwera; potwierdzona rezerwacja pozostaje używalna offline.
+- **Options → Network status and queue...** pokazuje stan połączenia, rewizje, ostatni kontakt, outbox, konflikty i rezerwacje oraz listę aktywnie podłączonych stacji wybranego logu.
+- Lista stacji prezentuje nazwę komputera, znak stacji, operatora i stan, z wyróżnieniem własnej stacji. Odświeżanie co 5 sekund i ręcznie; zmiana operatora bez ponownego łączenia. UUID pozostają identyfikatorami protokołu, a nie kolumnami tabeli. Brak opisów u starszych klientów/serwerów jest oznaczany jako **Not provided**.
+- Metryki administratora obejmują klientów, lag, liczniki outboxa i czasy transakcji; eksport diagnostyczny może dołączyć pobrane metryki bez tokenów.
+- Backup przed migracją centralnej bazy i serwerowe `--restore-backup`; [procedura operacyjna](docs/NETWORKING_OPERATIONS.md) opisuje instalację, TLS/firewall, rotację tokenów, backup/restore, aktualizacje i utratę hosta.
+
+Synchronizacja nie jest jeszcze potwierdzona do pracy w zawodach. Pozostają
+pełne scenariusze awaryjne, próba odtworzenia w środowisku docelowym i pilotaż
+wielostacyjny; szczegóły w [NETWORKING.md](NETWORKING.md) i [TODO.md](TODO.md).
+
 ## Zakres potwierdzony testami
 
 - Testy Qt obejmują logowanie i edycję QSO przez UI, walidację, duplikaty i odświeżanie tabeli.
 - CAT można testować bez radia przez Mock, Hamlib Dummy i lokalny `rigctld`; DX Cluster ma testy z lokalnym symulatorem Telnet.
+- Testy synchronizacji obejmują trzy niezależne bazy klientów, konflikty, restart/retry, rezerwacje oraz centralny backup/restore. Testy UI i protokołu sprawdzają listę stacji, opisy komputera/operatora, zmianę operatora, rozłączenie, klienta tylko do odczytu i starszego klienta bez opisów.
 - CI buduje i testuje projekt na Linuxie i Windowsie. Testy programowe nie zastępują prób na fizycznym radiu, portach szeregowych ani kontrolerach audio/PTT.

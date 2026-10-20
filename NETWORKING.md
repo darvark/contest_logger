@@ -1,28 +1,30 @@
 ## Stan implementacji
 
-Stan poniżej opisuje kod dostępny w bieżącym worktree na 2026-10-19, a nie
+Stan poniżej opisuje kod dostępny w bieżącym worktree na 2026-10-20, a nie
 gotowość wydania. Bieżące zmiany pozostają niezacommitowane. Tryb Local jest
-domyślny, Client wymaga ręcznego połączenia, a Host można uruchomić ręcznie z
-aplikacji. Import pełnego logu pozostaje dostępny na stacji Host. Synchronizacja
-nie jest gotowa do użycia w zawodach z powodu braku ręcznego scalania, retencji
-zdarzeń i pełnego testu awaryjnego; punktacja i duplikaty są już walidowane
-centralnie według obsługiwanych reguł definicji contestu.
+domyślny, Client i Host można uruchomić ręcznie lub przez jawnie włączony
+autostart. Import pełnego logu pozostaje dostępny na stacji Host. Synchronizacja
+nie jest gotowa do użycia w zawodach z powodu brakującego pełnego testu
+awaryjnego; retencja zdarzeń jest wdrożona, a punktacja i duplikaty są
+walidowane centralnie według obsługiwanych reguł definicji contestu.
 
 | Etap | Stan w kodzie |
 |---|---|
 | NET-001 | Kontrakt awarii, retry, wersji protokołu i nieznanego logu opisany; część scenariuszy ma testy integracyjne, nie wszystkie scenariusze awarii są automatycznie odtwarzane. |
-| NET-002 | Polityki zatwierdzone; pule offline, pełna regułowa deduplikacja i ręczne scalanie konfliktów nie są wdrożone. |
-| NET-003–004 | UUID, wersje QSO, lokalny outbox, konflikty i kursory wdrożone; baza ma schemat v13. |
+| NET-002 | Polityki zatwierdzone; pule offline i pełna regułowa deduplikacja nie są wdrożone. Ręczne scalanie konfliktów jest dostępne w aplikacji. |
+| NET-003–004 | UUID, wersje QSO, lokalny outbox, konflikty i kursory wdrożone; baza ma schemat v17. |
 | NET-005–006 | Headless centralny serwer i transakcyjne repozytorium zdarzeń/revizji wdrożone. |
-| NET-007 | Serwer TLS/TCP, API synchronizacji, rezerwacji seriali, admin-only metryk, tworzenia logu i importu historii seriali wdrożone. Centralny zapis przelicza punkty i stosuje `dupe_key`; reguły zależne od CTY wymagają centralnego `wl_cty.dat`. Push eventów pozostaje poza implementacją. |
-| NET-008–009 | Synchronizacja przyrostowa, snapshoty oraz atomowe zapisy/edycje/usunięcia z outboxem wdrożone; podstawowe ręczne połączenie Client i rozstrzyganie konfliktu (przyjęcie serwera lub ponowienie lokalnej edycji) są dostępne, bez ręcznego scalania. |
-| NET-010 | Częściowo wdrożone w niezacommitowanych zmianach worktree: operatorskie rezerwowanie/anulowanie seriali, kontrola band/mode, walidacja i atomowa konsumpcja z QSO, audyt, cache oraz trwała kolejka żądań; brakuje administracyjnej korekty i pełnego statusu/offline UX. |
-| NET-011 | Częściowo wdrożone: ręczne połączenie Client przez zweryfikowane TLS oraz ręczne uruchomienie/wyłączenie Host z UI. Host używa wskazanych plików PEM/poświadczeń i oddzielnej centralnej bazy. Read-only jest obsługiwany. Brakuje bezpiecznego magazynu sekretów, automatycznego startu Client/Host i konfiguracji niestandardowego CA. |
-| NET-012 | Częściowo wdrożone: status/outbox, ręczna synchronizacja, retry, eksport diagnostyczny, porównanie konfliktu, decyzje accept-server/keep-local z audytem oraz tryb Read-only. Brakuje ręcznego scalania i trwałego heartbeat/ostatniego kontaktu. |
+| NET-007 | Serwer TLS/TCP, API synchronizacji, rezerwacji seriali, admin-only metryk, tworzenia logu i importu historii seriali wdrożone. Centralny zapis przelicza punkty i stosuje `dupe_key`; reguły zależne od CTY wymagają centralnego `wl_cty.dat`. Powiadomienia `event_available` są wysyłane po commicie do klientów deklarujących capability; polling pozostaje ścieżką awaryjną. |
+| NET-008–009 | Synchronizacja przyrostowa, snapshoty oraz atomowe zapisy/edycje/usunięcia z outboxem wdrożone; podstawowe ręczne połączenie Client oraz decyzje konfliktu: przyjęcie serwera, ponowienie lokalnej edycji lub ręczne scalanie pól z kontrolą wersji i audytem. |
+| NET-010 | Rezerwowanie/anulowanie seriali, kontrola band/mode, walidacja i atomowa konsumpcja z QSO, lokalny cache i trwała kolejka żądań wdrożone. Admin może korygować niewykorzystaną rezerwację z potwierdzeniem, wymaganym powodem i audytem. UI pokazuje rezerwacje i żądania offline; nowych numerów nie przydziela się bez serwera. |
+| NET-011 | Client może zapisać token w systemowym magazynie sekretów (Windows Credential Manager lub Linux Secret Service przez `secret-tool`), skonfigurować dodatkowy certyfikat CA i opcjonalnie łączyć się automatycznie z zapisanym logiem. Host może opcjonalnie uruchamiać się automatycznie z zapisanymi ścieżkami PEM i plikiem poświadczeń. Local pozostaje trybem domyślnym; hostowy plik JSON nadal jest dostarczany i zarządzany przez administratora. |
+| NET-012 | Częściowo wdrożone: status/outbox, lista podłączonych stacji aktywnego logu z nazwą komputera, znakiem i operatorem, ręczna synchronizacja, retry, eksport diagnostyczny (w tym ostatnie pobrane metryki serwera), porównanie i ręczne scalanie konfliktu, decyzje accept-server/keep-local z audytem oraz tryb Read-only. Lista stacji odświeża się co 5 sekund i ręcznie; zmiana operatora nie wymaga reconnectu. UUID pozostają identyfikatorami protokołu; ostatni kontakt klienta i heartbeat serwera są trwałe. |
 | NET-013 | Główne przepływy wdrożone: Client może utworzyć centralny log (admin), dołączyć kopię lokalną albo addytywnie scalić istniejący lokalny log; historia rezerwacji seriali jest przenoszona przed synchronizacją QSO. Host nadal obsługuje walidowany import porcjami z podglądem i audytem wznowienia. Konflikty QSO nie są automatycznie nadpisywane; są przekazywane do istniejącego przepływu decyzji konfliktu. |
 | NET-014 | Test trzech klientów, równoczesnych edycji, restartu klienta i serwera z trwałym outboxem oraz retry po utraconej odpowiedzi wdrożony; nadal brakuje awarii na każdym kroku i restartu w trakcie aktywnego transferu. |
-| NET-015 | Częściowo wdrożone: endpoint metryk serwera dla administratora raportuje stan rewizji/eventów/operacji, liczbę klientów, lag kursora, QSO i rezerwacji. Brakuje czasu transakcji, metryk outbox/conflict per klient, retencji eventów i kompletnej procedury operacyjnej. |
-| NET-016 | Nieukończone: Local pozostaje domyślny, a Client wymaga jawnego połączenia; pilotaż, pomiary wydajności i kryteria wydania wymagają środowiska wdrożeniowego. |
+| NET-015 | Wdrożono diagnostykę i procedurę operacyjną dla instalacji, firewall/TLS, rotacji tokenów, backupu/restore, aktualizacji i utraty hosta. Serwer CLI obsługuje `--restore-backup`; test centralny weryfikuje rewizję, QSO, rezerwację serialu, replay idempotentny i zachowanie poprzedniej bazy. Pełny test operatorski należy wykonać przed wdrożeniem produkcyjnym. Retencja zdarzeń jest opisana w NET-008. |
+| NET-016 | Nieukończone: Local pozostaje domyślny, a Client wymaga jawnej konfiguracji (autostart jest opt-in); pilotaż, pomiary wydajności i kryteria wydania wymagają środowiska wdrożeniowego. |
+
+Szczegółowa procedura instalacji i odzyskiwania: [Operacje serwera synchronizacji](docs/NETWORKING_OPERATIONS.md).
 
 ## Wniosek
 Dla założenia jeden centralny log, wiele stacji nie kopiowałbym dokładnie modelu żadnego z trzech loggerów. N1MM dobrze synchronizuje peer-to-peer, ale każdy komputer ma własną kopię logu i ręczna resynchronizacja jest potrzebna m.in. po edycjach lub usunięciach przy rozłączonej stacji. DXLog wspiera komunikację UDP oraz client-server, ale jego dokumentacja ostrzega, że sieć UDP może gubić pakiety; osobny Number Server przydziela numery seryjne. TLF dystrybuuje między węzłami log, numery, dane packet/frequency i czas przez TCP/IP, a instrukcja opisuje też osobną komendę synchronizacji logu.N1MM: multi-computer · N1MM: Network Status · DXLog: Additional Information · DXLog: Menu Options · TLF: manual · TLF: man page
@@ -31,12 +33,13 @@ Proponuję więc centralny serwer jako jedyne źródło prawdy, z lokalną bazą
 
 Stan obecny loggera
 Aplikacja nadal obsługuje zwykłą pracę lokalną przez SQLite, a repozytorium
-zawiera transakcje, backup i migracje schematu (obecnie v13). Dostępny jest
+zawiera transakcje, backup i migracje schematu (obecnie v17). Dostępny jest
 headless `contest_logger_server` oraz jawnie uruchamiany Host w UI, oba z
 TLS/TCP i oddzielnym centralnym SQLite. Aplikacja ma także klienta
 synchronizacji przyrostowej, hostowy import lokalnego logu i dołączanie Clienta
 do dostępnego centralnego logu bez lokalnego odpowiednika. Nie należy współdzielić
-pliku SQLite przez udział sieciowy; tryb Host jest ręczny i kończy się razem
+pliku SQLite przez udział sieciowy; tryb Host jest uruchamiany ręcznie albo
+przez opt-in autostart i kończy się razem
 z aplikacją, więc nie zastępuje trwałej usługi serwerowej.
 
 Proponowana architektura
@@ -54,7 +57,7 @@ Konflikty i numery seryjne
 Równoczesne nowe QSO: serwer w jednej transakcji sprawdza duplikaty zgodnie z regułami konkursu, przydziela numer, zapisuje QSO i publikuje rewizję.
 Edycja lub usunięcie: nie używać „ostatni zapis wygrywa”. Każda zmiana wskazuje oczekiwaną wersję QSO; jeśli ktoś wcześniej zmienił ten rekord, serwer zwraca konflikt i zachowuje obie wersje do rozstrzygnięcia. Usunięcie powinno być tombstone’em w historii, nie fizycznym skasowaniem.
 Numery seryjne: stacja rezerwuje numer z serwera przed jego wysłaniem korespondentowi. Numer pozostaje zużyty nawet, jeśli QSO nie zostanie zapisane — w ten sposób nie da się go przydzielić innej stacji i rozminąć wymiany z logiem. Rezerwacja i zapis QSO muszą być idempotentne i audytowalne.
-Tryb offline: tu jest ważny kompromis. Gdy kilka rozłączonych stacji ma nadawać globalnie kolejne numery seryjne, nie da się jednocześnie zagwarantować unikalności i ciągłości bez wcześniejszej koordynacji. Domyślnie proponuję więc blokować rezerwację i zapis wymagający numeru, gdy serwer jest niedostępny. Opcjonalne pule numerów rezerwowane wcześniej pozwolą pracować offline bez kolizji, ale mogą tworzyć luki. Dla logów bez wspólnej numeracji można dopuścić kolejkę offline i rozwiązywać duplikaty przy synchronizacji.
+Polityka offline dla globalnych numerów seryjnych: nie przydzielać numerów lokalnie i nie logować QSO wymagającego nowej rezerwacji bez potwierdzenia serwera. Żądanie rezerwacji może być trwale zakolejkowane offline, ale nie oznacza to przydziału numeru; UI jawnie pokazuje oczekiwanie i blokuje zapis. Wcześniej potwierdzona, niewykorzystana rezerwacja pozostaje używalna offline. Pule offline nie są obecnie implementowane ani aktywowane — można je rozważyć osobno, wyłącznie jako jawnie przydzielone zakresy z akceptacją luk.
 Opcje konfiguracji dla operatora
 W ustawieniach logu lub w sekcji Sieć:
 
@@ -113,8 +116,10 @@ niejednoznacznie pól ani stosować cichych fallbacków.
   big-endian, po niej dokładnie tyle bajtów kompaktowego JSON UTF-8. Długość
   nie obejmuje prefiksu. Zerowa długość, niepoprawny UTF-8/JSON i ramka większa
   niż 1 MiB powodują zamknięcie połączenia.
-- Każde żądanie ma jedną odpowiedź skorelowaną przez `request_id`. Serwer może
-  przesłać asynchroniczne zdarzenie `event_batch` z `request_id: null`.
+- Każde żądanie ma jedną odpowiedź skorelowaną przez `request_id`. Klient
+  deklarujący capability `event_notifications` może otrzymać asynchroniczne
+  `event_available` z `request_id: null`; zawiera ono tylko UUID logu i
+  najwyższą rewizję, więc klient pobiera właściwe zdarzenia przez `get_changes`.
   Mutacje od jednej stacji są wysyłane kolejno, bez równoległych batchy.
 - Limit batcha mutacji to 100 operacji, a limit strony zmian to 500 eventów.
   Timeout odpowiedzi wynosi 30 sekund. Heartbeat jest wysyłany co 15 sekund;
@@ -265,8 +270,8 @@ instalacji/stacji, etykieta stacji pozostaje osobnym edytowalnym polem;
 - Event zawiera `log_uuid`, `revision`, `event_uuid`, `operation_uuid`,
   `qso_uuid`, `qso_version`, `kind` (`qso.upsert` lub `qso.delete`),
   `station_uuid`, `committed_at_utc`; `qso.upsert` ma pełny obraz QSO,
-  a `qso.delete` tombstone. Asynchroniczne `event_batch` używa tego samego
-  schematu zakresu i eventów co odpowiedź `changes`.
+  a `qso.delete` tombstone. Powiadomienie push nie przenosi eventów i nigdy
+  nie zastępuje pobrania, atomowego zastosowania ani potwierdzenia rewizji.
 - Klient wysyła `ack_revision` dopiero po zastosowaniu kompletnej, ciągłej
   strony eventów w jednej lokalnej transakcji razem z aktualizacją kursora.
   Serwer zapisuje maksymalny ack per para `(station_uuid, log_uuid)`. Ack
@@ -289,7 +294,8 @@ instalacji/stacji, etykieta stacji pozostaje osobnym edytowalnym polem;
 | Żądanie | Payload | Odpowiedź |
 |---|---|---|
 | `hello` | zakres wersji i `capabilities` | `hello_ack` z wybraną wersją |
-| `authenticate` | `station_uuid`, `token` | `authenticated` |
+| `authenticate` | `station_uuid`, `token`; opcjonalnie `station_identity` po uzgodnieniu capability | `authenticated` |
+| `set_station_identity` | `computer_name`, `station_callsign`, `operator_name` (capability `station_identity`) | `station_identity_updated` |
 | `list_logs` | brak lub filtr uprawnień | `logs` z UUID, nazwą, definicją i rewizją |
 | `create_log` (admin) | `log`, `definition_yaml` | `log_created` |
 | `import_serial_reservations` (admin) | `log_uuid`, `reservations[]` | `serial_history_imported` |
@@ -300,23 +306,31 @@ instalacji/stacji, etykieta stacji pozostaje osobnym edytowalnym polem;
 | `get_snapshot` | `log_uuid`, `offset`, `limit`, opcjonalny `snapshot_revision` | `snapshot_page` |
 | `ack_revision` | `log_uuid`, `revision` | `acknowledged` |
 | `get_status` | `log_uuid` | `status` z rewizją, kursorem i aktywnymi stacjami |
-| `get_metrics` | `log_uuid` (wymaga uprawnienia admin) | `metrics` z rewizją, liczbą eventów/operacji/stacji, lagiem kursora, QSO i rezerwacjami |
+| `get_metrics` | `log_uuid` (wymaga uprawnienia admin) | `metrics` z rewizją, eventami/operacjami, klientami i ich statusem, czasem transakcji/historią, QSO i rezerwacjami |
 | `reserve_serial` | `log_uuid`, `reservation_uuid`, `band`, `mode` | `serial_reserved` |
 | `cancel_serial` | `log_uuid`, `reservation_uuid` | `serial_cancelled` |
 | `get_serial_reservations` | `log_uuid` (wymaga uprawnienia admin) | `serial_reservations` |
-| `heartbeat` | `session_uuid`, `last_applied_revision` | `heartbeat_ack` |
-| asynchroniczne `event_batch` | zakres rewizji i eventy | bez odpowiedzi |
+| `adjust_serial` (admin) | `log_uuid`, `reservation_uuid`, `expected_serial`, `corrected_serial`, `reason` | `serial_adjusted` |
+| `heartbeat` | `session_uuid`, `last_applied_revision`; opcjonalnie `pending_count`, `error_count`, `conflict_count` | `heartbeat_ack` |
+| asynchroniczne `event_available` | `log_uuid`, `current_revision` (dla capability `event_notifications`) | bez odpowiedzi; klient pobiera zmiany przez `get_changes` |
 | odpowiedź/zdarzenie `error` | `code`, `message`, `retryable`, opcjonalny `context` | błąd skorelowany z żądaniem lub asynchroniczny |
 
 `reserve_serial` rezerwuje numer w zakresie zdefiniowanym przez log (globalny,
 pasmo, emisja lub pasmo+emisja). `reservation_uuid` jest kluczem idempotencji;
 retry zwraca tę samą rezerwację. Rezerwacja jest trwała nawet, gdy QSO nie
 zostanie zapisane.
+`adjust_serial` może zmienić tylko niewykorzystaną rezerwację i wymaga
+uzasadnienia. Oczekiwany numer chroni przed nadpisaniem równoległej zmiany;
+kolizja z inną rezerwacją lub zużytym numerem jest odrzucana.
 
 `get_metrics` jest dostępne wyłącznie dla uwierzytelnionej stacji z uprawnieniem
-`admin` i dotyczy wybranego logu. Metryki są odczytem bieżących liczników, a nie
-systemem monitoringu: nie przechowują historii próbek, czasu transakcji ani
-pending/error outbox klienta.
+`admin` i dotyczy wybranego logu. Heartbeat aktualizuje trwale czas kontaktu,
+kursor i ostatnio zgłoszone liczniki outboxa stacji; liczby pending/error/conflict
+pochodzą z klienta i są próbkowane przy heartbeatzie. Serwer mierzy czas
+transakcji synchronizacji, zapisuje wynik (`success`, `error`, `conflict`) oraz
+liczbę operacji. Odpowiedź zawiera agregaty oraz do 100 najnowszych transakcji;
+baza zachowuje maksymalnie 1000 rekordów na log. Eksport diagnostyczny klienta
+dołącza ostatni zestaw metryk, jeśli administrator wcześniej go pobrał.
 
 Stabilne kody błędów v1: `UNAUTHENTICATED`, `FORBIDDEN`,
 `UNSUPPORTED_PROTOCOL`, `INVALID_MESSAGE`, `MESSAGE_TOO_LARGE`, `UNKNOWN_LOG`,
@@ -414,9 +428,11 @@ QSO/eventów/revizji oraz trwały stan outbox/cursora, a nie tylko kod odpowiedz
 
 **Stan: wdrożono lokalną część etapu.** Migracja v7 oraz typy domenowe
 przechowują UUID logu, stacji i QSO oraz wersję QSO; aktualny schemat bazy to
-v13 (migracje v8–v10 dodają outbox, stan synchronizacji i rezerwacje seriali;
-v11 dodaje trwałą kolejkę żądań rezerwacji, v12 audyt rozstrzygania konfliktów,
-a v13 audyt resumowalnego importu logu).
+migracje v8–v10 dodają outbox, stan synchronizacji i rezerwacje seriali;
+v11 dodaje trwałą kolejkę żądań rezerwacji, v12 audyt konfliktów, v13 audyt
+importu logu, v14 rewizje historii, v15 wynik ręcznego scalania konfliktów,
+v16 audyt administracyjnych korekt rezerwacji, a v17 trwałe liczniki heartbeat
+i historię metryk transakcji.
 Migracja jest transakcyjna, tworzy UUID
 stacji lokalnej, uzupełnia istniejące rekordy i zakłada unikalne indeksy.
 Wersja QSO rośnie przy lokalnej edycji. To nie implementuje jeszcze
@@ -502,7 +518,7 @@ brak powielonej rewizji po retry, konflikt wersji, ponowne użycie klucza
 idempotencji z innym payloadem, tombstone i granice kursora.
 
 Podstawowe API NET-007 jest wdrożone; etap pozostaje otwarty z powodu braku
-push eventów. Obecna implementacja udostępnia handshake v1 i
+powiadomień o wszystkich typach zmian poza QSO. Obecna implementacja udostępnia handshake v1 i
 uwierzytelnianie tokenem, autoryzowaną listę/wybór istniejących logów,
 atomowe batch'e QSO, odczyt stron eventów, ack kursora, heartbeat i status
 logu/stacji. Błąd konfliktu wersji
@@ -523,8 +539,8 @@ Testy repozytorium i integracyjne TLS pokrywają atomowość/idempotencję,
 fragmentowaną ramkę, konflikt wersji, status, odrzucenie nieobsługiwanej wersji,
 limit sesji oraz podstawowe ścieżki rezerwacji seriali.
 
-**NET-007 — Udostępnić API TCP/TLS** *(w toku; podstawowe API i walidacja
-wdrożone, push eventów otwarty)*
+**NET-007 — Udostępnić API TCP/TLS** *(w toku; podstawowe API, walidacja i
+powiadomienia o nowych rewizjach wdrożone)*
 
 - [x] Dodać serwer Qt Network z ograniczoną liczbą równoległych połączeń, limitem
   rozmiaru wiadomości, timeoutem, kontrolą formatu i zamykaniem niepoprawnych
@@ -545,15 +561,18 @@ wdrożone, push eventów otwarty)*
   zastępowane wynikiem serwera.
 - [x] Obsłużyć warunki zależne od CTY przez `wl_cty.dat` w katalogu danych
   serwera; jawnie odrzucać zapis, jeśli wymagane dane lokalizacji są niedostępne.
-- [ ] Dodać push eventów.
+- [x] Dodać powiadomienia push o nowych rewizjach po zatwierdzeniu batcha.
+  Powiadomienie `event_available` jest wysyłane tylko do zalogowanych klientów
+  z capability `event_notifications` i uprawnieniem read; zawiera rewizję
+  nagłówkową. Klient natychmiast pobiera eventy przez `get_changes`, stosuje je
+  atomowo i potwierdza przez `ack_revision`; polling pozostaje fallbackiem.
 - **Pliki orientacyjne:** nowe `include/logger/network/` i `src/network/`,
   aktualizacja `CMakeLists.txt`, testy protokołu i serwera.
 - **Odbiór NET-007:** status i szczegóły konfliktu są wdrożone; test TLS
   potwierdza rollback całego batcha przy konflikcie drugiej operacji, a retry
   idempotentnego batcha nie tworzy dodatkowej rewizji. Rezerwacja seriali jest
   dostępna jako NET-010, a tworzenie logu i import historii jako NET-013;
-  centralne punkty i duplikaty są wyliczane według definicji contestu, a push
-  eventów pozostaje poza implementacją.
+  centralne punkty i duplikaty są wyliczane według definicji contestu.
 
 ### Etap 3 — replikacja klienta
 
@@ -588,10 +607,16 @@ sprawdza pełną, deterministycznie uporządkowaną zawartość. Lokalna podmian
 QSOs i kursora jest jedną transakcją, a lokalne rekordy z nierozstrzygniętym
 outboxem/konfliktem nie są usuwane ani nadpisywane. Niekompletna lub wadliwa
 migawka nie zmienia lokalnej bazy; po przerwaniu klient rozpoczyna pobieranie
-od nowa. Serwer nie prowadzi jeszcze retencji/kompaktowania eventów, więc
-automatyczna ścieżka `SNAPSHOT_REQUIRED` nie jest osiągalna w obecnej
-konfiguracji serwera. Nie ma jeszcze push eventów — nowe zmiany są wykrywane
-przez polling.
+od nowa. Serwer kompaktuje zdarzenia starsze niż 30 dni przy starcie i raz
+dziennie. Usuwa wyłącznie ciągły prefiks potwierdzony przez wszystkie stacje
+aktywne w okresie retencji; heartbeat aktualizuje ich aktywność i kursor.
+Klient z wygasłym kursorem otrzymuje `SNAPSHOT_REQUIRED`. Rewizja każdej wersji
+QSO jest przechowywana niezależnie od eventu, więc snapshoty przypięte do
+rewizji pozostają poprawne po kompaktowaniu. Historia QSO i wyniki operacji
+idempotentnych nie są usuwane. Klienci deklarujący `event_notifications`
+otrzymują `event_available` po zatwierdzeniu nowych zdarzeń i od razu pobierają
+je standardową ścieżką przyrostową. Pięciosekundowy polling pozostaje fallbackiem
+dla utraconego powiadomienia lub klientów nieobsługujących capability.
 Test integracyjny pokrywa wysłanie outbox, lokalne potwierdzenie, własny event,
 odbiór QSO z innej stacji, atomowy cursor i potwierdzenie go na serwerze.
 Testy repozytorium i protokołu sprawdzają snapshot przypięty do starszej
@@ -626,8 +651,7 @@ zostały przestawione przy równych timestampach. Test TLS obejmuje replikację
 tombstone po usunięciu z klienta.
 
 Podstawowe połączenie Client można skonfigurować z UI (szczegóły NET-011).
-Obsługa konfliktów nadal przechowuje payloady do ręcznego rozstrzygnięcia, bez
-dialogu scalania.
+Obsługa konfliktów udostępnia ręczne scalanie pól z audytem.
 
 **NET-010 — Dodać transakcyjne rezerwowanie seriali**
 
@@ -637,15 +661,17 @@ dialogu scalania.
 - Serwer rezerwuje numer w transakcji z UUID rezerwacji i stacji. Rezerwacja
   jest trwała nawet po anulowaniu QSO; retry tego samego UUID zwraca ten sam
   numer.
-- Klient utrzymuje widoczny stan rezerwacji. Przy utracie połączenia serial
-  globalny nie może zostać wymyślony lokalnie; blokowanie logowania lub pulę
-  offline określają NET-002.
+- Klient utrzymuje widoczny stan rezerwacji i żądań oczekujących. Przy utracie
+  połączenia serial globalny nie może zostać wymyślony lokalnie; numer i zapis
+  wymagającego go QSO są zablokowane, dopóki serwer nie potwierdzi rezerwacji.
+  Wcześniejsza potwierdzona rezerwacja może zostać użyta offline.
 - Dodać audyt zużytych, anulowanych i niewykorzystanych numerów oraz narzędzia
-  administratora do korekty z potwierdzeniem.
+  administratora do korekty niewykorzystanej rezerwacji z potwierdzeniem,
+  uzasadnieniem i audytem.
 - **Odbiór:** równoczesne żądania z wielu stacji nie dostają powtórzonego
   numeru; wysłany serial jest dokładnie tym zapisanym w QSO.
 
-**Stan: częściowa implementacja w bieżącym worktree; NET-010 pozostaje w toku.**
+**Stan: podstawowa obsługa wdrożona; pula offline pozostaje celowo wyłączona.**
 Definicje contestu walidują `serial_scope` (`global`, `band`, `mode`,
 `band_mode`) i `serial_server_required`; numer startowy oraz szerokość wynikają
 z definicji generowanego pola serialowego. Serwer rezerwuje numery transakcyjnie,
@@ -656,7 +682,13 @@ stacji/logu/zakresu i identycznego numeru w wysłanym polu wymiany; zużycie
 rezerwacji i zapis QSO są atomowe. Endpointy rezerwacji, anulowania i odczytu
 audytu są dostępne przez TLS; test protokołu sprawdza retry, trwałe anulowanie,
 zużycie serialu przez QSO, równoległe żądania dwóch stacji oraz uprawnienia
-administratora.
+administratora. Administrator może skorygować numer wyłącznie niewykorzystanej
+rezerwacji: wymagane są oczekiwany poprzedni numer, potwierdzenie w UI i powód.
+Serwer w jednej transakcji sprawdza bieżący status/wersję oraz kolizję w zakresie,
+zmienia numer i zapisuje stację administratora, obie wartości, powód i czas w
+`serial_reservation_adjustments`; numery użyte lub anulowane pozostają
+niezmienne. Przy niezgodności aktualnego numeru korekta jest odrzucana jako
+`SERIAL_CHANGED`.
 
 Przy aktywnej synchronizacji `SyncClient` zapisuje potwierdzoną rezerwację
 w lokalnym `serial_reservations`, oznacza ją jako anulowaną po potwierdzeniu
@@ -670,8 +702,14 @@ band/mode, logu, stacji i statusu `reserved`. Niewykorzystaną rezerwację możn
 anulować z potwierdzeniem; UI ostrzega, że numer zostanie trwale zużyty,
 blokuje użycie serialu w QSO podczas oczekiwania na odpowiedź i komunikuje
 potwierdzenie lub błąd. Żądanie anulowania korzysta z trwałej kolejki klienta.
-Nie ma jeszcze pełnego widoku stanu oczekującego/offline ani administracyjnej
-korekty numeracji z potwierdzeniem. Serwer blokuje
+Network Status pokazuje cache rezerwacji, stan, stację/QSO oraz wszystkie
+oczekujące żądania; żądanie offline jest jawnie oznaczone „Queued offline” i
+informuje, że numer nie został przydzielony. Administrator może pobrać pełną
+listę centralnych rezerwacji i korygować wyłącznie status `reserved`.
+Rezerwacja żądana offline jest wysyłana po reconnectcie z tym samym UUID;
+numer pozostaje pusty, a QSO nie można zapisać przed potwierdzeniem. Pule
+offline nie są aktywowane — bezpieczna polityka wymaga dostępności serwera dla
+nowych numerów. Serwer blokuje
 `qso.create` bez prawidłowej
 rezerwacji tylko dla logów z `serial_server_required: true`; nie oznacza to,
 że UI już zapewnia rezerwację przed nadaniem.
@@ -700,17 +738,22 @@ obsługiwane w trybie zgodności, bez regułowej walidacji punktacji i dupe.
   logów; przed połączeniem klient pokazuje, który log zostanie użyty.
 
 **Stan: częściowo wdrożone w bieżącym worktree.** Menu Options udostępnia
-połączenie Client przez zweryfikowane TLS oraz ręczne uruchomienie Host na
-wybranej stacji. Host wskazuje bind address, port, łańcuch certyfikatu PEM,
+połączenie Client przez zweryfikowane TLS, opcjonalne zapisanie tokenu Client
+w Windows Credential Manager lub Linux Secret Service (`secret-tool`), dodatkowe
+CA oraz opcjonalny automatyczny start Clienta dla istniejącego lokalnego logu.
+Host można uruchomić ręcznie lub włączyć jego autostart na podstawie zapisanych
+ścieżek; Local pozostaje domyślnym trybem. Host wskazuje bind address, port,
+łańcuch certyfikatu PEM,
 niezaszyfrowany klucz RSA PEM i plik poświadczeń; plik musi zawierać UUID
 lokalnej stacji z uprawnieniami `read`, `write` i `admin`. Centralna baza jest
 oddzielna, zapisywana w lokalnym katalogu danych aplikacji i blokowana przed
 równoczesnym drugim procesem. Host można zatrzymać z menu. Ścieżki konfiguracji
-zapisywane są w `QSettings`, ale zawartość tokenu nie jest kopiowana do ustawień.
-Client może synchronizować istniejący lokalny log albo pobrać listę dostępnych
-logów centralnych i utworzyć lokalną kopię z wybranym UUID.
-Automatyczny start Host/Client, magazyn kluczy systemu operacyjnego i
-niestandardowe CA pozostają niezaimplementowane. Uprawnienia `read` bez `write`
+zapisywane są w `QSettings`, ale token Clienta nie jest tam kopiowany. Plik
+poświadczeń Host nadal pozostaje plikiem dostarczanym przez administratora;
+ta ścieżka nie migruje tokenów serwera do magazynu sekretów. Client może
+synchronizować istniejący lokalny log albo pobrać listę dostępnych logów
+centralnych i utworzyć lokalną kopię z wybranym UUID. Linux wymaga narzędzia
+`secret-tool` i skonfigurowanego Secret Service do zapisu tokenu. Uprawnienia `read` bez `write`
 są rozpoznawane po uwierzytelnieniu; serwer nadal autoryzuje każdą operację,
 a klient nie wysyła zaległego outboxu ani żądań rezerwacji dla takiej stacji.
 
@@ -737,21 +780,45 @@ może wymusić synchronizację, ponowić wybraną operację w stanie `failed`
 i wyeksportować raport JSON z metadanymi oraz błędami; raport nie zawiera
 tokenu ani payloadów QSO. Outbox nie ma akcji czyszczenia.
 
+Panel **Options > Network status and queue...** zawiera również tabelę
+podłączonych stacji dla wybranego logu: nazwę komputera, znak stacji,
+operatora i stan połączenia (z oznaczeniem własnej stacji). Dane są pobierane przez
+`get_status` po otwarciu, po zmianie stanu połączenia, co 5 sekund oraz
+przyciskiem **Refresh**. Wymagane jest tylko uprawnienie `read`, a nie
+`admin`. Przy aktywnym GUI Host panel może odczytać tę samą listę bezpośrednio
+z lokalnego serwera. Lista obejmuje wyłącznie uwierzytelnione sesje z wybranym
+logiem, nie wszystkie historycznie zarejestrowane stacje; po rozłączeniu
+Clienta bez aktywnego Hosta jest czyszczona i oznaczana jako niedostępna.
+Błędy pobrania lub nieprawidłowa odpowiedź są pokazywane nad tabelą.
+Rozszerzenie capability `station_identity` pozwala wysłać w `authenticate`
+opcjonalny obiekt `station_identity` z polami `computer_name`,
+`station_callsign`, `operator_name`. Wszystkie trzy pola są stringami
+do 255 znaków bez znaków sterujących; mogą być puste. Klient pobiera nazwę
+komputera z systemu, a znak/operatora z ustawień stacji. Żądanie
+`set_station_identity` aktualizuje te same opisy w uwierzytelnionej sesji,
+np. po zmianie operatora; nie wymaga `admin`. Nie zmienia UUID ani uprawnień.
+Opisy są deklarowane przez klienta, nie są zaufanym identyfikatorem.
+Serwer dodaje je do `connected_stations` obok niezmienionych `station_uuid`
+i `session_uuid`; nie zapisuje ich jako danych uwierzytelniających.
+Nowy klient wysyła opisy tylko po uzgodnieniu capability, więc współpracuje
+ze starym serwerem; starszy klient może nadal wysłać samo UUID/token.
+Brak opisu jest prezentowany jako `Not provided`, nigdy jako UUID w tabeli.
+
 Status rozróżnia Offline, Connecting, Connected, Syncing, Pending i Conflict.
 Połączenie z uprawnieniem tylko `read` jest oznaczane jako Read-only; UI
 blokuje dodawanie/edycję/usuwanie QSO i rezerwowanie/anulowanie seriali.
 Klient pozostawia istniejące lokalne operacje w outboxie i pobiera zdalne
 zmiany. Ta blokada jest egzekwowana również przez uprawnienia serwera.
-Wybrany konflikt można otworzyć w widoku tylko do odczytu, który porównuje
-pola lokalnego i serwerowego payloadu. Operator może atomowo zaakceptować
-wersję serwera albo zachować lokalną zmianę jako nową edycję opartą o ostatnią
-znaną wersję serwera; obie decyzje zapisują payloady i wybór w trwałym audycie.
+Wybrany konflikt można otworzyć w widoku porównującym pola lokalnego i
+serwerowego payloadu. Operator może wybrać lokalną lub serwerową wartość każdego
+pola i zapisać scalony wynik jako nową edycję opartą o ostatnią znaną wersję
+serwera, zaakceptować całą wersję serwera albo zachować lokalną zmianę. Decyzja,
+obie wersje wejściowe i scalony payload trafiają do trwałego audytu.
 Przyjęcie serwera aktualizuje lokalny QSO i kończy konflikt. Zachowanie lokalnej
 zmiany zamyka starą operację i tworzy nową operację `qso.update` z oczekiwaną
 wersją z serwera, więc równoległa późniejsza edycja nadal zostanie wykryta jako
 konflikt. Brak miejsca na lokalny zapis audytu powoduje rollback całej decyzji.
-Nie ma jeszcze ręcznego scalania ani heartbeat/ostatniego kontaktu utrwalonego
-między uruchomieniami.
+Heartbeat/ostatni kontakt nie jest jeszcze utrwalony między uruchomieniami.
 
 **NET-013 — Obsłużyć import i dołączanie istniejącego logu**
 
@@ -840,22 +907,33 @@ każdej z tych awarii.
   ani niepotrzebne dane wrażliwe.
 - Dodać metryki: klienci online, cursor lag, pending/error outbox, konflikty,
   czas transakcji, rezerwacje seriali i rozmiar event logu.
-- Udokumentować instalację, firewall/port, TLS, kopię zapasową, restore,
-  rotację tokenów, aktualizację protokołu oraz zachowanie przy utracie hosta.
-- Sprawdzić limit retencji/kompaktowania eventów i snapshotów tak, by żaden
-  aktywny klient nie utracił możliwości resync.
+- [x] Udokumentować instalację, firewall/port, TLS, kopię zapasową, restore,
+  rotację tokenów, aktualizację protokołu oraz zachowanie przy utracie hosta:
+  [procedura operacyjna](docs/NETWORKING_OPERATIONS.md). Dodać serwerowe
+  `--restore-backup`; kopia jest walidowana, a istniejąca baza zachowywana
+  przed instalacją.
+- [x] Wdrożyć retencję i kompaktowanie eventów z odzyskiwaniem snapshotem;
+  klient aktywny w okresie retencji zachowuje chroniony cursor, a starszy klient
+  dostaje `SNAPSHOT_REQUIRED` (NET-008).
 - **Odbiór:** przetestowany backup/restore przy wyłączonym serwerze odtwarza
   rewizje, logi, operacje idempotencji i seriale; istnieje procedura weryfikacji.
+  Test automatyczny sprawdza rewizję, QSO, rezerwację serialu, replay operacji
+  idempotentnej i zachowanie poprzedniej bazy; operator musi dodatkowo wykonać
+  próbę na środowisku testowym.
 
-**Stan: częściowo wdrożone.** Endpoint `get_metrics` wymaga uprawnienia
-administratora i zwraca online station count, bieżącą rewizję, liczbę eventów,
-operacji, zarejestrowanych stacji, maksymalny lag kursora, aktywne QSO oraz
-liczniki rezerwacji według statusu. UI udostępnia odczyt metryk z panelu
-statusu. Backup bazy i test backup/restore istnieją, a serwer tworzy backup
-przed migracją. Nadal brakuje historii/eksportu metryk, czasu transakcji,
-metryk pending/error/conflict klienta, retencji eventów oraz instrukcji
-wdrożenia, rotacji tokenów i odtworzenia po utracie hosta. Restore produkcyjny
-nie został zweryfikowany jako procedura operatorska.
+**Stan: wdrożone w kodzie i dokumentacji; test produkcyjnej procedury pozostaje
+zadaniem operatorskim.** Endpoint `get_metrics` wymaga uprawnienia
+administratora i zwraca online station count, rewizję, eventy, operacje,
+zarejestrowane stacje, lag, QSO, rezerwacje, per-stacja pending/error/conflict
+oraz trwały ostatni kontakt. Serwer zapisuje czas i wynik transakcji;
+odpowiedź udostępnia agregaty i do 100 ostatnich pomiarów, a baza przechowuje
+do 1000 na log. Eksport diagnostyczny może dołączyć pobrane metryki. Backup
+bazy i test backup/restore istnieją, a serwer tworzy backup przed migracją.
+Tryb CLI `--restore-backup` odtwarza zweryfikowaną kopię centralną i zachowuje
+poprzednią bazę. Test obejmuje rewizję, QSO, rezerwację serialu i replay
+idempotentny. Procedura operatorska obejmuje instalację, sieć/TLS, rotację,
+backup, restore, aktualizacje i utratę hosta; próbę odtworzenia należy wykonać
+na oddzielnym katalogu danych przed wdrożeniem produkcyjnym.
 
 **NET-016 — Wykonać pilotaż i włączyć funkcję etapami**
 
@@ -883,11 +961,12 @@ NET-001 + NET-002
 ```
 
 NET-010 zależy od polityk NET-001/002 i transakcji NET-006; serwer, trwały
-cache klienta, kolejka żądań i podstawowe UI rezerwacji są wdrożone. Nadal
-brakuje puli offline i narzędzi administracyjnej korekty.
-NET-011–012 mają ręczne połączenie Client, jawnie uruchamiany Host, status,
-read-only i dwie decyzje konfliktu, ale nie bezpieczny magazyn tokenów ani
-scalanie pól QSO. NET-013 obsługuje dołączanie, tworzenie centralnego logu
+cache klienta, kolejka żądań, status oczekujących rezerwacji i administracyjna
+korekta z audytem są wdrożone. Pula offline jest świadomie wyłączona; nowe
+numery wymagają potwierdzenia serwera. NET-011–012 mają ręczne lub opcjonalnie
+automatyczne połączenie Client/Host, sekret Clienta w magazynie systemowym,
+dodatkowe CA, status, read-only i trzy decyzje konfliktu z trwałym heartbeatem.
+Poświadczenia Host są nadal importowane z pliku administratora. NET-013 obsługuje dołączanie, tworzenie centralnego logu
 przez administratora, addytywne scalanie lokalnego logu i transfer historii
 seriali; ograniczenia są opisane w sekcji etapu.
 
@@ -913,19 +992,20 @@ Dopiero potem można przeprowadzić pilotaż i wykonać pomiary NET-016.
 |---|---|---|
 | P0 — poprawność danych | NET-007 | Zrealizowane dla reguł obsługiwanych przez YAML/ContestEngine: centralne punkty, `dupe_key` oraz jawny błąd przy brakujących danych CTY. Loader obsługuje callsign (wymagany), band i mode; brak wsparcia dla innych składników dupe pozostaje ograniczeniem formatu. |
 | P0 — odbiór i niezawodność | NET-014 | Testy pokrywają równoczesne edycje, restart klienta i serwera z trwałym outboxem, utratę odpowiedzi po commicie i idempotentny retry QSO/rezerwacji. Pozostają awarie na każdym kroku, aktywny transfer podczas restartu serwera i pełna weryfikacja replik po awariach. |
-| P1 — operacje sieciowe | NET-007/008 | Admin-only tworzenie logu i import historii są dostępne przez protokół; push eventów nie jest wdrożony. Klient polega na pollingu; snapshot recovery wymaga retencji/kompaktowania eventów, której brak. |
-| P1 — numeracja | NET-010 | Brak puli numerów offline i administracyjnej korekty numeracji; status oczekujący/offline wymaga pełniejszego UX. |
-| P1 — konfiguracja | NET-011 | Host/Server można uruchomić ręcznie; brakuje systemowego magazynu sekretów, auto-startu Host/Client i CA niestandardowego. |
-| P1 — obsługa konfliktów | NET-012 | Przyjęcie serwera, ponowienie lokalnej edycji z audytem i read-only są dostępne; brakuje ręcznego scalania i trwałego heartbeat. |
+| P1 — operacje sieciowe | NET-007/008 | Admin-only tworzenie logu i import historii są dostępne przez protokół; retencja zdarzeń, odzyskiwanie snapshotem i powiadomienia `event_available` są wdrożone. Polling pozostaje ścieżką awaryjną. |
+| P1 — numeracja | NET-010 | Administracyjna korekta niewykorzystanej rezerwacji z uzasadnieniem/audytem i widok stanu oczekującego/offline są wdrożone. Pula numerów offline jest świadomie wyłączona; nowy numer wymaga serwera, a żądanie może oczekiwać w trwałej kolejce. |
+| P1 — konfiguracja | NET-011 | Client secret store, dodatkowe CA i opcjonalny autostart Client/Host są wdrożone. Hostowe poświadczenia nadal pochodzą z pliku JSON zarządzanego przez administratora. |
+| P1 — obsługa konfliktów | NET-012 | Przyjęcie serwera, ponowienie lokalnej edycji i ręczne scalanie pól z audytem są dostępne; heartbeat i czas kontaktu są trwałe. |
 | P1 — adopcja logów | NET-013 | Dołączanie, tworzenie centralnego logu przez administratora, addytywne scalanie lokalnego logu i transfer historii seriali są wdrożone. Pozostają limity transferu (1000 rezerwacji na żądanie), ograniczenie scalania Client do własnych QSO i odbiór konfliktów/awarii w środowisku wielostacyjnym. |
-| P2 — eksploatacja | NET-015 | Brakuje historii metryk, czasu transakcji, retencji eventów i pełnej procedury operacyjnej/restore. |
+| P2 — eksploatacja | NET-015 | Metryki, czas transakcji, stan outbox per klient, procedura operacyjna i CLI restore wdrożone; próba produkcyjnej procedury pozostaje zadaniem operatorskim. |
 | P2 — wydanie | NET-016 | Wymaga pilotażu 2–3 stacji i pomiarów w docelowym środowisku; automatyczny rollout/feature flag nie jest wdrożony. |
 
 Capabilities handshake serwera uwzględniają teraz `list_logs`,
-`get_serial_reservations`, `get_metrics`, `create_log`,
-`import_serial_reservations` i `import_log_batch`; ich szczegóły opisują sekcje
-NET-007, NET-010, NET-013 i NET-015.
+`get_serial_reservations`, `get_metrics`, `event_notifications`, `create_log`,
+`import_serial_reservations`, `import_log_batch` i `station_identity`; ich
+szczegóły opisują sekcje NET-007, NET-010, NET-012, NET-013 i NET-015.
 **Zalecana kolejność:** uzupełnić brakujące testy awaryjne NET-014 i sprawdzić
-dane CTY w centralnym wdrożeniu. Później uzupełnić Host/secret store oraz
-scalanie pól konfliktów;
-retencję, procedury i pilotaż wykonać po ustabilizowaniu tych przepływów.
+dane CTY w centralnym wdrożeniu. Następnie wykonać próbę odtworzenia według
+[procedury operacyjnej](docs/NETWORKING_OPERATIONS.md) oraz pilotaż i pomiary
+NET-016. Host, magazyn sekretów Clienta i scalanie pól konfliktów są już
+wdrożone; nie zastępuje to odbioru w docelowym środowisku.

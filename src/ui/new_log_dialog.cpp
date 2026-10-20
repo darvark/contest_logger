@@ -2,6 +2,7 @@
 
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/contest/contest_engine.h"
+#include "logger/data/application_data.h"
 
 #include <QComboBox>
 #include <QDateEdit>
@@ -693,7 +694,7 @@ QMap<QString, QString> NewLogDialog::sentExchange() const
 void NewLogDialog::importDefinition()
 {
     const QString filePath = QFileDialog::getOpenFileName(
-        this, tr("Import contest definition"), {},
+        this, tr("Import contest definition"), contestDefinitionsDirectory(),
         tr("Contest definitions (*.yaml *.yml);;All files (*)"));
     if (filePath.isEmpty()) {
         return;
@@ -713,8 +714,30 @@ void NewLogDialog::importDefinition()
         QMessageBox::critical(this, tr("Invalid contest definition"), error);
         return;
     }
-    m_options.append(option);
-    const int index = static_cast<int>(m_options.size()) - 1;
+    int index = -1;
+    for (int i = 0; i < m_options.size(); ++i) {
+        if (m_options.at(i).definition.id == option.definition.id) {
+            index = i;
+            break;
+        }
+    }
+    if (index >= 0
+        && QMessageBox::question(
+               this, tr("Replace contest definition?"),
+               tr("A definition with ID '%1' is already installed. Replace it?")
+                   .arg(option.definition.id)) != QMessageBox::Yes) {
+        return;
+    }
+    if (!storeContestDefinitionFile(option.yaml, &error)) {
+        QMessageBox::critical(this, tr("Unable to import definition"), error);
+        return;
+    }
+    if (index >= 0) {
+        m_options[index] = option;
+    } else {
+        m_options.append(option);
+        index = static_cast<int>(m_options.size()) - 1;
+    }
     {
         const QSignalBlocker blocker(m_filter);
         m_filter->clear();

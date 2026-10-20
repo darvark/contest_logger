@@ -36,9 +36,12 @@ struct CwKeyerConfig {
 struct CwKeyerStatus {
     ConnectionState state = ConnectionState::Disconnected;
     QString message;
+    QString error;
     int queuedMessages = 0;
     int wpm = 25;
     bool transmitting = false;
+    // Lets the UI distinguish idle from an enqueue still awaiting the worker.
+    quint64 processedEnqueues = 0;
     int transmitVfo = 0;
     // True when the keyer itself confirms end of transmission; false when the
     // queue is paced by estimated duration.
@@ -89,6 +92,7 @@ public slots:
     void connectKeyer(const logger::CwKeyerConfig &config);
     void disconnectKeyer();
     void enqueueMessage(const QString &text, int transmitVfo = 0);
+    void enqueueText(const QString &text, int transmitVfo = 0);
     void abortTransmission();
     void setWpm(int wpm);
 
@@ -102,8 +106,9 @@ private slots:
 
 private:
     void publishStatus(const QString &message = {});
-    int estimatedDurationMs(const QString &text) const;
+    int estimatedDurationMs(const QString &text, bool live = false) const;
     void clearPendingCompletion();
+    void queueText(const QString &text, int transmitVfo, bool live);
 
     ICwKeyer *m_keyer = nullptr;
     class QTimer *m_queueTimer = nullptr;
@@ -112,6 +117,7 @@ private:
     struct QueuedMessage {
         QString text;
         int transmitVfo = 0;
+        bool live = false;
     };
     QList<QueuedMessage> m_queue;
     CwKeyerConfig m_config;
@@ -119,6 +125,7 @@ private:
     int m_transmittingVfo = 0;
     bool m_timedOut = false;
     QString m_lastError;
+    quint64 m_processedEnqueues = 0;
 };
 
 class CwKeyerController final : public QObject {
@@ -131,6 +138,7 @@ public:
     void connectKeyer(const CwKeyerConfig &config);
     void disconnectKeyer();
     void enqueueMessage(const QString &text, int transmitVfo = 0);
+    void enqueueText(const QString &text, int transmitVfo = 0);
     void abortTransmission();
     void setWpm(int wpm);
 
@@ -138,6 +146,7 @@ signals:
     void connectRequested(const logger::CwKeyerConfig &config);
     void disconnectRequested();
     void enqueueRequested(const QString &text, int transmitVfo);
+    void textRequested(const QString &text, int transmitVfo);
     void abortRequested();
     void setWpmRequested(int wpm);
     void statusChanged(const logger::CwKeyerStatus &status);

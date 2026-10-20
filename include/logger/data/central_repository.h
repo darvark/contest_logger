@@ -3,6 +3,7 @@
 #include "logger/data/sqlite_repository.h"
 #include "logger/data/support_data_parser.h"
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSqlDatabase>
@@ -37,10 +38,22 @@ public:
     bool cancelSerialReservation(const QString &logUuid, const QString &stationUuid,
                                  const QString &reservationUuid, bool administrator,
                                  QString *error = nullptr);
+    bool adjustSerialReservation(const QString &logUuid,
+                                 const QString &administratorStationUuid,
+                                 const QString &reservationUuid,
+                                 int expectedSerial, int correctedSerial,
+                                 const QString &reason,
+                                 QString *error = nullptr);
     QJsonArray serialReservations(const QString &logUuid,
                                  QString *error = nullptr) const;
     QJsonObject synchronizationMetrics(const QString &logUuid,
                                        QString *error = nullptr) const;
+    bool recordSyncTransactionMetric(const QString &logUuid,
+                                     const QString &stationUuid,
+                                     qint64 durationMs,
+                                     const QString &outcome,
+                                     int operationCount,
+                                     QString *error = nullptr);
     QString beginLogImport(const QString &logUuid, const QString &sourceLogUuid,
                            const QString &sourceLogName, const QString &stationUuid,
                            int totalQso, QString *error = nullptr);
@@ -52,6 +65,9 @@ public:
                                QString *error = nullptr) const;
     QJsonArray eventsSince(const QString &logUuid, qint64 afterRevision,
                            int limit, QString *error = nullptr) const;
+    bool compactSyncEvents(const QString &logUuid, const QDateTime &olderThanUtc,
+                           int *removedEvents = nullptr,
+                           QString *error = nullptr);
     QJsonObject snapshotPage(const QString &logUuid, qint64 revision,
                              int offset, int limit,
                              QString *error = nullptr) const;
@@ -62,6 +78,13 @@ public:
     qint64 currentRevision(const QString &logUuid, QString *error = nullptr) const;
     bool recordClientCursor(const QString &logUuid, const QString &stationUuid,
                             qint64 cursor, QString *error = nullptr);
+    bool recordClientHeartbeat(const QString &logUuid, const QString &stationUuid,
+                               qint64 lastAppliedRevision,
+                               QString *error = nullptr);
+    bool recordClientHeartbeat(const QString &logUuid, const QString &stationUuid,
+                               qint64 lastAppliedRevision, int pendingCount,
+                               int errorCount, int conflictCount,
+                               QString *error = nullptr);
     qint64 clientCursor(const QString &logUuid, const QString &stationUuid,
                         QString *error = nullptr) const;
     QString serverUuid(QString *error = nullptr) const;

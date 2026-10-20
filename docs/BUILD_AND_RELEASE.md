@@ -28,6 +28,68 @@ The radio integration tests use Hamlib's Dummy rig (model 1), including a local
 Hamlib at build time; the `rigctld` test is skipped when the utility is not on
 `PATH`, and both integration tests are skipped in builds without Hamlib.
 
+## Linux installation packages
+
+Build on the target distribution and architecture: a DEB from Ubuntu is not
+necessarily compatible with Debian or another Ubuntu release, and RPMs must
+match the target Fedora release. The script does not cross-compile or bundle
+system libraries. Use a separate build directory for each distribution.
+
+```sh
+# Debian / Ubuntu: installs compiler, CMake, Qt 6, yaml-cpp, Hamlib and DEB tools.
+bash tools/package-linux.sh --install-deps
+sudo apt install ./packages/deb/contest-logger_*.deb
+
+# Fedora: installs the corresponding build dependencies and RPM tools.
+bash tools/package-linux.sh --install-deps
+sudo dnf install ./packages/rpm/contest-logger-*.rpm
+
+# Slackware: first install the dependencies described below.
+bash tools/package-linux.sh
+sudo upgradepkg --install-new ./packages/slackware/contest-logger-*.txz
+```
+
+Select a single package filename if the output directory contains multiple
+versions. APT and DNF resolve library dependencies from enabled repositories.
+The packages also explicitly require Qt's SQLite driver and GUI/platform
+plugins, which are loaded dynamically and are not detected by ELF dependency
+scanners. Both `contest_logger` and `contest_logger_server`, the example
+contests, documentation and license are included. No service is automatically
+started, no system users are created, and user settings/logs are not packaged.
+
+The build runs as the current user; only `--install-deps` invokes sudo (or runs
+directly when already root). Without that option, missing tools or libraries
+cause a diagnostic rather than modifying the system. Hamlib is required by
+default so that packaging cannot silently omit hardware CAT/CW support.
+
+Options:
+
+- `--format auto|deb|rpm|slackware`: auto-detect by `/etc/os-release`;
+  explicit formats must match the host distribution.
+- `--no-hamlib`: intentionally omit Hamlib support and its build dependency.
+- `--skip-tests`: omit test compilation/execution (tests run by default).
+- `--build-dir PATH`, `--output-dir PATH`: directories relative to the invoking
+  shell's working directory, or absolute paths. Defaults are
+  `build-package-<format>` and `packages/<format>`.
+- `--jobs N`: positive number of parallel build jobs (default 2).
+- `--maintainer 'Name <email>'`: DEB/RPM contact; set this for releases.
+- `--help`: print usage.
+
+For Slackware, provide CMake >= 3.21, a C++20 compiler (`gcc-g++`), `make`
+(or Ninja), Qt >= 6.2 (`qt6`, including development files, Qt Test for the
+default test build, the QSQLITE plugin and platform plugins), yaml-cpp >= 0.7,
+Hamlib development/runtime files, GNU tar and xz. Install official packages
+from the matching Slackware release using `slackpkg`; libraries absent from
+that release need separately built packages, including their dependencies.
+Slackware 15.0's stock Qt 5 does not satisfy the Qt 6 requirement.
+`--no-hamlib` removes the Hamlib requirement.
+
+Slackware packages contain `install/slack-desc` and an informational
+`install/slack-required` list. Neither `installpkg` nor `upgradepkg`
+automatically resolves that list; install dependencies before installing or
+running Contest Logger. `--install-deps` deliberately stops on Slackware
+instead of pretending these dependencies can be resolved automatically.
+
 ## Windows build and package
 
 Use Visual Studio 2022 x64 C++ tools, Qt 6 (MSVC 2022 64-bit), CMake, and
@@ -157,7 +219,7 @@ mapped to contest fields in definition order; strings in `field=value` form
 are also recognized. This allows validation and Cabrillo output to use the
 original exchange without requiring a database migration.
 
-## SQLite backups and recovery
+## Local SQLite backups and recovery
 
 The database uses SQLite WAL journaling, `synchronous=FULL`, a busy timeout,
 and a startup `quick_check`. SQLite replays a valid WAL after an interrupted
@@ -180,6 +242,40 @@ the database. It preserves the prior database (and any WAL/SHM files) beside
 the restored database with a `.before-restore-...sqlite` suffix. The restore
 command is blocked while another logger instance is running. Restart the
 application normally after the success message.
+
+## Central synchronization server operations
+
+Packages include `contest_logger_server` but do not create a service or
+service account. The server uses a separate `central-log.sqlite` under
+`--data-dir`; GUI Host and the CLI may have different default data locations.
+Do not apply the local GUI recovery command above to the central database.
+
+With the server stopped, restore a verified central backup using:
+
+```sh
+contest_logger_server --restore-backup <backup.sqlite> --data-dir <central-data-directory>
+contest_logger_server --check --data-dir <central-data-directory>
+```
+
+The server preserves the previous database before installing the backup.
+Automatic pre-migration copies are not a scheduled backup policy. See the
+[server operations runbook](./NETWORKING_OPERATIONS.md) for installation,
+TCP/firewall, TLS, token rotation, backup/restore, upgrades, host loss and
+the required deployment restore drill.
+
+Client tokens can optionally use Windows Credential Manager or Linux Secret
+Service. Linux requires `secret-tool` and an accessible Secret Service;
+failure is reported rather than saving a plaintext token. Additional CA
+certificates and automatic Client/Host startup are opt-in. The
+`station_identity` capability carries computer name, station callsign and
+operator labels; UUIDs remain protocol identifiers. Verify both client and
+server versions when validating these labels; older peers show **Not provided**.
+
+Before deployment, run the existing `ui_tests` and `sync_server_tests`.
+They cover the connected-station table, identity updates, read-only access,
+legacy clients and invalid descriptions, in addition to synchronization
+flows. Automated tests do not replace failure testing and a multi-station
+pilot; see [NETWORKING.md](../NETWORKING.md).
 
 ## Hardware integration matrix
 

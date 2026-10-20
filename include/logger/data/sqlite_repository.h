@@ -4,6 +4,7 @@
 #include "logger/domain/types.h"
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QSqlDatabase>
 #include <QString>
 #include <QVector>
@@ -60,6 +61,10 @@ public:
         QString *error = nullptr) const;
     QVector<SerialReservation> serialReservations(
         const QString &logUuid, QString *error = nullptr) const;
+    bool adjustCachedSerialReservation(const QString &logUuid,
+                                       const QString &reservationUuid,
+                                       int expectedSerial, int correctedSerial,
+                                       QString *error = nullptr);
     bool enqueueSerialReservationRequest(
         const SerialReservationRequest &request, QString *error = nullptr);
     QVector<SerialReservationRequest> pendingSerialReservationRequests(
@@ -80,6 +85,9 @@ public:
                                          QString *error = nullptr);
     bool resolveSyncConflictKeepLocal(const QString &operationUuid,
                                       QString *error = nullptr);
+    bool resolveSyncConflictMerge(const QString &operationUuid,
+                                  const QJsonObject &mergedQso,
+                                  QString *error = nullptr);
     bool applySyncChanges(const QString &logUuid, const QJsonArray &events,
                           qint64 fromRevision, qint64 toRevision,
                           QString *error = nullptr);
@@ -110,6 +118,10 @@ public:
                          QString *error = nullptr);
 
 private:
+    bool resolveSyncConflictWithValues(const QString &operationUuid,
+                                       const QJsonObject *mergedQso,
+                                       QString *error);
+
     QSqlDatabase m_database;
     int m_spotInsertCount = 0;
 };

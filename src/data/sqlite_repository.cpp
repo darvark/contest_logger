@@ -22,7 +22,7 @@
 namespace logger {
 namespace {
 
-constexpr int CurrentSchemaVersion = 13;
+constexpr int CurrentSchemaVersion = 17;
 constexpr int SpotPruneInterval = 200;
 constexpr int SpotRetentionHours = 24;
 constexpr int MaximumRetainedSpots = 5000;
@@ -586,6 +586,82 @@ const QStringList MigrationThirteen{
         "ON sync_import_audit(log_uuid, source_log_uuid, status, updated_at_utc)")
 };
 
+const QStringList MigrationFourteen{
+    QStringLiteral(
+        "ALTER TABLE qso_history ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(revision >= 0)"),
+    QStringLiteral(
+        "UPDATE qso_history SET revision = COALESCE(("
+        "SELECT revision FROM sync_events WHERE "
+        "sync_events.log_uuid = qso_history.log_uuid AND "
+        "sync_events.operation_uuid = qso_history.operation_uuid AND "
+        "sync_events.entity_uuid = qso_history.qso_uuid), 0)"),
+    QStringLiteral(
+        "UPDATE sync_events SET created_at_utc = "
+        "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+};
+
+const QStringList MigrationFifteen{
+    QStringLiteral("ALTER TABLE sync_conflict_resolutions "
+                   "RENAME TO sync_conflict_resolutions_old"),
+    QStringLiteral(
+        "CREATE TABLE sync_conflict_resolutions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "operation_uuid TEXT NOT NULL,"
+        "log_uuid TEXT NOT NULL,"
+        "entity_uuid TEXT NOT NULL,"
+        "resolution TEXT NOT NULL CHECK(resolution IN "
+        "('accept_server', 'keep_local', 'merge')),"
+        "local_payload_json TEXT NOT NULL,"
+        "remote_payload_json TEXT NOT NULL,"
+        "resolution_payload_json TEXT NOT NULL DEFAULT '',"
+        "resolved_at_utc TEXT NOT NULL)"),
+    QStringLiteral(
+        "INSERT INTO sync_conflict_resolutions(id, operation_uuid, log_uuid, "
+        "entity_uuid, resolution, local_payload_json, remote_payload_json, "
+        "resolved_at_utc) SELECT id, operation_uuid, log_uuid, entity_uuid, "
+        "resolution, local_payload_json, remote_payload_json, resolved_at_utc "
+        "FROM sync_conflict_resolutions_old"),
+    QStringLiteral("DROP TABLE sync_conflict_resolutions_old")
+};
+
+const QStringList MigrationSixteen{
+    QStringLiteral(
+        "CREATE TABLE serial_reservation_adjustments ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "log_uuid TEXT NOT NULL,"
+        "reservation_uuid TEXT NOT NULL,"
+        "administrator_station_uuid TEXT NOT NULL,"
+        "previous_serial INTEGER NOT NULL,"
+        "corrected_serial INTEGER NOT NULL,"
+        "reason TEXT NOT NULL,"
+        "created_at_utc TEXT NOT NULL)")
+};
+
+const QStringList MigrationSeventeen{
+    QStringLiteral(
+        "ALTER TABLE sync_clients ADD COLUMN pending_count INTEGER NOT NULL "
+        "DEFAULT 0 CHECK(pending_count >= 0)"),
+    QStringLiteral(
+        "ALTER TABLE sync_clients ADD COLUMN error_count INTEGER NOT NULL "
+        "DEFAULT 0 CHECK(error_count >= 0)"),
+    QStringLiteral(
+        "ALTER TABLE sync_clients ADD COLUMN conflict_count INTEGER NOT NULL "
+        "DEFAULT 0 CHECK(conflict_count >= 0)"),
+    QStringLiteral(
+        "CREATE TABLE sync_transaction_metrics ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "log_uuid TEXT NOT NULL REFERENCES contests(log_uuid),"
+        "station_uuid TEXT NOT NULL,"
+        "completed_at_utc TEXT NOT NULL,"
+        "duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),"
+        "outcome TEXT NOT NULL CHECK(outcome IN ('success', 'error', 'conflict')),"
+        "operation_count INTEGER NOT NULL CHECK(operation_count >= 0))"),
+    QStringLiteral(
+        "CREATE INDEX idx_sync_transaction_metrics_log_time "
+        "ON sync_transaction_metrics(log_uuid, completed_at_utc DESC)")
+};
+
 QString newUuid()
 {
     return QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
@@ -872,6 +948,14 @@ bool SqliteRepository::initialize(QString *error)
             migration = &MigrationTwelve;
         } else if (version == 13) {
             migration = &MigrationThirteen;
+        } else if (version == 14) {
+            migration = &MigrationFourteen;
+        } else if (version == 15) {
+            migration = &MigrationFifteen;
+        } else if (version == 16) {
+            migration = &MigrationSixteen;
+        } else if (version == 17) {
+            migration = &MigrationSeventeen;
         }
         if (migration == nullptr) {
             setError(error, QStringLiteral("No migration is available for schema version %1.")
@@ -1693,7 +1777,8 @@ std::optional<SerialReservation> SqliteRepository::serialReservation(
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT reservation_uuid, log_uuid, station_uuid, scope_key, band, mode, "
-        "serial_number, status, qso_uuid FROM serial_reservations "
+        "serial_number, status, qso_uuid, created_at_utc, updated_at_utc "
+        "FROM serial_reservations "
         "WHERE log_uuid = ? AND reservation_uuid = ?"));
     query.addBindValue(logUuid);
     query.addBindValue(reservationUuid);
@@ -1709,7 +1794,9 @@ std::optional<SerialReservation> SqliteRepository::serialReservation(
         query.value(2).toString(), query.value(3).toString(),
         query.value(4).toString(), query.value(5).toString(),
         query.value(6).toInt(), query.value(7).toString(),
-        query.value(8).toString()
+        query.value(8).toString(),
+        QDateTime::fromString(query.value(9).toString(), Qt::ISODateWithMs),
+        QDateTime::fromString(query.value(10).toString(), Qt::ISODateWithMs)
     };
 }
 
@@ -1725,7 +1812,8 @@ QVector<SerialReservation> SqliteRepository::serialReservations(
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT reservation_uuid, log_uuid, station_uuid, scope_key, band, mode, "
-        "serial_number, status, qso_uuid FROM serial_reservations "
+        "serial_number, status, qso_uuid, created_at_utc, updated_at_utc "
+        "FROM serial_reservations "
         "WHERE log_uuid = ? ORDER BY serial_number"));
     query.addBindValue(logUuid);
     if (!query.exec()) {
@@ -1738,10 +1826,67 @@ QVector<SerialReservation> SqliteRepository::serialReservations(
             query.value(2).toString(), query.value(3).toString(),
             query.value(4).toString(), query.value(5).toString(),
             query.value(6).toInt(), query.value(7).toString(),
-            query.value(8).toString()
+            query.value(8).toString(),
+            QDateTime::fromString(query.value(9).toString(), Qt::ISODateWithMs),
+            QDateTime::fromString(query.value(10).toString(), Qt::ISODateWithMs)
         });
     }
     return result;
+}
+
+bool SqliteRepository::adjustCachedSerialReservation(
+    const QString &logUuid, const QString &reservationUuid,
+    int expectedSerial, int correctedSerial, QString *error)
+{
+    clearError(error);
+    if (!isSyncUuid(logUuid) || !isSyncUuid(reservationUuid)
+        || expectedSerial < 1 || correctedSerial < 1
+        || expectedSerial == correctedSerial) {
+        setError(error, QStringLiteral("Serial cache correction is invalid."));
+        return false;
+    }
+    QSqlQuery update(m_database);
+    update.prepare(QStringLiteral(
+        "UPDATE serial_reservations SET serial_number = ?, updated_at_utc = ? "
+        "WHERE log_uuid = ? AND reservation_uuid = ? AND serial_number = ? "
+        "AND status = 'reserved' AND station_uuid = ?"));
+    update.addBindValue(correctedSerial);
+    update.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
+    update.addBindValue(logUuid);
+    update.addBindValue(reservationUuid);
+    update.addBindValue(expectedSerial);
+    update.addBindValue(localStationUuid(error));
+    if (error != nullptr && !error->isEmpty()) {
+        return false;
+    }
+    if (!update.exec()) {
+        setError(error, queryError(update));
+        return false;
+    }
+    if (update.numRowsAffected() == 0) {
+        QSqlQuery existing(m_database);
+        existing.prepare(QStringLiteral(
+            "SELECT serial_number, status FROM serial_reservations "
+            "WHERE log_uuid = ? AND reservation_uuid = ? AND station_uuid = ?"));
+        existing.addBindValue(logUuid);
+        existing.addBindValue(reservationUuid);
+        existing.addBindValue(localStationUuid(error));
+        if (error != nullptr && !error->isEmpty()) {
+            return false;
+        }
+        if (!existing.exec()) {
+            setError(error, queryError(existing));
+            return false;
+        }
+        if (existing.next()
+            && (existing.value(0).toInt() != correctedSerial
+                || existing.value(1).toString() != QStringLiteral("reserved"))) {
+            setError(error, QStringLiteral(
+                "Cached serial reservation changed before correction was applied."));
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SqliteRepository::enqueueSerialReservationRequest(
@@ -1841,7 +1986,8 @@ SqliteRepository::pendingSerialReservationRequests(
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT log_uuid, station_uuid, reservation_uuid, operation, band, mode "
+        "SELECT log_uuid, station_uuid, reservation_uuid, operation, band, mode, "
+        "created_at_utc "
         "FROM serial_reservation_requests WHERE log_uuid = ? AND station_uuid = ? "
         "ORDER BY created_at_utc, reservation_uuid, operation"));
     query.addBindValue(logUuid);
@@ -1854,7 +2000,8 @@ SqliteRepository::pendingSerialReservationRequests(
         result.append(SerialReservationRequest{
             query.value(0).toString(), query.value(1).toString(),
             query.value(2).toString(), query.value(3).toString(),
-            query.value(4).toString(), query.value(5).toString()
+            query.value(4).toString(), query.value(5).toString(),
+            QDateTime::fromString(query.value(6).toString(), Qt::ISODateWithMs)
         });
     }
     return result;
@@ -2247,13 +2394,30 @@ bool SqliteRepository::resolveSyncConflictAcceptServer(
 bool SqliteRepository::resolveSyncConflictKeepLocal(
     const QString &operationUuid, QString *error)
 {
+    return resolveSyncConflictWithValues(operationUuid, nullptr, error);
+}
+
+bool SqliteRepository::resolveSyncConflictMerge(
+    const QString &operationUuid, const QJsonObject &mergedQso, QString *error)
+{
+    if (mergedQso.isEmpty()) {
+        clearError(error);
+        setError(error, QStringLiteral("Merged QSO fields are required."));
+        return false;
+    }
+    return resolveSyncConflictWithValues(operationUuid, &mergedQso, error);
+}
+
+bool SqliteRepository::resolveSyncConflictWithValues(
+    const QString &operationUuid, const QJsonObject *mergedQso, QString *error)
+{
     clearError(error);
     if (operationUuid.trimmed().isEmpty()) {
         setError(error, QStringLiteral("Operation UUID is required."));
         return false;
     }
     return withSavepoint(m_database,
-        [this, &operationUuid](QString *operationError) {
+        [this, &operationUuid, mergedQso](QString *operationError) {
             QSqlQuery lookup(m_database);
             lookup.prepare(QStringLiteral(
                 "SELECT c.log_uuid, c.entity_uuid, c.local_payload_json, "
@@ -2396,6 +2560,98 @@ bool SqliteRepository::resolveSyncConflictKeepLocal(
             retry.reservationUuid =
                 localRoot.value(QStringLiteral("reservation_uuid")).toString();
 
+            if (mergedQso != nullptr) {
+                const QStringList expectedFields{
+                    QStringLiteral("callsign"), QStringLiteral("station_callsign"),
+                    QStringLiteral("band"), QStringLiteral("timestamp_utc"),
+                    QStringLiteral("frequency_hz"), QStringLiteral("mode"),
+                    QStringLiteral("sent_exchange"),
+                    QStringLiteral("received_exchange"),
+                    QStringLiteral("sent_exchange_fields"),
+                    QStringLiteral("received_exchange_fields"),
+                    QStringLiteral("points")
+                };
+                QSet<QString> allowedFields;
+                for (const QString &field : expectedFields) {
+                    allowedFields.insert(field);
+                }
+                for (const QString &field : mergedQso->keys()) {
+                    if (!allowedFields.contains(field)) {
+                        setError(operationError, QStringLiteral(
+                            "Merged QSO contains unsupported field %1.").arg(field));
+                        return false;
+                    }
+                }
+                for (const QString &field : expectedFields) {
+                    if (!mergedQso->contains(field)) {
+                        setError(operationError, QStringLiteral(
+                            "Merged QSO is missing field %1.").arg(field));
+                        return false;
+                    }
+                }
+                const auto readMergedMap = [](const QJsonValue &value,
+                                              QMap<QString, QString> &fields) {
+                    if (!value.isObject()) {
+                        return false;
+                    }
+                    fields.clear();
+                    const QJsonObject object = value.toObject();
+                    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+                        if (!it.value().isString()) {
+                            return false;
+                        }
+                        fields.insert(it.key(), it.value().toString());
+                    }
+                    return true;
+                };
+                const QJsonValue mergedTimestamp =
+                    mergedQso->value(QStringLiteral("timestamp_utc"));
+                const QJsonValue mergedFrequency =
+                    mergedQso->value(QStringLiteral("frequency_hz"));
+                const QJsonValue mergedPoints =
+                    mergedQso->value(QStringLiteral("points"));
+                const QDateTime parsedTimestamp = QDateTime::fromString(
+                    mergedTimestamp.toString(), Qt::ISODateWithMs);
+                bool mergedFrequencyOk = false;
+                const qint64 parsedFrequency =
+                    mergedFrequency.toVariant().toLongLong(&mergedFrequencyOk);
+                const int parsedPoints = mergedPoints.toInt(-1);
+                if (!mergedQso->value(QStringLiteral("callsign")).isString()
+                    || !mergedQso->value(QStringLiteral("station_callsign")).isString()
+                    || !mergedQso->value(QStringLiteral("band")).isString()
+                    || !parsedTimestamp.isValid()
+                    || !mergedFrequencyOk || parsedFrequency <= 0
+                    || !mergedFrequency.isDouble()
+                    || parsedPoints < 0 || !mergedPoints.isDouble()
+                    || !mergedQso->value(QStringLiteral("mode")).isString()
+                    || !mergedQso->value(QStringLiteral("sent_exchange")).isString()
+                    || !mergedQso->value(
+                           QStringLiteral("received_exchange")).isString()
+                    || !readMergedMap(mergedQso->value(
+                                          QStringLiteral("sent_exchange_fields")),
+                                      retry.sentExchangeFields)
+                    || !readMergedMap(mergedQso->value(
+                                          QStringLiteral("received_exchange_fields")),
+                                      retry.receivedExchangeFields)) {
+                    setError(operationError, QStringLiteral(
+                        "Merged QSO contains invalid field values."));
+                    return false;
+                }
+                retry.callsign =
+                    mergedQso->value(QStringLiteral("callsign")).toString();
+                retry.stationCallsign =
+                    mergedQso->value(QStringLiteral("station_callsign")).toString();
+                retry.band = mergedQso->value(QStringLiteral("band")).toString();
+                retry.timestampUtc = parsedTimestamp.toUTC();
+                retry.frequencyHz = parsedFrequency;
+                retry.mode = mergedQso->value(QStringLiteral("mode")).toString();
+                retry.sentExchange =
+                    mergedQso->value(QStringLiteral("sent_exchange")).toString();
+                retry.receivedExchange =
+                    mergedQso->value(QStringLiteral("received_exchange")).toString();
+                retry.points = parsedPoints;
+            }
+
             QSqlQuery setBaseVersion(m_database);
             setBaseVersion.prepare(QStringLiteral(
                 "UPDATE qsos SET qso_version = ?, is_deleted = 0 WHERE id = ? "
@@ -2442,12 +2698,18 @@ bool SqliteRepository::resolveSyncConflictKeepLocal(
             audit.prepare(QStringLiteral(
                 "INSERT INTO sync_conflict_resolutions(operation_uuid, log_uuid, "
                 "entity_uuid, resolution, local_payload_json, remote_payload_json, "
-                "resolved_at_utc) VALUES(?, ?, ?, 'keep_local', ?, ?, ?)"));
+                "resolution_payload_json, resolved_at_utc) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)"));
             audit.addBindValue(operationUuid);
             audit.addBindValue(logUuid);
             audit.addBindValue(entityUuid);
+            audit.addBindValue(mergedQso == nullptr
+                ? QStringLiteral("keep_local") : QStringLiteral("merge"));
             audit.addBindValue(localPayload);
             audit.addBindValue(remotePayload);
+            audit.addBindValue(QString::fromUtf8(syncQsoPayload(
+                retry, operationUuid, retry.stationUuid,
+                QStringLiteral("qso.update"), remoteVersion)));
             audit.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
             if (!audit.exec()) {
                 setError(operationError, queryError(audit));

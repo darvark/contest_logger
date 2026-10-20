@@ -36,6 +36,10 @@ Powiązane dokumenty:
   definicji zawodów YAML,
 - [BUILD_AND_RELEASE.md](./BUILD_AND_RELEASE.md) — budowanie, pakowanie, Hamlib,
   macierz testów sprzętowych,
+- [NETWORKING_OPERATIONS.md](./NETWORKING_OPERATIONS.md) — instalacja i obsługa
+  serwera synchronizacji, TLS, tokeny, backup i odzyskiwanie,
+- [../NETWORKING.md](../NETWORKING.md) — protokół, stan implementacji
+  i ograniczenia synchronizacji,
 - [../TODO.md](../TODO.md) — lista zadań projektu.
 
 ---
@@ -89,13 +93,26 @@ wyznacza Qt (`QStandardPaths::AppDataLocation`):
 | Baza danych | `~/.local/share/ContestLogger/ContestLogger/contest-logger.sqlite` | `%APPDATA%\ContestLogger\ContestLogger\contest-logger.sqlite` |
 | Kopie automatyczne | `…/backups/automatic-RRRR-MM-DD.sqlite` | jw. |
 | Pobrane `master.scp`, `wl_cty.dat` | katalog danych aplikacji | jw. |
-| Ustawienia (QSettings) | `~/.config/ContestLogger/ContestLogger.conf` | rejestr `HKEY_CURRENT_USER\Software\ContestLogger\ContestLogger` |
+| Ustawienia (QSettings, INI) | `…/config/ContestLogger/ContestLogger.ini` | jw. |
+| Definicje zawodów YAML | `…/contests/*.yaml`, `…/contests/*.yml` | jw. |
+
+Przy pierwszym uruchomieniu, również po instalacji pakietu, program tworzy
+katalog danych, bazę, plik konfiguracji i podkatalog `contests`. Dawne ustawienia
+z `~/.config/ContestLogger/ContestLogger.conf` (Linux) lub rejestru
+`HKEY_CURRENT_USER\Software\ContestLogger\ContestLogger` (Windows) są jednorazowo
+kopiowane do nowego pliku INI. Oryginały pozostają bez zmian.
 
 Pliki call history i list znaków wczytane „z pliku” **nie są kopiowane** —
 program zapamiętuje ich ścieżki i wczytuje je przy każdym starcie.
 
 Wbudowane definicje zawodów (15 plików z `contests/examples/`) są wkompilowane
-w program i instalowane w bazie automatycznie, jeśli ich brakuje.
+w program i kopiowane do podkatalogu `contests`, jeśli ich brakuje. Istniejące
+pliki nie są nadpisywane. Program odczytuje z tego katalogu pliki `.yaml` i `.yml`
+przy starcie oraz otwieraniu **New log**. Można tam dopisać własne definicje
+lub zmodyfikować istniejące. Nowe logi korzystają z definicji na dysku; zapisane
+logi zachowują swoje reguły w bazie. Błędne pliki i powtórzone identyfikatory
+są zgłaszane komunikatem. Obie opcje importu YAML zapisują definicję w tym
+samym katalogu.
 
 ## 3. Szybki start
 
@@ -133,7 +150,6 @@ Okna narzędziowe (docki; można je przesuwać, odłączać i ukrywać w menu
 |---|---|
 | **Check callsign** | Siatka pasmo × emisja z zaznaczeniem, gdzie wpisany znak był już zrobiony; pod spodem stan („not in log”, dupe). |
 | **Check partial** | Znaki pasujące do fragmentu wpisanego znaku z Master.SCP/MASTER.CPY, call history i logu. Biały — nowy, zielony — zrobiony na innym paśmie/emisji, czerwony — dubel, pogrubiony — dokładne trafienie. Kliknięcie wstawia znak do pola Call. |
-| **CW messages / keyer** | Tekst dowolny (`{CALL}` wstawia bieżący znak), wybór radia CW, prędkość WPM (5–80), **Send**, **Abort (Esc)**, stan keyera. |
 | **Contest info** | Opis aktywnej definicji: pasma, emisje, wymiana, punktacja, mnożniki, klucz dubli. |
 | **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Kolumny `kHz, Call, Age, Spotter, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
 | **Rate** | QSO/h z ostatnich 10 i 100 QSO, liczba QSO z ostatnich 60 i 10 minut, suma QSO, prędkość CW. |
@@ -279,9 +295,10 @@ RX** i wyświetlane jest ostrzeżenie. SO2V i SO2R wykluczają się.
 
 Skonfiguruj i połącz Radio A i Radio B, potem zaznacz **SO2R (two radios)**.
 Każdy panel QSO jest kierowany do swojego radia; **Active radio** wybiera radio
-dla bandmapy. Awaria jednego radia nie zatrzymuje drugiego. Radio CW wybiera
-się osobno w oknie *CW messages / keyer* — zmiana wymaga ponownej konfiguracji
-keyera (ochrona przed nadawaniem złym torem).
+dla bandmapy. Awaria jednego radia nie zatrzymuje drugiego. Nadawanie CW
+automatycznie korzysta z radia aktywnego panelu QSO i jego aktywnego VFO.
+Przed zmianą radia nadawczego zatrzymaj trwające CW; gdy kolejka jest pusta,
+keyer przełącza połączenie automatycznie według konfiguracji docelowego radia.
 
 ## 8. DX cluster i bandmapa
 
@@ -337,6 +354,24 @@ z wyłączonym cache; pozwala to obsłużyć abort i rozłączenie między odczy
 Niestandardowe callbacki Hamlib używają szacowanego czasu, dopóki ich semantyka
 nie zostanie zweryfikowana.
 
+### Nadawanie tekstu na bieżąco
+
+`Ctrl+K` otwiera małe okno **Live CW input**, zastępujące dock
+**CW messages / keyer**. Wpisywany lub wklejany tekst jest od razu kolejkowany
+do nadawania, ze spacjami, bez naciskania Enter i bez rozwijania makr.
+Nie wybiera się osobnego radia: używane jest aktywne radio i jego VFO
+z fokusem RX; w SO2R radio wynika z aktywnego panelu QSO. Wymagana jest emisja
+CW i połączony keyer. Ograniczenie cwdaemon do VFO A nadal obowiązuje.
+
+`PageUp` zwiększa, a `PageDown` zmniejsza prędkość o 1 WPM (zakres 5–80).
+W emisji CW aktualna prędkość jest widoczna przy zegarze na górnym pasku.
+Skróty działają również w oknie nadawania.
+
+Tekstu już przekazanego do keyera nie można edytować. Enter czyści widoczne
+pole na kolejną linię, nie przerywając nadawania. `Esc` zatrzymuje nadawanie,
+czyści kolejkę i pole; gdy nic nie jest nadawane ani zakolejkowane, `Esc`
+chowa okno. Rozpoczęcie ręcznego wpisywania wyłącza Auto CQ.
+
 ### Komunikaty F1–F8
 
 | Klawisz | Etykieta | Domyślny tekst |
@@ -376,6 +411,10 @@ Komunikaty F1–F8 są wysyłane tylko w emisji CW, z kontekstu aktywnego panelu
 
 - Tryb **Run** lub **Search & Pounce (S&P)** można zmienić w menu
   **Operating** albo na pasku narzędzi; wybór jest zapamiętywany.
+  Przy połączonym CAT odstrojenie VFO o więcej niż 3 kHz od częstotliwości
+  z chwili włączenia RUN automatycznie przełącza tryb na S&P i wyłącza Auto CQ.
+  Liczy się także przestrajanie małymi krokami; dokładnie 3 kHz nie przełącza
+  trybu. Ponowne włączenie RUN lub połączenie CAT ustala nowy punkt odniesienia.
 - **Enter Sends Message (ESM)** działa, gdy jest włączone w menu **Operating**,
   a aktywny panel pracuje emisją CW. **Operating → Configure ESM messages...**
   ustawia osobne sekwencje per contest; każda niepusta linia jest osobnym
@@ -406,6 +445,41 @@ CTY służy do wyświetlania kraju i stref CQ/ITU oraz rozwiązywania mnożnikó
 DXCC/stref/kontynentów.
 
 ## 11. Eksport Cabrillo 3.0 i ADIF
+
+### Import ADIF / Cabrillo
+
+**File → Import ADIF / Cabrillo…** odczytuje pliki `.adi`, `.adif`, `.log`,
+`.cbr` i `.cabrillo` (format jest rozpoznawany po treści).
+
+1. Wskaż plik i wybierz **Current log** albo **Create a new log…**.
+2. Przy tworzeniu logu wybierz właściwe zawody, znak i nazwę. Jeśli identyfikator
+   zawodów z pliku pasuje do zainstalowanej definicji, jest wybierany automatycznie.
+3. Sprawdź podsumowanie liczby importowanych i pomijanych QSO, następnie potwierdź.
+
+Wymagana jest definicja zawodów logu docelowego. Czas QSO jest interpretowany
+jako UTC. Znak stacji w rekordzie musi odpowiadać znakowi logu; jeśli ADIF
+go nie zawiera, używany jest znak docelowego logu. Emisje Cabrillo `PH`, `RY`
+i `DG` są mapowane na `SSB`, `RTTY` i `DATA`.
+
+Identyczne rekordy (ten sam czas, znak korespondenta, pasmo i emisja) są
+pomijane zarówno w pliku, jak i względem istniejącego logu. Inne duple według
+reguł zawodów są zachowywane z zerową punktacją. Punkty są przeliczane według
+definicji logu docelowego, a nadane numery seryjne są zachowywane.
+
+ADIF obsługuje pola `RST_SENT`/`RST_RCVD`, `STX`/`SRX`,
+`STX_STRING`/`SRX_STRING` oraz standardowe pola wymiany (np. `CQZ`, `STATE`,
+`ARRL_SECT`, `GRIDSQUARE`). Tekst wymiany jest mapowany według kolejności pól
+w definicji zawodów; działa też zapis `nazwa=wartość` eksportowany przez aplikację.
+Cabrillo obsługuje wiersze `QSO:` z wymianą właściwą dla wybranej definicji
+i opcjonalnym końcowym numerem nadajnika. Niejednoznaczny układ lub brak
+wymaganej wymiany powoduje jawny błąd, bez zgadywania danych.
+
+Błąd rekordu lub zapisu przerywa cały import — nie pozostawia części QSO ani
+pustego nowego logu. Anulowanie potwierdzenia również niczego nie zapisuje.
+Import do logu synchronizowanego korzysta ze zwykłej kolejki outbox;
+stacja z dostępem tylko do odczytu nie może importować.
+
+### Eksport
 
 **File → Export Cabrillo…** i **File → Export ADIF…** walidują log (znaki, czas
 UTC, pasmo/częstotliwość, emisję, dublety, pola wymiany) przed zapisem. Przy
@@ -475,12 +549,15 @@ wymianę nadaną i odebraną.
 | | Log properties… | |
 | | Export Cabrillo… | |
 | | Export ADIF… | |
+| | Import ADIF / Cabrillo… | |
 | | Back up database… | |
 | | Support data → Call history file… / Master callsign list from file… / Download/update Master.SCP… / wl_cty.dat from file… / Download/update wl_cty.dat… | |
 | | Exit | `Ctrl+Q` |
 | **Contest** | Import YAML definition… | |
 | **Operating** | Wipe QSO entry | `Ctrl+W` |
 | | Switch entry A/B | `Ctrl+Tab` |
+| | Live CW input | `Ctrl+K` |
+| | Increase / Decrease CW speed | `PageUp` / `PageDown` |
 | | Run / Search & Pounce |
 | | Enter Sends Message (ESM) |
 | | Auto CQ (F1 repeat) |
@@ -492,10 +569,69 @@ wymianę nadaną i odebraną.
 | | Reconnect / Disconnect Radio A CAT, Radio B CAT | |
 | | DX cluster… / Disconnect DX cluster | |
 | | CW keyer… / Reconnect CW keyer / Disconnect CW keyer | |
-| | Abort CW transmission | `Esc` |
+| | Abort CW transmission | `Ctrl+Esc` (także `Esc` podczas nadawania) |
 | **Options** | Operator and station… | |
+| | Central network connection… | |
+| | Host central server on this station… / Stop central server on this station | |
+| | Create central log / import local log… (aktywny Host) | |
+| | Disconnect central network | |
+| | Network status and queue… | |
 | | CW function key messages… | |
 | **Window** | Pokaż/ukryj każde okno narzędziowe; Restore default layout | |
+
+### Połączenie z centralnym logiem
+
+Tryb Local pozostaje domyślny. **Options → Central network connection...**
+konfiguruje adres i port serwera (domyślnie TCP 7443), token stacji, log
+oraz opcjonalny plik dodatkowego CA. Certyfikat musi pasować do podanej
+nazwy serwera; weryfikacji TLS nie należy wyłączać. Dostępne jest połączenie
+z lokalną kopią logu, dołączenie do logu serwera lub utworzenie centralnego
+logu przez administratora.
+
+Token można opcjonalnie zapisać w Windows Credential Manager lub Linux
+Secret Service. Na Linuxie potrzebne są `secret-tool` i działający Secret
+Service w sesji użytkownika. Automatyczne łączenie wymaga zapisanej
+konfiguracji istniejącego lokalnego logu i tokenu w magazynie systemowym;
+jest domyślnie wyłączone.
+
+**Options → Host central server on this station...** uruchamia serwer
+w procesie GUI z osobną bazą, certyfikatem/kluczem PEM i plikiem poświadczeń
+JSON. Host może mieć włączony autostart, ale zatrzymuje się przy zamknięciu
+aplikacji. Do stałej usługi służy oddzielny `contest_logger_server`;
+konfigurację opisuje [runbook](./NETWORKING_OPERATIONS.md). Nie współdziel
+aktywnego pliku SQLite między komputerami.
+
+**Disconnect central network** rozłącza Clienta bez kasowania lokalnych
+logów i kolejki. Klient z uprawnieniem tylko `read` pobiera dane, ale nie
+może modyfikować QSO ani rezerwować numerów. Nowy numer seryjny wymaga
+potwierdzenia serwera; wcześniej potwierdzoną rezerwację można wykorzystać
+offline. Synchronizacja pozostaje przed pilotażem — nie traktuj jej jeszcze
+jako zatwierdzonej do pracy w zawodach.
+
+### Status sieci i podłączone stacje
+
+Otwórz **Options → Network status and queue...**. Oprócz lokalnego stanu
+połączenia, rewizji, kolejki i rezerwacji numerów okno pokazuje podłączone
+stacje wybranego logu: nazwę komputera (**Computer**), znak stacji
+(**Station callsign**), operatora (**Operator**) i stan **Connected**.
+Własna stacja ma oznaczenie **Connected (this station)**. Nazwa komputera
+jest pobierana z systemu, a znak i operator z konfiguracji **Operator and
+station...** (znak aktywnego logu ma pierwszeństwo). Zmiana tych ustawień
+jest przekazywana bez ponownego łączenia.
+
+Są to aktywne, uwierzytelnione sesje, a nie historyczna lista stacji.
+UUID nadal służą do identyfikacji w protokole, ale nie są wyświetlane
+w tabeli. Dla pustego opisu lub starszego klienta/serwera bez obsługi
+opisów wyświetlane jest **Not provided**, nie UUID. Opisy są deklarowane
+przez klientów i nie służą do uwierzytelniania.
+
+Lista jest odświeżana po otwarciu, co 5 sekund, po zmianie stanu połączenia
+oraz przyciskiem **Refresh**. Dostęp mają także klienci tylko do odczytu;
+uprawnienie administratora nie jest wymagane. GUI Host korzysta z lokalnego
+serwera, jeśli Client nie jest połączony z wybranym logiem. Po rozłączeniu
+bez aktywnego Hosta tabela jest czyszczona z komunikatem o niedostępności,
+a błąd pobrania jest pokazywany nad tabelą. Dla logu bez aktywnych sesji
+pokazywana jest liczba 0.
 
 ## 14. Skróty klawiszowe
 
@@ -506,7 +642,10 @@ wymianę nadaną i odebraną.
 | `Ctrl+N` | Nowy log |
 | `Ctrl+Q` | Zakończ program |
 | `F1`–`F8` | Wyślij komunikat CW Fn (tylko emisja CW) |
-| `Esc`, `Ctrl+Esc` | Przerwij nadawanie CW i wyczyść kolejkę |
+| `Ctrl+K` | Otwórz okno nadawania CW na bieżąco |
+| `PageUp` / `PageDown` | Zwiększ / zmniejsz prędkość CW o 1 WPM (5–80) |
+| `Esc` | Przerwij CW i wyczyść kolejkę; w bezczynnym oknie CW schowaj je |
+| `Ctrl+Esc` | Zawsze przerwij CW i wyczyść kolejkę |
 | `Ctrl+W` | Wyczyść aktywny panel QSO |
 | `Ctrl+Tab` | Przełącz panel QSO A/B (SO2V/SO2R) |
 | `Ctrl+Up` / `Ctrl+Down` | Poprzedni / następny spot w bandmapie |
@@ -689,7 +828,7 @@ Bez nagłówka: wiersze rozdzielone spacjami w kolejności `CALL NAME QTH EXCHAN
 Rozpoznawane kolumny: `CALL`/`CALLSIGN`, `NAME`, `QTH`, `STATE`, `GRID`,
 `SECTION`, `SERIAL`, `REPORT`, `EXCHANGE` oraz nazwy pól wymiany.
 
-### 16.7 Fragment pliku ustawień (Linux, `~/.config/ContestLogger/ContestLogger.conf`)
+### 16.7 Fragment pliku ustawień (`…/config/ContestLogger/ContestLogger.ini`)
 
 ```ini
 [station]
@@ -780,13 +919,16 @@ END-OF-LOG:
 ### Log i edycja
 
 - **Brak usuwania QSO** z poziomu programu (ani menu, ani klawisza `Delete`).
-- Brak cofania (undo), importu ADIF/Cabrillo, wydruku i statystyk graficznych.
+- Brak cofania (undo), wydruku i statystyk graficznych.
 - Brak popupu z uzupełnianiem znaku w polu Call — podpowiedzi są tylko w
   oknie *Check partial*.
 - Tabela logu nie ma sortowania (poza chronologicznym), filtrowania ani
   wyszukiwania. Okno *DX Cluster announcements* przechowuje maks. 500 ostatnich
   ogłoszeń.
-- Brak trybu multi-op w sieci (synchronizacja wielu stanowisk).
+- Synchronizacja centralnego logu jest wdrożona, ale niezatwierdzona do
+  pracy w zawodach: pozostają pełne testy awaryjne, próba odzyskiwania
+  w środowisku docelowym i pilotaż 2–3 stacji. Szczegóły w
+  [NETWORKING.md](../NETWORKING.md) i [TODO.md](../TODO.md).
 - ESM ma celowo podstawową regułę: CW Call/Enter wysyła F5 i przechodzi do
   wymiany, a Enter po wymianie zapisuje QSO i po sukcesie uruchamia sekwencję
   wiadomości skonfigurowaną per contest. Same sekwencje ESM nie są warunkowane

@@ -3,6 +3,7 @@
 #include <QSignalSpy>
 #include <QElapsedTimer>
 #include <QProcess>
+#include <QNetworkDatagram>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -20,6 +21,7 @@ private slots:
     void mockKeyerQueuesAndAborts();
     void queuedMessagesKeepTheirRequestedVfo();
     void changesSpeedOnMockKeyer();
+    void liveTextPreservesSpacesAndCoalescesPendingCharacters();
     void cwdaemonSendsTextSpeedAndAbortCommands();
     void cwdaemonRejectsVfoBWithoutSending();
     void mockCompletionDrivesPacing();
@@ -122,6 +124,53 @@ void CwKeyerTest::changesSpeedOnMockKeyer()
     QTRY_COMPARE_WITH_TIMEOUT(
         qvariant_cast<logger::CwKeyerStatus>(statuses.constLast().first()).wpm,
         32, 3000);
+}
+
+void CwKeyerTest::liveTextPreservesSpacesAndCoalescesPendingCharacters()
+{
+    QUdpSocket receiver;
+    QVERIFY(receiver.bind(QHostAddress::LocalHost, 0));
+    logger::CwKeyerController controller;
+    QSignalSpy statuses(&controller, &logger::CwKeyerController::statusChanged);
+    logger::CwKeyerConfig config;
+    config.type = logger::CwKeyerType::Cwdaemon;
+    config.port = receiver.localPort();
+    controller.connectKeyer(config);
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray::fromHex("1b323235"));
+    QTRY_VERIFY(!statuses.isEmpty()
+                && qvariant_cast<logger::CwKeyerStatus>(statuses.last().first()).state
+                    == logger::ConnectionState::Connected);
+    controller.enqueueText(QStringLiteral("C"));
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    const auto completionRequest = receiver.receiveDatagram();
+    QCOMPARE(completionRequest.data(), QByteArray("\x1b" "h1"));
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray("C"));
+
+    controller.enqueueText(QStringLiteral("Q"));
+    controller.enqueueText(QStringLiteral(" "));
+    controller.enqueueText(QStringLiteral("TEST "));
+    QTRY_COMPARE(qvariant_cast<logger::CwKeyerStatus>(statuses.last().first()).queuedMessages, 1);
+    QTest::qWait(50);
+    QVERIFY(!receiver.hasPendingDatagrams());
+    receiver.writeDatagram(QByteArray("h1\r\n"), completionRequest.senderAddress(),
+                           completionRequest.senderPort());
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    const auto nextRequest = receiver.receiveDatagram();
+    QCOMPARE(nextRequest.data(), QByteArray("\x1b" "h2"));
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray("Q TEST "));
+    controller.enqueueText(QStringLiteral(" "));
+    receiver.writeDatagram(QByteArray("h2\r\n"), nextRequest.senderAddress(),
+                           nextRequest.senderPort());
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray("\x1b" "h3"));
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray(" "));
+    controller.abortTransmission();
+    QTRY_VERIFY(receiver.hasPendingDatagrams());
+    QCOMPARE(receiver.receiveDatagram().data(), QByteArray::fromHex("1b37"));
 }
 
 void CwKeyerTest::cwdaemonSendsTextSpeedAndAbortCommands()

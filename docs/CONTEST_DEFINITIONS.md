@@ -4,6 +4,15 @@ Definicja zawodów to plik YAML opisujący pasma, emisje, wymianę i punktację.
 
 Import własnej definicji: menu plików programu, opcja importu definicji zawodów (pliki `*.yaml`, `*.yml`). Plik jest walidowany; błąd zawiera ścieżkę do niepoprawnego ustawienia (np. `contest.exchange.sent[1].type`).
 
+Przy pierwszym uruchomieniu program tworzy podkatalog `contests` w katalogu
+danych aplikacji i zapisuje w nim brakujące wbudowane definicje. Domyślna ścieżka
+to `~/.local/share/ContestLogger/ContestLogger/contests/` na Linuksie lub
+`%APPDATA%\ContestLogger\ContestLogger\contests\` na Windows. Można umieszczać
+tam własne pliki `.yaml` i `.yml`; są odczytywane przy starcie i otwieraniu
+okna nowego logu. Istniejące pliki nie są nadpisywane podczas startu.
+Import z menu **Contest** lub okna **New log** również zapisuje YAML w tym
+katalogu. Każda definicja w katalogu musi mieć unikalne `id`.
+
 Nowy log tworzy się oknem **File > New log...** (Ctrl+N): wybór zawodów z listy zainstalowanych definicji (lub przycisk **Import YAML...**), znak stacji, operatorzy, klub, data startu, nazwa logu, kategorie Cabrillo i wymiana nadawana. Pasma i emisje w kategoriach pochodzą z definicji (`bands`, `modes`).
 
 Zasady ogólne:

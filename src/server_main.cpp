@@ -28,6 +28,10 @@ int main(int argc, char *argv[])
     const QCommandLineOption listenOption(
         QStringList{QStringLiteral("listen")},
         QStringLiteral("Run the TLS synchronization server."));
+    const QCommandLineOption restoreOption(
+        QStringList{QStringLiteral("restore-backup")},
+        QStringLiteral("Restore a verified central database backup and exit."),
+        QStringLiteral("backup-file"));
     const QCommandLineOption addressOption(
         QStringList{QStringLiteral("address")},
         QStringLiteral("Numeric bind address (default: 0.0.0.0)."),
@@ -55,6 +59,7 @@ int main(int argc, char *argv[])
     parser.addOption(dataDirectoryOption);
     parser.addOption(checkOption);
     parser.addOption(listenOption);
+    parser.addOption(restoreOption);
     parser.addOption(addressOption);
     parser.addOption(portOption);
     parser.addOption(certificateOption);
@@ -64,8 +69,11 @@ int main(int argc, char *argv[])
     parser.process(application);
 
     QTextStream errorOutput(stderr);
-    if (parser.isSet(checkOption) == parser.isSet(listenOption)) {
-        errorOutput << "Choose exactly one of --check or --listen.\n";
+    const int selectedActions = static_cast<int>(parser.isSet(checkOption))
+        + static_cast<int>(parser.isSet(listenOption))
+        + static_cast<int>(parser.isSet(restoreOption));
+    if (selectedActions != 1) {
+        errorOutput << "Choose exactly one of --check, --listen or --restore-backup.\n";
         return 2;
     }
 
@@ -80,8 +88,33 @@ int main(int argc, char *argv[])
         return 2;
     }
 
-    logger::CentralRepository repository;
     QString error;
+    if (parser.isSet(restoreOption)) {
+        if (!QDir().mkpath(dataDirectory)) {
+            errorOutput << "Could not create the central data directory.\n";
+            return 1;
+        }
+        const QString databasePath =
+            QDir(dataDirectory).filePath(QStringLiteral("central-log.sqlite"));
+        if (!logger::SqliteRepository::restoreFromBackup(
+                databasePath, parser.value(restoreOption), &error)) {
+            errorOutput << "Central database restore failed: " << error << '\n';
+            return 1;
+        }
+        logger::CentralRepository restoredRepository;
+        if (!restoredRepository.initialize(dataDirectory, &error)) {
+            errorOutput << "Restored central database validation failed: "
+                        << error << '\n';
+            return 1;
+        }
+        QTextStream output(stdout);
+        output << "Verified central database backup restored: "
+               << QDir::toNativeSeparators(databasePath) << '\n'
+               << "A pre-restore database, if present, was preserved beside it.\n";
+        return 0;
+    }
+
+    logger::CentralRepository repository;
     if (!repository.initialize(dataDirectory, &error)) {
         errorOutput << "Central database check failed: " << error << '\n';
         return 1;

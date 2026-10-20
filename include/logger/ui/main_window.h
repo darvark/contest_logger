@@ -41,6 +41,8 @@ class QCloseEvent;
 
 namespace logger {
 
+struct NewLogContestOption;
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -58,6 +60,7 @@ private slots:
     void configureRadioB();
     void exportCabrillo();
     void exportAdif();
+    void importLog();
     void backupDatabase();
     void configureDxCluster();
     void configureNetworkConnection();
@@ -90,7 +93,7 @@ private slots:
     void refreshBandmap();
     void activateSpot(int row, int column);
     void activateSpotId(qint64 spotId, int radio = -1, int context = -1);
-    void queueCwMessage();
+    void showCwInput();
     void abortCwTransmission();
     void handleEntryEnter(int vfo, bool callsignField);
     void setRunMode(int mode);
@@ -108,6 +111,9 @@ private slots:
     void updateRadioSnapshotForRadio(int radio, const logger::RadioSnapshot &snapshot);
 
 private:
+    void recordNetworkContact();
+    void autoStartNetworkClient();
+    void autoStartHostServer();
     void loadBuiltInDefinitions();
     void loadOperator();
     void loadContests();
@@ -123,6 +129,7 @@ private:
     void rebuildQsoForm(int vfo);
     void refreshRecentQsos();
     void exportCurrentLog(LogExportFormat format);
+    bool newLogOptions(QVector<NewLogContestOption> *options, QString *error) const;
     void configureRadioContext(int radio);
     void autoConnectRadios();
     void updateSerialFields();
@@ -149,6 +156,8 @@ private:
     void showOperatorMessage(const QString &message, bool alert = false);
     bool sendCwTemplate(QString message, int context, QString *problem,
                         QString callsignOverride = {});
+    int cwRadioForContext(int context) const;
+    bool prepareCwTransmission(int context, QString *problem);
     bool sendEsmSequence(const QString &sequence, int context,
                          QString callsignOverride = {});
     QString esmSequenceForContest(const QString &stage,
@@ -173,6 +182,8 @@ private:
     Contest m_pendingRemoteContest;
     QString m_pendingRemoteDefinitionYaml;
     QString m_pendingSerialHistoryRequestId;
+    QString m_pendingAdminSerialRequestId;
+    QString m_pendingSerialAdjustmentRequestId;
     bool m_joiningRemoteLog = false;
     bool m_creatingRemoteLog = false;
     bool m_mergingRemoteLog = false;
@@ -264,17 +275,19 @@ private:
     QStringList m_checkCallsigns;
     QVector<CtyPrefixEntry> m_ctyPrefixes;
     RadioSnapshot m_radioSnapshots[2];
+    QMap<int, qint64> m_runFrequencies[2];
     QDateTime m_radioSnapshotTimes[2];
     QString m_lastRadioModes[2];
     QTimer *m_catStaleTimer = nullptr;
     int m_cwConfiguredRadio = 0;
     QLineEdit *m_cwMessageEdit = nullptr;
-    QComboBox *m_cwRadioSelector = nullptr;
-    QSpinBox *m_cwWpmSpin = nullptr;
+    QWidget *m_cwInputWindow = nullptr;
+    QString m_cwTypedText;
+    quint64 m_cwEnqueuedRequests = 0;
+    int m_cwWpm = 25;
     QLabel *m_cwStatusLabel = nullptr;
     QDockWidget *m_bandmapDock = nullptr;
     QDockWidget *m_radioABandmapDock = nullptr;
-    QDockWidget *m_cwDock = nullptr;
     QDockWidget *m_contestInfoDock = nullptr;
     QDockWidget *m_clusterDock = nullptr;
     QDockWidget *m_checkPartialDock = nullptr;

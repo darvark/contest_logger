@@ -131,6 +131,7 @@ private slots:
     void updatesQsoAndPersistsExchangeFields();
     void resolvesSyncConflictByAcceptingServer();
     void resolvesSyncConflictByKeepingLocalAsNewUpdate();
+    void resolvesSyncConflictByMergingSelectedFields();
     void loadsAllQsosForDupeChecking();
     void savesAndReadsSpot();
     void savesSpotWithoutMode();
@@ -219,7 +220,7 @@ void SqliteRepositoryTest::appliesSchemaMigrationOnce()
     QSqlQuery query(database.database());
     QVERIFY(query.exec(QStringLiteral("SELECT MAX(version) FROM schema_migrations")));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 13);
+    QCOMPARE(query.value(0).toInt(), 17);
     query.finish();
 
     QVERIFY2(database.repository().initialize(&error), qPrintable(error));
@@ -1052,6 +1053,99 @@ void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
     QCOMPARE(audit.value(0).toString(), QStringLiteral("keep_local"));
     QVERIFY(audit.value(1).toString().contains(QStringLiteral("N0LOCAL")));
     QVERIFY(audit.value(2).toString().contains(QStringLiteral("W1SERVER")));
+}
+
+void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
+{
+    TestDatabase database;
+    auto &repository = database.repository();
+    QString error;
+    const logger::Contest contest = repository.contests(&error).first();
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY2(repository.setSynchronizationEnabled(contest.logUuid, true, &error),
+             qPrintable(error));
+
+    logger::Qso qso = sampleQso();
+    QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
+    QVector<logger::SyncOutboxOperation> operations =
+        repository.syncOutbox(contest.logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY2(repository.setSyncOperationState(
+                 operations.first().operationUuid, QStringLiteral("in-flight"),
+                 {}, &error), qPrintable(error));
+    QVERIFY2(repository.setSyncOperationState(
+                 operations.first().operationUuid, QStringLiteral("accepted"),
+                 {}, &error), qPrintable(error));
+
+    qso.callsign = QStringLiteral("N0LOCAL");
+    qso.sentExchange = QStringLiteral("599 101");
+    QVERIFY2(repository.updateQso(qso, &error), qPrintable(error));
+    operations = repository.syncOutbox(contest.logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QString conflictedOperationUuid = operations.first().operationUuid;
+    const QJsonObject localPayload =
+        QJsonDocument::fromJson(operations.first().payloadJson.toUtf8()).object();
+    QJsonObject remote = localPayload.value(QStringLiteral("qso")).toObject();
+    remote.insert(QStringLiteral("callsign"), QStringLiteral("W1SERVER"));
+    remote.insert(QStringLiteral("received_exchange"), QStringLiteral("599 202"));
+    remote.insert(QStringLiteral("qso_version"), 2);
+    remote.insert(QStringLiteral("is_deleted"), false);
+    QVERIFY2(repository.recordSyncConflict(
+                 conflictedOperationUuid,
+                 QString::fromUtf8(QJsonDocument(remote)
+                                       .toJson(QJsonDocument::Compact)),
+                 &error), qPrintable(error));
+
+    const QJsonObject localQso = localPayload.value(QStringLiteral("qso")).toObject();
+    QJsonObject merged;
+    const QStringList mergeFields{
+        QStringLiteral("callsign"), QStringLiteral("station_callsign"),
+        QStringLiteral("band"), QStringLiteral("timestamp_utc"),
+        QStringLiteral("frequency_hz"), QStringLiteral("mode"),
+        QStringLiteral("sent_exchange"), QStringLiteral("received_exchange"),
+        QStringLiteral("sent_exchange_fields"),
+        QStringLiteral("received_exchange_fields"), QStringLiteral("points")
+    };
+    for (const QString &field : mergeFields) {
+        merged.insert(field, localQso.value(field));
+    }
+    merged.insert(QStringLiteral("callsign"), QStringLiteral("K2MERGED"));
+    merged.insert(QStringLiteral("received_exchange"), QStringLiteral("599 202"));
+    QVERIFY2(repository.resolveSyncConflictMerge(
+                 conflictedOperationUuid, merged, &error), qPrintable(error));
+
+    const auto stored = repository.qsoById(qso.id, &error);
+    QVERIFY2(stored.has_value(), qPrintable(error));
+    QCOMPARE(stored->callsign, QStringLiteral("K2MERGED"));
+    QCOMPARE(stored->sentExchange, QStringLiteral("599 101"));
+    QCOMPARE(stored->receivedExchange, QStringLiteral("599 202"));
+    QCOMPARE(stored->qsoVersion, 3);
+    QCOMPARE(stored->syncStatus, logger::QsoSyncStatus::Pending);
+
+    operations = repository.syncOutbox(contest.logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(operations.size(), 1);
+    QVERIFY(operations.first().operationUuid != conflictedOperationUuid);
+    const QJsonObject rebased =
+        QJsonDocument::fromJson(operations.first().payloadJson.toUtf8()).object();
+    QCOMPARE(rebased.value(QStringLiteral("expected_version")).toInt(), 2);
+    QCOMPARE(rebased.value(QStringLiteral("qso")).toObject()
+                 .value(QStringLiteral("callsign")).toString(),
+             QStringLiteral("K2MERGED"));
+
+    QSqlQuery audit(database.database());
+    QVERIFY(audit.exec(QStringLiteral(
+        "SELECT resolution, resolution_payload_json "
+        "FROM sync_conflict_resolutions")));
+    QVERIFY(audit.next());
+    QCOMPARE(audit.value(0).toString(), QStringLiteral("merge"));
+    const QJsonObject auditPayload =
+        QJsonDocument::fromJson(audit.value(1).toString().toUtf8())
+            .object().value(QStringLiteral("qso")).toObject();
+    QCOMPARE(auditPayload.value(QStringLiteral("callsign")).toString(),
+             QStringLiteral("K2MERGED"));
+    QCOMPARE(auditPayload.value(QStringLiteral("received_exchange")).toString(),
+             QStringLiteral("599 202"));
 }
 
 void SqliteRepositoryTest::deletesQsoWithAtomicOutboxTombstone()

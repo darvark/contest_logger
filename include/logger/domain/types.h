@@ -77,6 +77,8 @@ struct SerialReservation {
     int serialNumber = 0;
     QString status;
     QString qsoUuid;
+    QDateTime createdAtUtc;
+    QDateTime updatedAtUtc;
 };
 
 struct SerialReservationRequest {
@@ -86,6 +88,7 @@ struct SerialReservationRequest {
     QString operation;
     QString band;
     QString mode;
+    QDateTime createdAtUtc;
 };
 
 struct Contest {

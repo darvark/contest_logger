@@ -35,7 +35,7 @@ public:
 
     bool sendText(const QString &text, int, QString *error) override
     {
-        if (!m_connected || text.trimmed().isEmpty()) {
+        if (!m_connected || text.isEmpty()) {
             if (error != nullptr) {
                 *error = QStringLiteral("Mock keyer is disconnected or message is empty.");
             }
@@ -141,7 +141,7 @@ public:
             }
             return false;
         }
-        if (!m_connected || text.trimmed().isEmpty()) {
+        if (!m_connected || text.isEmpty()) {
             if (error != nullptr) {
                 *error = QStringLiteral("cwdaemon is not configured or message is empty.");
             }
@@ -334,7 +334,7 @@ public:
 
     bool sendText(const QString &text, int transmitVfo, QString *error) override
     {
-        if (!m_open || text.trimmed().isEmpty()) {
+        if (!m_open || text.isEmpty()) {
             if (error != nullptr) {
                 *error = QStringLiteral("Hamlib keyer is not connected or message is empty.");
             }
@@ -543,8 +543,9 @@ void CwKeyerWorker::connectKeyer(const CwKeyerConfig &config)
     m_config.wpm = qBound(5, config.wpm, 80);
     m_lastError.clear();
     if (!m_keyer->setWpm(m_config.wpm, &error)) {
-        publishStatus(tr("CW keyer ready; initial WPM could not be applied: %1")
-                          .arg(error));
+        m_lastError = tr("CW keyer ready; initial WPM could not be applied: %1")
+                          .arg(error);
+        publishStatus(m_lastError);
     } else {
         publishStatus(tr("CW keyer ready."));
     }
@@ -571,8 +572,18 @@ void CwKeyerWorker::disconnectKeyer()
 
 void CwKeyerWorker::enqueueMessage(const QString &text, int transmitVfo)
 {
-    const QString message = text.trimmed();
-    if (message.isEmpty()) {
+    queueText(text.trimmed(), transmitVfo, false);
+}
+
+void CwKeyerWorker::enqueueText(const QString &text, int transmitVfo)
+{
+    queueText(text, transmitVfo, true);
+}
+
+void CwKeyerWorker::queueText(const QString &text, int transmitVfo, bool live)
+{
+    ++m_processedEnqueues;
+    if (text.isEmpty()) {
         publishStatus(tr("CW message is empty."));
         return;
     }
@@ -584,11 +595,17 @@ void CwKeyerWorker::enqueueMessage(const QString &text, int transmitVfo)
         publishStatus(tr("CW transmit VFO must be A or B."));
         return;
     }
+    if (live && !m_queue.isEmpty() && m_queue.last().live
+        && m_queue.last().transmitVfo == transmitVfo) {
+        m_queue.last().text += text;
+        publishStatus(tr("CW text queued."));
+        return;
+    }
     if (m_queue.size() >= 100) {
         publishStatus(tr("CW queue is full (100 messages maximum)."));
         return;
     }
-    m_queue.append({message, transmitVfo});
+    m_queue.append({text, transmitVfo, live});
     if (!m_transmitting && !m_queueTimer->isActive()) {
         sendNextMessage();
     } else {
@@ -659,7 +676,7 @@ void CwKeyerWorker::sendNextMessage()
     m_transmittingVfo = queued.transmitVfo;
     m_timedOut = false;
     publishStatus(tr("Sending CW."));
-    const int estimate = estimatedDurationMs(message);
+    const int estimate = estimatedDurationMs(message, queued.live);
     if (m_keyer->supportsCompletion()) {
         // Safety policy: if the keyer never confirms, the worker stops the
         // queue instead of sending blindly (which could key over the operator
@@ -755,9 +772,11 @@ void CwKeyerWorker::publishStatus(const QString &message)
                                              ? ConnectionState::Disconnected
                                              : ConnectionState::Error);
     status.message = message.isEmpty() ? m_lastError : message;
+    status.error = m_lastError;
     status.queuedMessages = m_queue.size();
     status.wpm = m_config.wpm;
     status.transmitting = m_transmitting;
+    status.processedEnqueues = m_processedEnqueues;
     status.transmitVfo = m_transmittingVfo;
     status.completionTimedOut = m_timedOut;
     if (m_keyer != nullptr) {
@@ -768,9 +787,44 @@ void CwKeyerWorker::publishStatus(const QString &message)
     emit statusChanged(status);
 }
 
-int CwKeyerWorker::estimatedDurationMs(const QString &text) const
+int CwKeyerWorker::estimatedDurationMs(const QString &text, bool live) const
 {
     const int wpm = qMax(5, m_config.wpm);
+    if (live) {
+        static const QMap<QChar, QString> morse{
+            {'A', ".-"}, {'B', "-..."}, {'C', "-.-."}, {'D', "-.."},
+            {'E', "."}, {'F', "..-."}, {'G', "--."}, {'H', "...."},
+            {'I', ".."}, {'J', ".---"}, {'K', "-.-"}, {'L', ".-.."},
+            {'M', "--"}, {'N', "-."}, {'O', "---"}, {'P', ".--."},
+            {'Q', "--.-"}, {'R', ".-."}, {'S', "..."}, {'T', "-"},
+            {'U', "..-"}, {'V', "...-"}, {'W', ".--"}, {'X', "-..-"},
+            {'Y', "-.--"}, {'Z', "--.."}, {'0', "-----"}, {'1', ".----"},
+            {'2', "..---"}, {'3', "...--"}, {'4', "....-"}, {'5', "....."},
+            {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."},
+            {'.', ".-.-.-"}, {',', "--..--"}, {'?', "..--.."}, {'/', "-..-."},
+            {'=', "-...-"}, {'+', ".-.-."}, {'-', "-....-"}, {'@', ".--.-."},
+            {'(', "-.--."}, {')', "-.--.-"}, {':', "---..."}, {';', "-.-.-."},
+            {'\'', ".----."}, {'"', ".-..-."}, {'!', "-.-.--"}, {'_', "..--.-"}
+        };
+        int units = 0;
+        for (const QChar ch : text.toUpper()) {
+            if (ch.isSpace()) {
+                // The preceding character already includes a three-unit gap.
+                units += 4;
+                continue;
+            }
+            const auto code = morse.constFind(ch);
+            if (code == morse.cend()) {
+                units += 12;
+                continue;
+            }
+            units += code->size() - 1 + 3;
+            for (const QChar element : *code) {
+                units += element == QLatin1Char('.') ? 1 : 3;
+            }
+        }
+        return qMax(1, units * 1200 / wpm);
+    }
     const int units = qMax(1, text.size()) * 12;
     return qMax(250, units * 1200 / wpm);
 }
@@ -788,6 +842,8 @@ CwKeyerController::CwKeyerController(QObject *parent)
             m_worker, &CwKeyerWorker::disconnectKeyer, Qt::QueuedConnection);
     connect(this, &CwKeyerController::enqueueRequested,
             m_worker, &CwKeyerWorker::enqueueMessage, Qt::QueuedConnection);
+    connect(this, &CwKeyerController::textRequested,
+            m_worker, &CwKeyerWorker::enqueueText, Qt::QueuedConnection);
     connect(this, &CwKeyerController::abortRequested,
             m_worker, &CwKeyerWorker::abortTransmission, Qt::QueuedConnection);
     connect(this, &CwKeyerController::setWpmRequested,
@@ -827,6 +883,11 @@ void CwKeyerController::enqueueMessage(const QString &text, int transmitVfo)
 void CwKeyerController::abortTransmission()
 {
     emit abortRequested();
+}
+
+void CwKeyerController::enqueueText(const QString &text, int transmitVfo)
+{
+    emit textRequested(text, transmitVfo);
 }
 
 void CwKeyerController::setWpm(int wpm)

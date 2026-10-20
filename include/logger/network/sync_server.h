@@ -3,6 +3,7 @@
 #include "logger/data/central_repository.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QSslCertificate>
@@ -33,6 +34,7 @@ public:
     void close();
     quint16 serverPort() const;
     int activeConnections() const;
+    QJsonArray connectedStations(const QString &logUuid) const;
 
 private:
     struct ClientSession;
@@ -49,11 +51,14 @@ private:
                    const QString &requestId, const QString &code,
                    const QString &message, bool retryable = false,
                    const QJsonObject &context = {});
+    void notifyLogRevision(const QString &logUuid, qint64 revision);
     void closeSession(QSslSocket *socket);
     void touchSession(QSslSocket *socket);
+    bool runEventRetention(QString *error = nullptr);
 
     CentralRepository &m_repository;
     std::unique_ptr<TlsTcpServer> m_server;
+    std::unique_ptr<QTimer> m_eventRetentionTimer;
     QHash<QSslSocket *, ClientSession *> m_sessions;
     QHash<QString, QJsonObject> m_credentials;
     QSslCertificate m_certificate;

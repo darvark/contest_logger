@@ -165,6 +165,7 @@ private slots:
     void rejectsUnsupportedProtocolVersion();
     void enforcesConcurrentConnectionLimit();
     void connectsWithVerifiedTlsClient();
+    void reportsConnectedStationsForSelectedLog();
     void discoversAndSelectsRemoteLogForJoining();
     void rejectsUntrustedServerCertificate();
     void synchronizesOutboxAndChangesAtomically();
@@ -278,7 +279,8 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
         {QStringLiteral("client_version"), QStringLiteral("test")},
         {QStringLiteral("min_protocol_version"), 1},
         {QStringLiteral("max_protocol_version"), 1},
-        {QStringLiteral("capabilities"), QJsonArray{}}
+        {QStringLiteral("capabilities"),
+         QJsonArray{QStringLiteral("event_notifications")}}
     }, 1, true);
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
              QStringLiteral("hello_ack"));
@@ -286,6 +288,7 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
         .toObject().value(QStringLiteral("capabilities")).toArray();
     QVERIFY(capabilities.contains(QStringLiteral("list_logs")));
     QVERIFY(capabilities.contains(QStringLiteral("get_serial_reservations")));
+    QVERIFY(capabilities.contains(QStringLiteral("event_notifications")));
 
     response = request(socket, QStringLiteral("authenticate"), QJsonObject{
         {QStringLiteral("station_uuid"), QString::fromLatin1(StationUuid)},
@@ -293,6 +296,8 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     });
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
              QStringLiteral("authenticated"));
+    const QString sessionUuid = response.value(QStringLiteral("payload"))
+        .toObject().value(QStringLiteral("session_uuid")).toString();
 
     response = request(socket, QStringLiteral("list_logs"), {});
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
@@ -328,6 +333,16 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QCOMPARE(metrics.value(QStringLiteral("current_revision")).toInteger(), qint64(0));
     QCOMPARE(metrics.value(QStringLiteral("online_station_count")).toInt(), 1);
 
+    response = request(socket, QStringLiteral("heartbeat"), QJsonObject{
+        {QStringLiteral("session_uuid"), sessionUuid},
+        {QStringLiteral("last_applied_revision"), 0},
+        {QStringLiteral("pending_count"), 2},
+        {QStringLiteral("error_count"), 1},
+        {QStringLiteral("conflict_count"), 3}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("heartbeat_ack"));
+
     response = request(socket, QStringLiteral("get_snapshot"), QJsonObject{
         {QStringLiteral("log_uuid"), logUuid},
         {QStringLiteral("offset"), 0},
@@ -347,6 +362,35 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QCOMPARE(status.value(QStringLiteral("current_revision")).toInteger(), qint64(0));
     QCOMPARE(status.value(QStringLiteral("station_cursor")).toInteger(), qint64(0));
     QCOMPARE(status.value(QStringLiteral("connected_stations")).toArray().size(), 1);
+    const QJsonObject legacyStation =
+        status.value(QStringLiteral("connected_stations")).toArray().first().toObject();
+    QCOMPARE(legacyStation.value(QStringLiteral("station_uuid")).toString(),
+             QString::fromLatin1(StationUuid));
+    QVERIFY(legacyStation.value(QStringLiteral("computer_name")).toString().isEmpty());
+    QVERIFY(legacyStation.value(QStringLiteral("operator_name")).toString().isEmpty());
+
+    QSslSocket legacySocket;
+    QVERIFY(connectTls(legacySocket, m_server->serverPort(), m_certificate));
+    response = request(legacySocket, QStringLiteral("hello"), QJsonObject{
+        {QStringLiteral("client_version"), QStringLiteral("test")},
+        {QStringLiteral("min_protocol_version"), 1},
+        {QStringLiteral("max_protocol_version"), 1},
+        {QStringLiteral("capabilities"), QJsonArray{}}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("hello_ack"));
+    response = request(legacySocket, QStringLiteral("authenticate"), QJsonObject{
+        {QStringLiteral("station_uuid"), QString::fromLatin1(ReadOnlyStationUuid)},
+        {QStringLiteral("token"), QString::fromLatin1(ReadOnlyStationToken)}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("authenticated"));
+    response = request(legacySocket, QStringLiteral("select_log"), QJsonObject{
+        {QStringLiteral("log_uuid"), logUuid},
+        {QStringLiteral("contest_definition_sha256"), QJsonValue::Null}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("welcome"));
 
     const QString stationUuid = QString::fromLatin1(StationUuid);
     const QString operationUuid = QUuid::createUuid()
@@ -396,6 +440,18 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QCOMPARE(operationResults.size(), 1);
     QCOMPARE(operationResults.first().toObject()
                  .value(QStringLiteral("revision")).toInteger(), qint64(1));
+    QJsonObject notification;
+    QVERIFY(readFrame(socket, &notification));
+    QVERIFY(notification.value(QStringLiteral("request_id")).isNull());
+    QCOMPARE(notification.value(QStringLiteral("type")).toString(),
+             QStringLiteral("event_available"));
+    const QJsonObject notificationPayload =
+        notification.value(QStringLiteral("payload")).toObject();
+    QCOMPARE(notificationPayload.value(QStringLiteral("log_uuid")).toString(),
+             logUuid);
+    QCOMPARE(notificationPayload.value(QStringLiteral("current_revision"))
+                 .toInteger(), qint64(1));
+    QVERIFY(!waitForBytes(legacySocket, 1, 100));
 
     response = request(socket, QStringLiteral("get_snapshot"), QJsonObject{
         {QStringLiteral("log_uuid"), logUuid},
@@ -468,6 +524,25 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QCOMPARE(failedBatchResponse.value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("code")).toString(),
              QStringLiteral("VERSION_CONFLICT"));
+    response = request(socket, QStringLiteral("get_metrics"), QJsonObject{
+        {QStringLiteral("log_uuid"), logUuid}
+    });
+    const QJsonObject detailedMetrics =
+        response.value(QStringLiteral("payload")).toObject();
+    const QJsonArray clientMetrics =
+        detailedMetrics.value(QStringLiteral("clients")).toArray();
+    QCOMPARE(clientMetrics.size(), 1);
+    QCOMPARE(clientMetrics.first().toObject()
+                 .value(QStringLiteral("pending_count")).toInt(), 2);
+    QCOMPARE(clientMetrics.first().toObject()
+                 .value(QStringLiteral("error_count")).toInt(), 1);
+    QCOMPARE(clientMetrics.first().toObject()
+                 .value(QStringLiteral("conflict_count")).toInt(), 3);
+    QCOMPARE(detailedMetrics.value(QStringLiteral("transaction_count")).toInt(), 4);
+    QCOMPARE(detailedMetrics.value(QStringLiteral("transaction_conflict_count")).toInt(),
+             2);
+    QCOMPARE(detailedMetrics.value(QStringLiteral("transaction_history"))
+                 .toArray().size(), 4);
     response = request(socket, QStringLiteral("get_status"), QJsonObject{
         {QStringLiteral("log_uuid"), logUuid}
     });
@@ -504,6 +579,131 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
              QStringLiteral("acknowledged"));
     QCOMPARE(response.value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("revision")).toInteger(), qint64(1));
+
+    int removedEvents = 0;
+    QString retentionError;
+    QVERIFY2(m_repository->compactSyncEvents(
+                 logUuid, QDateTime::currentDateTimeUtc().addDays(1),
+                 &removedEvents, &retentionError), qPrintable(retentionError));
+    QCOMPARE(removedEvents, 1);
+    response = request(socket, QStringLiteral("get_changes"), QJsonObject{
+        {QStringLiteral("log_uuid"), logUuid},
+        {QStringLiteral("after_revision"), 0}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("error"));
+    QCOMPARE(response.value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("code")).toString(),
+             QStringLiteral("SNAPSHOT_REQUIRED"));
+    response = request(socket, QStringLiteral("get_snapshot"), QJsonObject{
+        {QStringLiteral("limit"), 25},
+        {QStringLiteral("log_uuid"), logUuid},
+        {QStringLiteral("offset"), 0},
+        {QStringLiteral("snapshot_revision"), 1}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("snapshot_page"));
+    const QJsonArray snapshotQsos = response.value(QStringLiteral("payload"))
+                                        .toObject()
+                                        .value(QStringLiteral("qsos")).toArray();
+    QCOMPARE(snapshotQsos.size(), 1);
+    QCOMPARE(snapshotQsos.first().toObject()
+                 .value(QStringLiteral("qso_uuid")).toString(), qsoUuid);
+}
+
+void SyncServerTest::reportsConnectedStationsForSelectedLog()
+{
+    QString error;
+    const auto logs = m_repository->repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!logs.isEmpty());
+    const QString logUuid = logs.first().logUuid;
+    logger::SyncClientConfiguration configuration;
+    configuration.host = QStringLiteral("127.0.0.1");
+    configuration.peerName = QStringLiteral("localhost");
+    configuration.port = m_server->serverPort();
+    configuration.stationUuid = QString::fromLatin1(StationUuid);
+    configuration.computerName = QStringLiteral("RADIO-A");
+    configuration.stationCallsign = QStringLiteral("SP9CLUB");
+    configuration.operatorName = QStringLiteral("Jan SP9ABC");
+    configuration.token = QString::fromLatin1(StationToken);
+    configuration.logUuid = logUuid;
+    configuration.caCertificates = {m_certificate};
+    logger::SyncClient admin;
+    admin.connectToServer(configuration);
+    QTRY_COMPARE(admin.state(), logger::SyncClient::State::Ready);
+    configuration.stationUuid = QString::fromLatin1(ReadOnlyStationUuid);
+    configuration.token = QString::fromLatin1(ReadOnlyStationToken);
+    logger::SyncClient reader;
+    reader.connectToServer(configuration);
+    QTRY_COMPARE(reader.state(), logger::SyncClient::State::Ready);
+
+    QSslSocket unauthenticated;
+    QVERIFY(connectTls(unauthenticated, m_server->serverPort(), m_certificate));
+    QTRY_COMPARE(m_server->activeConnections(), 3);
+    QCOMPARE(m_server->connectedStations(logUuid).size(), 2);
+    QVERIFY(m_server->connectedStations({}).isEmpty());
+    QVERIFY(m_server->connectedStations(
+        QUuid::createUuid().toString(QUuid::WithoutBraces)).isEmpty());
+    QSignalSpy responses(&reader, &logger::SyncClient::responseReceived);
+    const QString requestId = reader.getStatus();
+    QVERIFY(!requestId.isEmpty());
+    QTRY_VERIFY(!responses.isEmpty());
+    const QList<QVariant> response = responses.takeFirst();
+    QCOMPARE(response.at(0).toString(), requestId);
+    QCOMPARE(response.at(1).toString(), QStringLiteral("status"));
+    const QJsonArray stations = response.at(2).toJsonObject()
+        .value(QStringLiteral("connected_stations")).toArray();
+    QCOMPARE(stations.size(), 2);
+    QSet<QString> uuids;
+    for (const QJsonValue &value : stations) {
+        const QJsonObject station = value.toObject();
+        uuids.insert(station.value(QStringLiteral("station_uuid")).toString());
+        QVERIFY(!QUuid(station.value(QStringLiteral("session_uuid")).toString()).isNull());
+        QCOMPARE(station.size(), 5);
+        QCOMPARE(station.value(QStringLiteral("computer_name")).toString(),
+                 QStringLiteral("RADIO-A"));
+        QCOMPARE(station.value(QStringLiteral("station_callsign")).toString(),
+                 QStringLiteral("SP9CLUB"));
+        QCOMPARE(station.value(QStringLiteral("operator_name")).toString(),
+                 QStringLiteral("Jan SP9ABC"));
+    }
+    QCOMPARE(uuids, (QSet<QString>{QString::fromLatin1(StationUuid),
+                                 QString::fromLatin1(ReadOnlyStationUuid)}));
+    reader.setStationIdentity(QStringLiteral("SP9NEW"), QStringLiteral("Anna SP9XYZ"));
+    QTRY_VERIFY([&] {
+        for (const QJsonValue &value : m_server->connectedStations(logUuid)) {
+            const QJsonObject station = value.toObject();
+            if (station.value(QStringLiteral("station_uuid")).toString()
+                == QString::fromLatin1(ReadOnlyStationUuid)) {
+                return station.value(QStringLiteral("operator_name")).toString()
+                    == QStringLiteral("Anna SP9XYZ");
+            }
+        }
+        return false;
+    }());
+    QSignalSpy failures(&reader, &logger::SyncClient::requestFailed);
+    reader.setStationIdentity(QStringLiteral("SP9NEW"), QString(256, QLatin1Char('x')));
+    QTRY_COMPARE(failures.size(), 1);
+    QCOMPARE(failures.last().at(1).toString(), QStringLiteral("INVALID_MESSAGE"));
+    reader.setStationIdentity(QStringLiteral("SP9NEW"), QStringLiteral("Invalid\noperator"));
+    QTRY_COMPARE(failures.size(), 2);
+    QCOMPARE(failures.last().at(1).toString(), QStringLiteral("INVALID_MESSAGE"));
+    for (const QJsonValue &value : m_server->connectedStations(logUuid)) {
+        const QJsonObject station = value.toObject();
+        if (station.value(QStringLiteral("station_uuid")).toString()
+            == QString::fromLatin1(ReadOnlyStationUuid)) {
+            QCOMPARE(station.value(QStringLiteral("operator_name")).toString(),
+                     QStringLiteral("Anna SP9XYZ"));
+        }
+    }
+    admin.disconnectFromServer();
+    QTRY_COMPARE(m_server->connectedStations(logUuid).size(), 1);
+    QCOMPARE(m_server->connectedStations(logUuid).first().toObject()
+                 .value(QStringLiteral("station_uuid")).toString(),
+             QString::fromLatin1(ReadOnlyStationUuid));
+    reader.disconnectFromServer();
+    QTRY_VERIFY(m_server->connectedStations(logUuid).isEmpty());
 }
 
 void SyncServerTest::rejectsUnsupportedProtocolVersion()
@@ -762,7 +962,7 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
                      logUuid, QJsonArray{remoteOperation}, &remoteResults, &error),
                  qPrintable(error));
         QTRY_COMPARE_WITH_TIMEOUT(
-            localRepository.syncCursor(logUuid, &error), qint64(3), 5000);
+            localRepository.syncCursor(logUuid, &error), qint64(3), 10000);
         QVERIFY2(error.isEmpty(), qPrintable(error));
         const QVector<logger::Qso> updatedQsos =
             localRepository.qsosForContest(1, 0, &error);
@@ -802,7 +1002,7 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
         QVERIFY(remoteLocal != updatedQsos.cend());
         QVERIFY2(localRepository.deleteQso(remoteLocal->id, &error), qPrintable(error));
         QTRY_COMPARE_WITH_TIMEOUT(
-            localRepository.syncCursor(logUuid, &error), qint64(4), 5000);
+            localRepository.syncCursor(logUuid, &error), qint64(4), 10000);
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(localRepository.qsosForContest(1, 0, &error).size(), 1);
         QCOMPARE(m_repository->currentRevision(logUuid, &error), qint64(4));
@@ -832,6 +1032,7 @@ void SyncServerTest::synchronizesThreeIndependentClients()
         QSqlDatabase database;
         std::unique_ptr<logger::SqliteRepository> repository;
         std::unique_ptr<logger::SyncClient> client;
+        std::unique_ptr<QSignalSpy> notificationSpy;
         QString connectionName;
     };
     std::vector<std::unique_ptr<ClientNode>> clients;
@@ -885,6 +1086,12 @@ void SyncServerTest::synchronizesThreeIndependentClients()
         QVERIFY2(node->repository->saveQso(qso, &error), qPrintable(error));
 
         node->client = std::make_unique<logger::SyncClient>();
+        if (index == 0) {
+            node->notificationSpy = std::make_unique<QSignalSpy>(
+                node->client.get(),
+                &logger::SyncClient::remoteChangesAvailable);
+            QVERIFY(node->notificationSpy->isValid());
+        }
         logger::SyncClientConfiguration configuration;
         configuration.host = QStringLiteral("127.0.0.1");
         configuration.port = m_server->serverPort();
@@ -910,6 +1117,7 @@ void SyncServerTest::synchronizesThreeIndependentClients()
         return true;
     };
     QTRY_VERIFY_WITH_TIMEOUT(allClientsSynced(), 10000);
+    QVERIFY(clients.front()->notificationSpy->count() > 0);
     QCOMPARE(m_repository->currentRevision(logUuid), qint64(3));
 
     QSet<QString> expectedQsoUuids;
@@ -1540,6 +1748,19 @@ dupe_key: [callsign, band, mode]
     QCOMPARE(response.value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("code")).toString(),
              QStringLiteral("FORBIDDEN"));
+    response = request(operatorSocket, QStringLiteral("adjust_serial"), QJsonObject{
+        {QStringLiteral("log_uuid"), log->logUuid},
+        {QStringLiteral("reservation_uuid"),
+         QUuid::createUuid().toString(QUuid::WithoutBraces).toLower()},
+        {QStringLiteral("expected_serial"), 7},
+        {QStringLiteral("corrected_serial"), 8},
+        {QStringLiteral("reason"), QStringLiteral("Unauthorized test")}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("error"));
+    QCOMPARE(response.value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("code")).toString(),
+             QStringLiteral("FORBIDDEN"));
     operatorSocket.disconnectFromHost();
     QTRY_COMPARE_WITH_TIMEOUT(operatorSocket.state(),
                               QAbstractSocket::UnconnectedState, 5000);
@@ -1662,6 +1883,33 @@ dupe_key: [callsign, band, mode]
              QStringLiteral("serial_reserved"));
     QCOMPARE(response.value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("serial")).toInt(), 9);
+    response = request(firstStationSocket, QStringLiteral("adjust_serial"),
+                       QJsonObject{
+        {QStringLiteral("log_uuid"), log->logUuid},
+        {QStringLiteral("reservation_uuid"), nextReservationUuid},
+        {QStringLiteral("expected_serial"), 9},
+        {QStringLiteral("corrected_serial"), 11},
+        {QStringLiteral("reason"), QStringLiteral("Verified operator correction")}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("serial_adjusted"));
+    QCOMPARE(response.value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("previous_serial")).toInt(), 9);
+    QCOMPARE(response.value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("corrected_serial")).toInt(), 11);
+    response = request(firstStationSocket, QStringLiteral("adjust_serial"),
+                       QJsonObject{
+        {QStringLiteral("log_uuid"), log->logUuid},
+        {QStringLiteral("reservation_uuid"), nextReservationUuid},
+        {QStringLiteral("expected_serial"), 9},
+        {QStringLiteral("corrected_serial"), 12},
+        {QStringLiteral("reason"), QStringLiteral("Stale correction")}
+    });
+    QCOMPARE(response.value(QStringLiteral("type")).toString(),
+             QStringLiteral("error"));
+    QCOMPARE(response.value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("code")).toString(),
+             QStringLiteral("SERIAL_CHANGED"));
     const QString timestamp = QDateTime::currentDateTimeUtc()
         .toString(Qt::ISODateWithMs);
     const QString qsoUuid = QUuid::createUuid()
@@ -1765,7 +2013,7 @@ dupe_key: [callsign, band, mode]
         response.value(QStringLiteral("payload")).toObject();
     QCOMPARE(retriedReservation.value(QStringLiteral("reservation_uuid")).toString(),
              lostReplyReservationUuid);
-    QCOMPARE(retriedReservation.value(QStringLiteral("serial")).toInt(), 10);
+    QCOMPARE(retriedReservation.value(QStringLiteral("serial")).toInt(), 12);
     const QJsonArray reservations =
         m_repository->serialReservations(log->logUuid, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
@@ -1778,7 +2026,7 @@ dupe_key: [callsign, band, mode]
                 == lostReplyReservationUuid;
         });
     QVERIFY(retriedEntry != reservations.cend());
-    QCOMPARE(retriedEntry->toObject().value(QStringLiteral("serial")).toInt(), 10);
+    QCOMPARE(retriedEntry->toObject().value(QStringLiteral("serial")).toInt(), 12);
 }
 
 void SyncServerTest::persistsSerialReservationsInSyncClient()

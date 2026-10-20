@@ -22,6 +22,9 @@ struct SyncClientConfiguration {
     quint16 port = 0;
     QString peerName;
     QString stationUuid;
+    QString computerName;
+    QString stationCallsign;
+    QString operatorName;
     QString token;
     QString logUuid;
     QString contestDefinitionSha256;
@@ -71,11 +74,15 @@ public slots:
     QString getChanges(qint64 afterRevision, int limit = 500);
     QString acknowledgeRevision(qint64 revision);
     QString getStatus();
+    void setStationIdentity(const QString &stationCallsign, const QString &operatorName);
     QString getMetrics();
     QString reserveSerial(const QString &reservationUuid, const QString &band,
                           const QString &mode);
     QString cancelSerial(const QString &reservationUuid);
     QString getSerialReservations();
+    QString adjustSerialReservation(const QString &reservationUuid,
+                                    int expectedSerial, int correctedSerial,
+                                    const QString &reason);
 
 signals:
     void stateChanged(logger::SyncClient::State state, const QString &message);
@@ -85,6 +92,7 @@ signals:
     void disconnected(const QString &message);
     void responseReceived(const QString &requestId, const QString &type,
                           const QJsonObject &payload);
+    void remoteChangesAvailable(qint64 currentRevision);
     void requestFailed(const QString &requestId, const QString &code,
                        const QString &message, bool retryable);
     void logsDiscovered(const QJsonArray &logs);
@@ -145,7 +153,9 @@ private:
     bool m_manualDisconnect = false;
     bool m_socketFailureHandled = false;
     bool m_synchronizationEnabled = false;
+    bool m_syncPending = false;
     bool m_readOnly = false;
+    bool m_stationIdentitySupported = false;
     State m_state = State::Disconnected;
 };
 

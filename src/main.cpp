@@ -1,4 +1,5 @@
 #include "logger/data/sqlite_repository.h"
+#include "logger/data/application_data.h"
 #include "logger/ui/main_window.h"
 
 #include <QApplication>
@@ -18,7 +19,6 @@
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSplashScreen>
-#include <QStandardPaths>
 
 int main(int argc, char *argv[])
 {
@@ -76,9 +76,8 @@ int main(int argc, char *argv[])
         QMessageBox::critical(parent, title, message);
     };
 
-    const QString dataDirectory =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (!QDir().mkpath(dataDirectory)) {
+    const QString dataDirectory = logger::applicationDataDirectory();
+    if (dataDirectory.isEmpty() || !QDir().mkpath(dataDirectory)) {
         showStartupError(nullptr, QObject::tr("Startup error"),
                          QObject::tr("Could not create the application data directory."));
         return 1;
@@ -88,6 +87,12 @@ int main(int argc, char *argv[])
     if (!applicationLock.tryLock(0)) {
         showStartupError(nullptr, QObject::tr("Application already running"),
                          QObject::tr("Close the other Contest Logger instance first."));
+        return 1;
+    }
+    QString initializationError;
+    if (!logger::initializeApplicationData(&initializationError)
+        || !logger::installBundledContestDefinitions(&initializationError)) {
+        showStartupError(nullptr, QObject::tr("Startup error"), initializationError);
         return 1;
     }
     const QString databasePath =

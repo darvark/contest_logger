@@ -4,7 +4,8 @@ Cross-platform C++20/Qt 6 starting point for an amateur radio contest logger.
 It provides the domain model, SQLite persistence with schema migrations,
 operator settings, YAML contest definitions, exchange validation, dupe checks,
 serial numbering, QSO points, multiplier tracking, live QSO entry, and
-asynchronous CAT radio monitoring.
+asynchronous CAT radio monitoring, and opt-in central log synchronization
+over TCP/TLS.
 
 **User guide (Polish, with screenshots, configuration reference, keyboard
 shortcuts and known limitations): [docs/USER_GUIDE.md](./docs/USER_GUIDE.md).**
@@ -14,7 +15,7 @@ Implemented features are catalogued in [FUNKCJONALNOSCI.md](./FUNKCJONALNOSCI.md
 
 - CMake 3.21 or newer
 - C++20 compiler
-- Qt 6.2 or newer: Core, Widgets, Sql, and Test
+- Qt 6.2 or newer: Core, Widgets, Sql, Network, and Test
 - Qt's SQLite driver plugin (`QSQLITE`)
 - yaml-cpp 0.7 or newer
 - Hamlib development library for hardware CAT support (optional at build time;
@@ -28,10 +29,30 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The application stores its SQLite database in the platform-specific application
-data directory reported by Qt. Operator preferences are stored using `QSettings`.
+On first launch (including after package installation), the application creates
+the platform-specific application data directory reported by Qt. It contains
+`contest-logger.sqlite`, configuration under
+`config/ContestLogger/ContestLogger.ini` (accessed using `QSettings`), and a
+`contests/` directory with writable copies of the bundled contest YAML files.
+On Linux the default root is `~/.local/share/ContestLogger/ContestLogger/`;
+on Windows it is `%APPDATA%\ContestLogger\ContestLogger\`.
+Existing native settings are copied into the INI file once, without deleting
+the original settings. Missing bundled YAML files are restored on startup;
+existing files are never overwritten.
 If Hamlib is installed in a non-standard location, set `HAMLIB_INCLUDE_DIR` and
 `HAMLIB_LIBRARY` when configuring CMake.
+
+### Linux installation packages
+
+Run `bash tools/package-linux.sh --install-deps` on Debian/Ubuntu or Fedora
+to install build dependencies, build with Hamlib, run tests and create a native
+DEB or RPM package under `packages/`. Install it using `sudo apt install ./file.deb`
+or `sudo dnf install ./file.rpm` to resolve runtime dependencies automatically.
+On Slackware, install the build dependencies manually and run
+`bash tools/package-linux.sh` to create a `.txz` for `upgradepkg --install-new`;
+Slackware's pkgtools do not resolve dependencies. See
+[Linux packaging](./docs/BUILD_AND_RELEASE.md#linux-installation-packages)
+for options, dependencies and installation commands.
 
 ## Contest-definition YAML
 
@@ -127,9 +148,16 @@ and tune its active radio; double-click remains available.
 
 The project includes 15 definitions in `contests/examples/`, including general
 logging, serial/grid examples, and the named contest starter profiles. They
-are bundled into the application and installed automatically when missing.
+are bundled into the application and copied to the application data directory's
+`contests/` folder automatically when missing. The application scans this folder
+for `*.yaml` and `*.yml` definitions at startup and when opening **New log**.
+Drop your own definitions there or edit the existing files; disk definitions
+take precedence for new logs, while existing logs retain their saved rules.
+Malformed files and duplicate definition IDs are reported with diagnostics.
 Use **Contest > Import YAML definition...** to add another definition;
-selecting a contest previews its bands, modes, exchanges, points, serial start,
+both this action and **New log > Import YAML...** persist the imported YAML
+in the same folder.
+Selecting a contest previews its bands, modes, exchanges, points, serial start,
 multipliers, and duplicate key.
 
 **File > New log...** (Ctrl+N) opens a DXLog-style window: pick the contest
@@ -154,7 +182,7 @@ kHz, Call, Snt, Rcv, Mult, Pts; new multipliers in red), the QSO-entry panel
 below it, an operator message line, and an F1–F8 function-key bar. Red-titled
 tool windows surround the log: **Check callsign** (band × mode worked grid),
 **Check partial** (white = new, green = worked on another band, red = dupe),
-**CW messages / keyer**, **Contest info**, **Bandmap** (sorted by frequency,
+**Contest info**, **Bandmap** (sorted by frequency,
 nearest spot highlighted, worked spots grey), **Rate**, **Summary** (per-band
 totals and final score) and a black **DX Cluster announcements** window.
 Windows can be moved, floated, hidden from **Window**, and restored with
@@ -162,6 +190,16 @@ Windows can be moved, floated, hidden from **Window**, and restored with
 runs. The top menus are **File**, **Contest**, **Operating**, **Radio**,
 **Options**, and **Window**. This is a similar operating layout, not a pixel
 copy of DXLog.
+
+**File > Import ADIF / Cabrillo...** imports contacts into the current log or a
+new log chosen during import. The destination must have a contest definition.
+A preview shows the number of contacts to add and identical records to skip
+(same UTC timestamp, callsign, band and mode). Other contest duplicates are kept
+with zero points. Imported exchanges are validated against the destination
+contest, sent serials are preserved, and points are recalculated. Invalid data
+or a database error aborts the whole import, including creation of a new log.
+ADIF field lengths, standard reports/serials and exchange strings are supported;
+Cabrillo QSO exchange columns follow the selected contest definition.
 
 The entry panel provides callsign/exchange fields and Enter-to-log. The active
 panel has a red frame and its header shows VFO/radio, frequency, band and mode.
@@ -179,7 +217,8 @@ structured maps in SQLite; older text-only exchanges are migrated.
 Keyboard: **F1–F8** send the CW messages of the focused entry panel (CW mode
 only; configure them under **Options > CW function key messages...** or edit
 one key under **Operating > Edit function key message**), **Esc** or
-**Ctrl+Esc** aborts CW, **Ctrl+W** wipes the entry, and **Ctrl+Tab** switches
+**Ctrl+Esc** aborts CW, **Ctrl+K** opens live CW input, **PageUp/PageDown**
+changes speed by 1 WPM (5–80), **Ctrl+W** wipes the entry, and **Ctrl+Tab** switches
 between entry panels A/B.
 
 Radio CAT settings support a Hamlib model ID, serial device and baud rate, or a
@@ -231,8 +270,15 @@ spot fills the callsign and tunes the active CAT radio (A or B in SO2R) on its
 current VFO; Up/Down navigates spots. Spots older than one hour are omitted
 from the live bandmap.
 
-The **CW keyer** panel supports a contest-message queue, WPM control and an
-abort action (`Esc` / `Ctrl+Esc`). Configure a provider under **Radio > CW keyer...**:
+**Ctrl+K** opens a small live CW input window instead of a docked keyer panel.
+Typed or pasted text is queued immediately, including spaces, without Enter
+or macro expansion. Transmission follows the active radio and its RX-focus
+VFO; in SO2R it follows the active entry's radio. Stop ongoing CW before switching
+radios. Already queued text cannot be edited; Enter clears the displayed input
+without stopping transmission. **Esc** stops CW and clears the queue; when idle
+it hides the input window. **PageUp/PageDown** changes speed by 1 WPM (5–80),
+also inside the input window. The speed appears beside the clock in CW mode.
+Configure a provider under **Radio > CW keyer...** for the active radio:
 Hamlib (validates `send_morse` support and reports unsupported speed control),
 cwdaemon over its UDP protocol, or the mock provider for tests. Hamlib opens its
 own configured rig connection; use rigctld if a CAT controller already owns the
@@ -248,10 +294,9 @@ The CW status line shows which pacing is active.
 ESM messages are configurable per contest. Abort is sent immediately and clears
 the remaining queue.
 
-SQLite schema version 5 preserves existing databases; migration 3 adds
-structured sent/received exchange columns, migration 4 adds the spot band, and
-migration 5 backfills structured exchanges from older text fields and adds
-duplicate/spot-time indexes.
+SQLite schema version 17 preserves existing databases through migrations,
+including structured exchanges, UUIDs, synchronization outbox/cursors,
+QSO history, serial reservations, conflict/import audit and diagnostics.
 Tests cover definition parsing, invalid exchanges, duplicate detection, serial
 generation, points, multipliers, database migration and QSO/spot persistence,
 mock-radio tuning, spot parsing, malformed input, and cluster reconnect.
@@ -264,6 +309,47 @@ integration tests use Hamlib's Dummy model and a local `rigctld` (skipped when
 unavailable); cluster tests use a local Telnet simulator. `ui_tests` drives the
 main window offscreen: Enter logging, validation errors, dupes, the edit dialog,
 table refresh and serial numbering.
+
+## Central network synchronization
+
+Local operation remains the default. Use **Options > Central network
+connection...** to connect a Client, or **Options > Host central server on
+this station...** to start a GUI Host. The separate `contest_logger_server`
+executable provides a headless server. Each installation keeps its own
+SQLite database; never share an active database over a network filesystem.
+
+- Verified TLS, per-station tokens and read/write/admin permissions.
+- Durable outbox, idempotent retries, incremental changes, snapshots and
+  event notifications with polling fallback.
+- Read-only clients, conflict comparison and manual field-by-field merging
+  with audit history.
+- Central serial reservations; new serials require the server, while an
+  already confirmed reservation remains usable offline.
+- Optional Client/Host startup, custom CA certificates and Client token
+  storage in Windows Credential Manager or Linux Secret Service
+  (`secret-tool` and a running Secret Service are required on Linux).
+
+**Options > Network status and queue...** displays connection state,
+revisions, pending/error/conflict operations and connected stations for the
+selected log. The station table shows **computer name, station callsign,
+operator and connection state**, not UUIDs. It refreshes every five seconds
+or manually; operator changes are sent without reconnecting. UUIDs remain
+the protocol identifiers. Older peers without description support appear
+as **Not provided**. These descriptions are client-supplied labels, not
+authentication credentials.
+
+The server supports `--check`, `--listen`, and central database recovery via
+`--restore-backup <backup.sqlite> --data-dir <directory>`. GUI database
+recovery and central server recovery target different databases.
+See the [user guide](./docs/USER_GUIDE.md#status-sieci-i-podłączone-stacje),
+[network protocol and implementation status](./NETWORKING.md), and
+[server operations/recovery runbook](./docs/NETWORKING_OPERATIONS.md).
+
+Network synchronization has automated multi-client and UI tests, but is
+not yet qualified for contest use: exhaustive failure testing, a deployment
+restore drill, and a two-/three-station pilot remain required.
+
+## Exports and local database recovery
 
 **File > Export Cabrillo... / Export ADIF...** validates the selected log before
 atomically writing it. **File > Back up database...** writes and verifies a

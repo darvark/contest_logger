@@ -980,6 +980,8 @@ bool CentralRepository::submitBatch(
         }
         const qint64 revision = revisionQuery.value(0).toLongLong() + 1;
         revisionQuery.finish();
+        const QString committedAt =
+            QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
 
         const QJsonObject operationResult{
             {QStringLiteral("operation_uuid"), operationUuid},
@@ -1008,7 +1010,8 @@ bool CentralRepository::submitBatch(
         QSqlQuery history(m_database);
         history.prepare(QStringLiteral(
             "INSERT INTO qso_history(log_uuid, qso_uuid, qso_version, operation_uuid, "
-            "snapshot_json, is_deleted, created_at_utc) VALUES(?, ?, ?, ?, ?, ?, ?)"));
+            "snapshot_json, is_deleted, created_at_utc, revision) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)"));
         history.addBindValue(logUuid);
         history.addBindValue(qsoUuid);
         history.addBindValue(newVersion);
@@ -1017,6 +1020,7 @@ bool CentralRepository::submitBatch(
                                                   .toJson(QJsonDocument::Compact)));
         history.addBindValue(deleted ? 1 : 0);
         history.addBindValue(createdAt);
+        history.addBindValue(revision);
         if (!history.exec()) {
             return rollback(sqlError(history));
         }
@@ -1034,7 +1038,7 @@ bool CentralRepository::submitBatch(
         event.addBindValue(qsoUuid);
         event.addBindValue(QString::fromUtf8(QJsonDocument(snapshot)
                                                 .toJson(QJsonDocument::Compact)));
-        event.addBindValue(createdAt);
+        event.addBindValue(committedAt);
         if (!event.exec()) {
             return rollback(sqlError(event));
         }
@@ -1310,6 +1314,136 @@ bool CentralRepository::cancelSerialReservation(
     return true;
 }
 
+bool CentralRepository::adjustSerialReservation(
+    const QString &logUuid, const QString &administratorStationUuid,
+    const QString &reservationUuid, int expectedSerial, int correctedSerial,
+    const QString &reason, QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    const QString normalizedReason = reason.trimmed();
+    if (!m_database.isOpen() || !isUuid(logUuid)
+        || !isUuid(administratorStationUuid) || !isUuid(reservationUuid)
+        || expectedSerial < 1 || correctedSerial < 1
+        || expectedSerial == correctedSerial || normalizedReason.isEmpty()
+        || normalizedReason.size() > 500) {
+        setError(error, QStringLiteral("Serial correction request is invalid."));
+        return false;
+    }
+    if (!m_database.transaction()) {
+        setError(error, m_database.lastError().text());
+        return false;
+    }
+    const auto fail = [this, error](const QString &message) {
+        setError(error, rollbackFailure(m_database, message));
+        return false;
+    };
+
+    QSqlQuery reservation(m_database);
+    reservation.prepare(QStringLiteral(
+        "SELECT scope_key, serial_number, status FROM serial_reservations "
+        "WHERE log_uuid = ? AND reservation_uuid = ?"));
+    reservation.addBindValue(logUuid);
+    reservation.addBindValue(reservationUuid);
+    if (!reservation.exec()) {
+        return fail(sqlError(reservation));
+    }
+    if (!reservation.next()) {
+        return fail(QStringLiteral(
+            "SERIAL_UNAVAILABLE: reservation does not exist."));
+    }
+    const QString scopeKey = reservation.value(0).toString();
+    const int currentSerial = reservation.value(1).toInt();
+    const QString status = reservation.value(2).toString();
+    reservation.finish();
+    if (status != QStringLiteral("reserved")) {
+        return fail(QStringLiteral(
+            "SERIAL_UNAVAILABLE: only unused reservations can be corrected."));
+    }
+    if (currentSerial != expectedSerial) {
+        return fail(QStringLiteral(
+            "SERIAL_CHANGED: reservation number no longer matches confirmation."));
+    }
+
+    QSqlQuery log(m_database);
+    log.prepare(QStringLiteral(
+        "SELECT definition_yaml FROM contests WHERE log_uuid = ?"));
+    log.addBindValue(logUuid);
+    if (!log.exec() || !log.next()) {
+        return fail(log.lastError().isValid()
+            ? sqlError(log) : QStringLiteral("UNKNOWN_LOG: central log does not exist."));
+    }
+    ContestDefinition definition;
+    const QString yaml = log.value(0).toString();
+    log.finish();
+    QString definitionError;
+    if (yaml.trimmed().isEmpty()
+        || !ContestDefinitionLoader().loadText(
+            yaml, QStringLiteral("serial correction"),
+            definition, &definitionError)) {
+        return fail(definitionError.isEmpty()
+            ? QStringLiteral("SERIAL_UNAVAILABLE: contest definition is required.")
+            : definitionError);
+    }
+    if (correctedSerial < definition.serialStart) {
+        return fail(QStringLiteral(
+            "SERIAL_UNAVAILABLE: corrected number is below the contest start."));
+    }
+    QSqlQuery duplicate(m_database);
+    duplicate.prepare(QStringLiteral(
+        "SELECT 1 FROM serial_reservations WHERE log_uuid = ? AND scope_key = ? "
+        "AND serial_number = ? AND reservation_uuid <> ?"));
+    duplicate.addBindValue(logUuid);
+    duplicate.addBindValue(scopeKey);
+    duplicate.addBindValue(correctedSerial);
+    duplicate.addBindValue(reservationUuid);
+    if (!duplicate.exec()) {
+        return fail(sqlError(duplicate));
+    }
+    if (duplicate.next()) {
+        return fail(QStringLiteral(
+            "SERIAL_UNAVAILABLE: corrected number is already reserved or consumed."));
+    }
+    duplicate.finish();
+
+    QSqlQuery update(m_database);
+    update.prepare(QStringLiteral(
+        "UPDATE serial_reservations SET serial_number = ?, updated_at_utc = ? "
+        "WHERE log_uuid = ? AND reservation_uuid = ? AND serial_number = ? "
+        "AND status = 'reserved'"));
+    update.addBindValue(correctedSerial);
+    update.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
+    update.addBindValue(logUuid);
+    update.addBindValue(reservationUuid);
+    update.addBindValue(expectedSerial);
+    if (!update.exec() || update.numRowsAffected() != 1) {
+        return fail(update.lastError().isValid()
+            ? sqlError(update)
+            : QStringLiteral("Serial reservation changed concurrently."));
+    }
+
+    QSqlQuery audit(m_database);
+    audit.prepare(QStringLiteral(
+        "INSERT INTO serial_reservation_adjustments(log_uuid, reservation_uuid, "
+        "administrator_station_uuid, previous_serial, corrected_serial, reason, "
+        "created_at_utc) VALUES(?, ?, ?, ?, ?, ?, ?)"));
+    audit.addBindValue(logUuid);
+    audit.addBindValue(reservationUuid);
+    audit.addBindValue(administratorStationUuid);
+    audit.addBindValue(expectedSerial);
+    audit.addBindValue(correctedSerial);
+    audit.addBindValue(normalizedReason);
+    audit.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
+    if (!audit.exec()) {
+        return fail(sqlError(audit));
+    }
+    if (!m_database.commit()) {
+        return fail(m_database.lastError().text());
+    }
+    return true;
+}
+
 bool CentralRepository::importSerialReservations(
     const QString &logUuid, const QJsonArray &reservations, QString *error)
 {
@@ -1547,7 +1681,7 @@ QJsonObject CentralRepository::synchronizationMetrics(
             : QStringLiteral("Could not read synchronization metrics."));
         return {};
     }
-    return QJsonObject{
+    QJsonObject metrics{
         {QStringLiteral("log_uuid"), logUuid},
         {QStringLiteral("current_revision"), query.value(0).toLongLong()},
         {QStringLiteral("event_count"), query.value(1).toLongLong()},
@@ -1559,6 +1693,143 @@ QJsonObject CentralRepository::synchronizationMetrics(
         {QStringLiteral("used_serial_count"), query.value(7).toLongLong()},
         {QStringLiteral("cancelled_serial_count"), query.value(8).toLongLong()}
     };
+    const qint64 currentRevision = query.value(0).toLongLong();
+
+    QJsonArray clients;
+    qint64 totalPending = 0;
+    qint64 totalErrors = 0;
+    qint64 totalConflicts = 0;
+    QSqlQuery clientQuery(m_database);
+    clientQuery.prepare(QStringLiteral(
+        "SELECT station_uuid, cursor, last_seen_at_utc, pending_count, "
+        "error_count, conflict_count FROM sync_clients WHERE log_uuid = ? "
+        "ORDER BY station_uuid"));
+    clientQuery.addBindValue(logUuid);
+    if (!clientQuery.exec()) {
+        setError(error, sqlError(clientQuery));
+        return {};
+    }
+    while (clientQuery.next()) {
+        const qint64 pending = clientQuery.value(3).toLongLong();
+        const qint64 errors = clientQuery.value(4).toLongLong();
+        const qint64 conflicts = clientQuery.value(5).toLongLong();
+        totalPending += pending;
+        totalErrors += errors;
+        totalConflicts += conflicts;
+        clients.append(QJsonObject{
+            {QStringLiteral("station_uuid"), clientQuery.value(0).toString()},
+            {QStringLiteral("cursor"), clientQuery.value(1).toLongLong()},
+            {QStringLiteral("cursor_lag"), qMax(
+                 qint64(0), currentRevision - clientQuery.value(1).toLongLong())},
+            {QStringLiteral("last_contact_utc"), clientQuery.value(2).toString()},
+            {QStringLiteral("pending_count"), pending},
+            {QStringLiteral("error_count"), errors},
+            {QStringLiteral("conflict_count"), conflicts}
+        });
+    }
+    metrics.insert(QStringLiteral("clients"), clients);
+    metrics.insert(QStringLiteral("pending_count"), totalPending);
+    metrics.insert(QStringLiteral("error_count"), totalErrors);
+    metrics.insert(QStringLiteral("conflict_count"), totalConflicts);
+
+    QSqlQuery transactionSummary(m_database);
+    transactionSummary.prepare(QStringLiteral(
+        "SELECT COUNT(*), COALESCE(AVG(duration_ms), 0), "
+        "COALESCE(MAX(duration_ms), 0), "
+        "SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN outcome = 'conflict' THEN 1 ELSE 0 END) "
+        "FROM sync_transaction_metrics WHERE log_uuid = ?"));
+    transactionSummary.addBindValue(logUuid);
+    if (!transactionSummary.exec() || !transactionSummary.next()) {
+        setError(error, transactionSummary.lastError().isValid()
+            ? sqlError(transactionSummary)
+            : QStringLiteral("Could not read synchronization transaction metrics."));
+        return {};
+    }
+    metrics.insert(QStringLiteral("transaction_count"),
+                   transactionSummary.value(0).toLongLong());
+    metrics.insert(QStringLiteral("transaction_average_ms"),
+                   transactionSummary.value(1).toDouble());
+    metrics.insert(QStringLiteral("transaction_maximum_ms"),
+                   transactionSummary.value(2).toLongLong());
+    metrics.insert(QStringLiteral("transaction_error_count"),
+                   transactionSummary.value(3).toLongLong());
+    metrics.insert(QStringLiteral("transaction_conflict_count"),
+                   transactionSummary.value(4).toLongLong());
+
+    QJsonArray transactionHistory;
+    QSqlQuery history(m_database);
+    history.prepare(QStringLiteral(
+        "SELECT station_uuid, completed_at_utc, duration_ms, outcome, "
+        "operation_count FROM sync_transaction_metrics WHERE log_uuid = ? "
+        "ORDER BY id DESC LIMIT 100"));
+    history.addBindValue(logUuid);
+    if (!history.exec()) {
+        setError(error, sqlError(history));
+        return {};
+    }
+    while (history.next()) {
+        transactionHistory.append(QJsonObject{
+            {QStringLiteral("station_uuid"), history.value(0).toString()},
+            {QStringLiteral("completed_at_utc"), history.value(1).toString()},
+            {QStringLiteral("duration_ms"), history.value(2).toLongLong()},
+            {QStringLiteral("outcome"), history.value(3).toString()},
+            {QStringLiteral("operation_count"), history.value(4).toInt()}
+        });
+    }
+    metrics.insert(QStringLiteral("transaction_history"), transactionHistory);
+    return metrics;
+}
+
+bool CentralRepository::recordSyncTransactionMetric(
+    const QString &logUuid, const QString &stationUuid, qint64 durationMs,
+    const QString &outcome, int operationCount, QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (!m_database.isOpen() || !isUuid(logUuid) || !isUuid(stationUuid)
+        || durationMs < 0 || operationCount < 0
+        || !QStringList{QStringLiteral("success"), QStringLiteral("error"),
+                        QStringLiteral("conflict")}.contains(outcome)) {
+        setError(error, QStringLiteral("Synchronization transaction metric is invalid."));
+        return false;
+    }
+    if (!m_database.transaction()) {
+        setError(error, m_database.lastError().text());
+        return false;
+    }
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO sync_transaction_metrics(log_uuid, station_uuid, "
+        "completed_at_utc, duration_ms, outcome, operation_count) "
+        "VALUES(?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(logUuid);
+    insert.addBindValue(stationUuid);
+    insert.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
+    insert.addBindValue(durationMs);
+    insert.addBindValue(outcome);
+    insert.addBindValue(operationCount);
+    if (!insert.exec()) {
+        setError(error, rollbackFailure(m_database, sqlError(insert)));
+        return false;
+    }
+    QSqlQuery trim(m_database);
+    trim.prepare(QStringLiteral(
+        "DELETE FROM sync_transaction_metrics WHERE log_uuid = ? AND id NOT IN "
+        "(SELECT id FROM sync_transaction_metrics WHERE log_uuid = ? "
+        "ORDER BY id DESC LIMIT 1000)"));
+    trim.addBindValue(logUuid);
+    trim.addBindValue(logUuid);
+    if (!trim.exec()) {
+        setError(error, rollbackFailure(m_database, sqlError(trim)));
+        return false;
+    }
+    if (!m_database.commit()) {
+        setError(error, rollbackFailure(m_database, m_database.lastError().text()));
+        return false;
+    }
+    return true;
 }
 
 QString CentralRepository::beginLogImport(
@@ -1763,6 +2034,90 @@ QJsonArray CentralRepository::eventsSince(
     return result;
 }
 
+bool CentralRepository::compactSyncEvents(
+    const QString &logUuid, const QDateTime &olderThanUtc,
+    int *removedEvents, QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (removedEvents != nullptr) {
+        *removedEvents = 0;
+    }
+    if (!m_database.isOpen() || !isUuid(logUuid) || !olderThanUtc.isValid()) {
+        setError(error, QStringLiteral("Log UUID or event retention cutoff is invalid."));
+        return false;
+    }
+    const QString cutoff = olderThanUtc.toUTC().toString(Qt::ISODateWithMs);
+    QString revisionError;
+    const qint64 revision = currentRevision(logUuid, &revisionError);
+    if (!revisionError.isEmpty()) {
+        setError(error, revisionError);
+        return false;
+    }
+    if (!m_database.transaction()) {
+        setError(error, m_database.lastError().text());
+        return false;
+    }
+    const auto rollback = [this, error](const QString &message) {
+        setError(error, rollbackFailure(m_database, message));
+        return false;
+    };
+
+    QSqlQuery activeCursor(m_database);
+    activeCursor.prepare(QStringLiteral(
+        "SELECT MIN(cursor) FROM sync_clients "
+        "WHERE log_uuid = ? AND last_seen_at_utc >= ?"));
+    activeCursor.addBindValue(logUuid);
+    activeCursor.addBindValue(cutoff);
+    if (!activeCursor.exec() || !activeCursor.next()) {
+        return rollback(sqlError(activeCursor));
+    }
+    const qint64 safeRevision = activeCursor.value(0).isNull()
+        ? revision : activeCursor.value(0).toLongLong();
+    activeCursor.finish();
+
+    QSqlQuery pruneThrough(m_database);
+    pruneThrough.prepare(QStringLiteral(
+        "SELECT MAX(event.revision) FROM sync_events event "
+        "WHERE event.log_uuid = ? AND event.revision <= ? "
+        "AND event.created_at_utc < ? AND NOT EXISTS ("
+        "SELECT 1 FROM sync_events newer WHERE newer.log_uuid = event.log_uuid "
+        "AND newer.revision <= event.revision AND newer.created_at_utc >= ?)"));
+    pruneThrough.addBindValue(logUuid);
+    pruneThrough.addBindValue(safeRevision);
+    pruneThrough.addBindValue(cutoff);
+    pruneThrough.addBindValue(cutoff);
+    if (!pruneThrough.exec() || !pruneThrough.next()) {
+        return rollback(sqlError(pruneThrough));
+    }
+    if (pruneThrough.value(0).isNull()) {
+        if (!m_database.commit()) {
+            return rollback(m_database.lastError().text());
+        }
+        return true;
+    }
+    const qint64 lastPrunedRevision = pruneThrough.value(0).toLongLong();
+    pruneThrough.finish();
+
+    QSqlQuery remove(m_database);
+    remove.prepare(QStringLiteral(
+        "DELETE FROM sync_events WHERE log_uuid = ? AND revision <= ?"));
+    remove.addBindValue(logUuid);
+    remove.addBindValue(lastPrunedRevision);
+    if (!remove.exec()) {
+        return rollback(sqlError(remove));
+    }
+    const int removed = remove.numRowsAffected();
+    if (!m_database.commit()) {
+        return rollback(m_database.lastError().text());
+    }
+    if (removedEvents != nullptr) {
+        *removedEvents = removed;
+    }
+    return true;
+}
+
 QJsonObject CentralRepository::snapshotPage(
     const QString &logUuid, qint64 revision, int offset, int limit,
     QString *error) const
@@ -1788,15 +2143,11 @@ QJsonObject CentralRepository::snapshotPage(
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT h.snapshot_json FROM qso_history h "
-        "JOIN sync_events e ON e.log_uuid = h.log_uuid "
-        "AND e.operation_uuid = h.operation_uuid AND e.entity_uuid = h.qso_uuid "
-        "WHERE h.log_uuid = ? AND e.revision <= ? AND h.is_deleted = 0 "
+        "WHERE h.log_uuid = ? AND h.revision <= ? AND h.is_deleted = 0 "
         "AND h.qso_version = ("
         "SELECT MAX(h2.qso_version) FROM qso_history h2 "
-        "JOIN sync_events e2 ON e2.log_uuid = h2.log_uuid "
-        "AND e2.operation_uuid = h2.operation_uuid AND e2.entity_uuid = h2.qso_uuid "
         "WHERE h2.log_uuid = h.log_uuid AND h2.qso_uuid = h.qso_uuid "
-        "AND e2.revision <= ?) ORDER BY h.qso_uuid"));
+        "AND h2.revision <= ?) ORDER BY h.qso_uuid"));
     query.addBindValue(logUuid);
     query.addBindValue(revision);
     query.addBindValue(revision);
@@ -1987,6 +2338,80 @@ bool CentralRepository::recordClientCursor(
     if (upsert.numRowsAffected() != 1) {
         setError(error, rollbackFailure(
             m_database, QStringLiteral("Client cursor cannot move backwards.")));
+        return false;
+    }
+    if (!m_database.commit()) {
+        setError(error, rollbackFailure(m_database, m_database.lastError().text()));
+        return false;
+    }
+    return true;
+}
+
+bool CentralRepository::recordClientHeartbeat(
+    const QString &logUuid, const QString &stationUuid,
+    qint64 lastAppliedRevision, QString *error)
+{
+    return recordClientHeartbeat(logUuid, stationUuid, lastAppliedRevision,
+                                 -1, -1, -1, error);
+}
+
+bool CentralRepository::recordClientHeartbeat(
+    const QString &logUuid, const QString &stationUuid,
+    qint64 lastAppliedRevision, int pendingCount, int errorCount,
+    int conflictCount, QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (!m_database.isOpen() || !isUuid(logUuid) || !isUuid(stationUuid)
+        || lastAppliedRevision < 0
+        || !((pendingCount == -1 && errorCount == -1 && conflictCount == -1)
+             || (pendingCount >= 0 && errorCount >= 0 && conflictCount >= 0))) {
+        setError(error, QStringLiteral(
+            "Log UUID, station UUID, or heartbeat revision is invalid."));
+        return false;
+    }
+    QString revisionError;
+    const qint64 revision = currentRevision(logUuid, &revisionError);
+    if (!revisionError.isEmpty()) {
+        setError(error, revisionError);
+        return false;
+    }
+    if (lastAppliedRevision > revision) {
+        setError(error, QStringLiteral(
+            "Heartbeat revision exceeds the central log revision."));
+        return false;
+    }
+    if (!m_database.transaction()) {
+        setError(error, m_database.lastError().text());
+        return false;
+    }
+    QSqlQuery upsert(m_database);
+    upsert.prepare(QStringLiteral(
+        "INSERT INTO sync_clients(log_uuid, station_uuid, cursor, last_seen_at_utc, "
+        "pending_count, error_count, conflict_count) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(log_uuid, station_uuid) DO UPDATE SET "
+        "cursor = MAX(sync_clients.cursor, excluded.cursor), "
+        "last_seen_at_utc = excluded.last_seen_at_utc, "
+        "pending_count = CASE WHEN ? >= 0 THEN excluded.pending_count "
+        "ELSE sync_clients.pending_count END, "
+        "error_count = CASE WHEN ? >= 0 THEN excluded.error_count "
+        "ELSE sync_clients.error_count END, "
+        "conflict_count = CASE WHEN ? >= 0 THEN excluded.conflict_count "
+        "ELSE sync_clients.conflict_count END"));
+    upsert.addBindValue(logUuid);
+    upsert.addBindValue(stationUuid);
+    upsert.addBindValue(lastAppliedRevision);
+    upsert.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    upsert.addBindValue(qMax(0, pendingCount));
+    upsert.addBindValue(qMax(0, errorCount));
+    upsert.addBindValue(qMax(0, conflictCount));
+    upsert.addBindValue(pendingCount);
+    upsert.addBindValue(errorCount);
+    upsert.addBindValue(conflictCount);
+    if (!upsert.exec()) {
+        setError(error, rollbackFailure(m_database, sqlError(upsert)));
         return false;
     }
     if (!m_database.commit()) {

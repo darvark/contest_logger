@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSqlDatabase>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -116,10 +117,14 @@ private slots:
     void initializesHeadlessCentralDatabase();
     void rejectsConcurrentCentralRepository();
     void backsUpBeforeSchemaMigration();
+    void restoresCentralBackupWithRevisionAndIdempotency();
     void recordsResumableLogImportAudit();
     void commitsIdempotentRevisionsAtomically();
+    void persistsClientAndTransactionDiagnostics();
+    void compactsAcknowledgedEventsAndKeepsSnapshotsAvailable();
     void exportsPagedSnapshotAtPinnedRevision();
     void reservesSerialsIdempotentlyByConfiguredScope();
+    void correctsUnusedSerialReservationWithAudit();
     void requiresAndConsumesReservedSerialOnQsoCommit();
     void createsLogsAndImportsHistoricalSerialsIdempotently();
     void validatesDuplicateKeysAndRecalculatesPointsOnServer();
@@ -175,7 +180,12 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
         QVERIFY(database.open());
         QSqlQuery query(database);
         QVERIFY(query.exec(QStringLiteral(
-            "DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)")));
+            "DELETE FROM schema_migrations WHERE version IN "
+            "(9, 10, 11, 12, 13, 14, 15, 16, 17)")));
+        QVERIFY(query.exec(QStringLiteral(
+            "DROP TABLE sync_transaction_metrics")));
+        QVERIFY(query.exec(QStringLiteral(
+            "DROP TABLE serial_reservation_adjustments")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_import_audit")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_conflict_resolutions")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE serial_reservation_requests")));
@@ -206,6 +216,93 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
     const auto logs = migrated.repository()->contests(&error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(logs.size(), 1);
+}
+
+void CentralRepositoryTest::restoresCentralBackupWithRevisionAndIdempotency()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString backupPath =
+        directory.filePath(QStringLiteral("central-backup.sqlite"));
+    QString logUuid;
+    QString stationUuid;
+    QString serialLogUuid;
+    QJsonObject create;
+    QJsonArray committedResults;
+    {
+        logger::CentralRepository central;
+        QString error;
+        QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+        const QVector<logger::Contest> logs = central.repository()->contests(&error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        logUuid = logs.first().logUuid;
+        stationUuid = central.repository()->localStationUuid(&error);
+        QVERIFY2(!stationUuid.isEmpty(), qPrintable(error));
+        QVERIFY(createSerialLog(
+            central, QStringLiteral("band"), false, &serialLogUuid, &error) > 0);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const QJsonObject reservation = central.reserveSerial(
+            serialLogUuid, stationUuid, newUuid(),
+            QStringLiteral("20M"), QStringLiteral("CW"), &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(reservation.value(QStringLiteral("serial")).toInt(), 7);
+        create = sampleOperation(
+            logUuid, stationUuid, newUuid(), newUuid(),
+            QStringLiteral("qso.create"), 0, QStringLiteral("W1AW"));
+        QVERIFY2(central.submitBatch(
+                     logUuid, {create}, &committedResults, &error), qPrintable(error));
+        QCOMPARE(committedResults.first().toObject()
+                     .value(QStringLiteral("revision")).toInteger(), qint64(1));
+        QVERIFY2(central.repository()->backupTo(backupPath, &error), qPrintable(error));
+    }
+
+    const QString databasePath =
+        QDir(directory.path()).filePath(QStringLiteral("central-log.sqlite"));
+    {
+        const QString connectionName = QStringLiteral("central-restore-corruption-%1")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(databasePath);
+        QVERIFY(database.open());
+        QSqlQuery corrupt(database);
+        QVERIFY(corrupt.exec(QStringLiteral("DELETE FROM sync_events")));
+        QVERIFY(corrupt.exec(QStringLiteral("DELETE FROM qso_history")));
+        QVERIFY(corrupt.exec(QStringLiteral("DELETE FROM sync_operations")));
+        database.close();
+        database = QSqlDatabase();
+        QSqlDatabase::removeDatabase(connectionName);
+    }
+    QString error;
+    QVERIFY2(logger::SqliteRepository::restoreFromBackup(
+                 databasePath, backupPath, &error), qPrintable(error));
+    const QStringList preservedDatabases = QDir(directory.path()).entryList(
+        {QStringLiteral("central-log.sqlite.before-restore-*.sqlite")}, QDir::Files);
+    QCOMPARE(preservedDatabases.size(), 1);
+    {
+        logger::CentralRepository restored;
+        QVERIFY2(restored.initialize(directory.path(), &error), qPrintable(error));
+        QCOMPARE(restored.currentRevision(logUuid, &error), qint64(1));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const QJsonObject current = restored.currentQso(
+            logUuid, create.value(QStringLiteral("qso")).toObject()
+                         .value(QStringLiteral("qso_uuid")).toString(), &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(current.value(QStringLiteral("callsign")).toString(),
+                 QStringLiteral("W1AW"));
+        QJsonArray replayResults;
+        QVERIFY2(restored.submitBatch(
+                     logUuid, {create}, &replayResults, &error), qPrintable(error));
+        QCOMPARE(replayResults, committedResults);
+        QCOMPARE(restored.currentRevision(logUuid, &error), qint64(1));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const QJsonArray reservations =
+            restored.serialReservations(serialLogUuid, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(reservations.size(), 1);
+        QCOMPARE(reservations.first().toObject()
+                     .value(QStringLiteral("serial")).toInt(), 7);
+    }
 }
 
 void CentralRepositoryTest::recordsResumableLogImportAudit()
@@ -363,6 +460,57 @@ void CentralRepositoryTest::commitsIdempotentRevisionsAtomically()
                  .value(QStringLiteral("is_deleted")).toBool(), true);
 }
 
+void CentralRepositoryTest::persistsClientAndTransactionDiagnostics()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QString logUuid;
+    QString stationUuid;
+    {
+        logger::CentralRepository central;
+        QString error;
+        QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+        const auto logs = central.repository()->contests(&error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        logUuid = logs.first().logUuid;
+        stationUuid = central.repository()->localStationUuid(&error);
+        QVERIFY2(!stationUuid.isEmpty(), qPrintable(error));
+        QVERIFY2(central.recordClientHeartbeat(
+                     logUuid, stationUuid, 0, 3, 2, 1, &error),
+                 qPrintable(error));
+        QVERIFY2(central.recordSyncTransactionMetric(
+                     logUuid, stationUuid, 14, QStringLiteral("success"), 2, &error),
+                 qPrintable(error));
+        QVERIFY2(central.recordSyncTransactionMetric(
+                     logUuid, stationUuid, 28, QStringLiteral("conflict"), 1, &error),
+                 qPrintable(error));
+        QVERIFY2(central.recordSyncTransactionMetric(
+                     logUuid, stationUuid, 7, QStringLiteral("error"), 1, &error),
+                 qPrintable(error));
+    }
+    {
+        logger::CentralRepository restarted;
+        QString error;
+        QVERIFY2(restarted.initialize(directory.path(), &error), qPrintable(error));
+        const QJsonObject metrics =
+            restarted.synchronizationMetrics(logUuid, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const QJsonArray clients = metrics.value(QStringLiteral("clients")).toArray();
+        QCOMPARE(clients.size(), 1);
+        const QJsonObject client = clients.first().toObject();
+        QCOMPARE(client.value(QStringLiteral("station_uuid")).toString(), stationUuid);
+        QCOMPARE(client.value(QStringLiteral("pending_count")).toInt(), 3);
+        QCOMPARE(client.value(QStringLiteral("error_count")).toInt(), 2);
+        QCOMPARE(client.value(QStringLiteral("conflict_count")).toInt(), 1);
+        QVERIFY(!client.value(QStringLiteral("last_contact_utc")).toString().isEmpty());
+        QCOMPARE(metrics.value(QStringLiteral("transaction_count")).toInt(), 3);
+        QCOMPARE(metrics.value(QStringLiteral("transaction_maximum_ms")).toInt(), 28);
+        QCOMPARE(metrics.value(QStringLiteral("transaction_error_count")).toInt(), 1);
+        QCOMPARE(metrics.value(QStringLiteral("transaction_conflict_count")).toInt(), 1);
+        QCOMPARE(metrics.value(QStringLiteral("transaction_history")).toArray().size(), 3);
+    }
+}
+
 void CentralRepositoryTest::exportsPagedSnapshotAtPinnedRevision()
 {
     QTemporaryDir directory;
@@ -446,6 +594,112 @@ void CentralRepositoryTest::exportsPagedSnapshotAtPinnedRevision()
                  QCryptographicHash::Sha256).toHex()));
 }
 
+void CentralRepositoryTest::compactsAcknowledgedEventsAndKeepsSnapshotsAvailable()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    logger::CentralRepository central;
+    QString error;
+    QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+    const auto logs = central.repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QString logUuid = logs.first().logUuid;
+    const QString stationUuid = central.repository()->localStationUuid(&error);
+    const QString qsoUuid = newUuid();
+    QVERIFY2(!stationUuid.isEmpty(), qPrintable(error));
+
+    QJsonArray results;
+    QVERIFY2(central.submitBatch(logUuid, {sampleOperation(
+        logUuid, stationUuid, newUuid(), qsoUuid,
+        QStringLiteral("qso.create"), 0, QStringLiteral("W1AW"))},
+        &results, &error), qPrintable(error));
+    QVERIFY2(central.submitBatch(logUuid, {sampleOperation(
+        logUuid, stationUuid, newUuid(), qsoUuid,
+        QStringLiteral("qso.update"), 1, QStringLiteral("W1AW/P"))},
+        &results, &error), qPrintable(error));
+    QVERIFY2(central.submitBatch(logUuid, {sampleOperation(
+        logUuid, stationUuid, newUuid(), newUuid(),
+        QStringLiteral("qso.create"), 0, QStringLiteral("K2TEST"))},
+        &results, &error), qPrintable(error));
+
+    const QString connectionName = QStringLiteral("central-retention-test-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(central.databasePath());
+        QVERIFY(database.open());
+        QSqlQuery ageEvents(database);
+        ageEvents.prepare(QStringLiteral(
+            "UPDATE sync_events SET created_at_utc = ? WHERE log_uuid = ?"));
+        ageEvents.addBindValue(QDateTime::currentDateTimeUtc().addDays(-60)
+                                   .toString(Qt::ISODateWithMs));
+        ageEvents.addBindValue(logUuid);
+        QVERIFY2(ageEvents.exec(), qPrintable(ageEvents.lastError().text()));
+        database.close();
+        database = QSqlDatabase();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    QVERIFY2(central.recordClientCursor(logUuid, stationUuid, 1, &error),
+             qPrintable(error));
+    int removedEvents = 0;
+    QVERIFY2(central.compactSyncEvents(
+                 logUuid, QDateTime::currentDateTimeUtc().addDays(-30),
+                 &removedEvents, &error), qPrintable(error));
+    QCOMPARE(removedEvents, 1);
+    QCOMPARE(central.earliestRevision(logUuid, &error), qint64(2));
+    QCOMPARE(central.eventsSince(logUuid, 0, 10, &error).size(), 2);
+
+    const QJsonObject historicalSnapshot =
+        central.snapshotPage(logUuid, 1, 0, 10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QJsonArray historicalQsos =
+        historicalSnapshot.value(QStringLiteral("qsos")).toArray();
+    QCOMPARE(historicalQsos.size(), 1);
+    QCOMPARE(historicalQsos.first().toObject()
+                 .value(QStringLiteral("callsign")).toString(),
+             QStringLiteral("W1AW"));
+
+    QVERIFY2(central.recordClientHeartbeat(logUuid, stationUuid, 2, &error),
+             qPrintable(error));
+    QCOMPARE(central.clientCursor(logUuid, stationUuid, &error), qint64(2));
+    QVERIFY2(central.recordClientHeartbeat(logUuid, stationUuid, 1, &error),
+             qPrintable(error));
+    QCOMPARE(central.clientCursor(logUuid, stationUuid, &error), qint64(2));
+    QVERIFY(!central.recordClientHeartbeat(logUuid, stationUuid, 4, &error));
+    QVERIFY2(central.compactSyncEvents(
+                 logUuid, QDateTime::currentDateTimeUtc().addDays(-30),
+                 &removedEvents, &error), qPrintable(error));
+    QCOMPARE(removedEvents, 1);
+    QCOMPARE(central.earliestRevision(logUuid, &error), qint64(3));
+    QCOMPARE(central.eventsSince(logUuid, 0, 10, &error).size(), 1);
+
+    QVERIFY2(central.recordClientCursor(logUuid, stationUuid, 3, &error),
+             qPrintable(error));
+    QVERIFY2(central.compactSyncEvents(
+                 logUuid, QDateTime::currentDateTimeUtc().addDays(-30),
+                 &removedEvents, &error), qPrintable(error));
+    QCOMPARE(removedEvents, 1);
+    QCOMPARE(central.earliestRevision(logUuid, &error), qint64(4));
+    QVERIFY(central.eventsSince(logUuid, 0, 10, &error).isEmpty());
+
+    const QJsonObject compactedSnapshot =
+        central.snapshotPage(logUuid, 3, 0, 10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(compactedSnapshot.value(QStringLiteral("total_qsos")).toInt(), 2);
+    const QJsonArray compactedQsos =
+        compactedSnapshot.value(QStringLiteral("qsos")).toArray();
+    QVERIFY(std::any_of(compactedQsos.cbegin(), compactedQsos.cend(),
+        [&qsoUuid](const QJsonValue &value) {
+            const QJsonObject qso = value.toObject();
+            return qso.value(QStringLiteral("qso_uuid")).toString() == qsoUuid
+                && qso.value(QStringLiteral("callsign")).toString()
+                    == QStringLiteral("W1AW/P")
+                && qso.value(QStringLiteral("qso_version")).toInt() == 2;
+        }));
+}
+
 void CentralRepositoryTest::reservesSerialsIdempotentlyByConfiguredScope()
 {
     QTemporaryDir directory;
@@ -505,6 +759,74 @@ void CentralRepositoryTest::reservesSerialsIdempotentlyByConfiguredScope()
     QCOMPARE(third.value(QStringLiteral("serial")).toInt(), 9);
     QCOMPARE(central.serialReservations(logUuid, &error).size(), 4);
     QVERIFY2(error.isEmpty(), qPrintable(error));
+}
+
+void CentralRepositoryTest::correctsUnusedSerialReservationWithAudit()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    logger::CentralRepository central;
+    QString error;
+    QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+    QString logUuid;
+    QVERIFY(createSerialLog(central, QStringLiteral("band"), false,
+                            &logUuid, &error) > 0);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QString administratorStationUuid = newUuid();
+    const QJsonObject reservation = central.reserveSerial(
+        logUuid, newUuid(), newUuid(), QStringLiteral("20m"),
+        QStringLiteral("CW"), &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QString reservationUuid =
+        reservation.value(QStringLiteral("reservation_uuid")).toString();
+    const int previous = reservation.value(QStringLiteral("serial")).toInt();
+
+    QVERIFY2(central.adjustSerialReservation(
+                 logUuid, administratorStationUuid, reservationUuid,
+                 previous, previous + 2, QStringLiteral("Correction verified"),
+                 &error), qPrintable(error));
+    const QJsonArray reservations = central.serialReservations(logUuid, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(reservations.first().toObject()
+                 .value(QStringLiteral("serial")).toInt(), previous + 2);
+
+    const QJsonObject occupiedReservation = central.reserveSerial(
+        logUuid, newUuid(), newUuid(), QStringLiteral("20m"),
+        QStringLiteral("CW"), &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!central.adjustSerialReservation(
+        logUuid, administratorStationUuid, reservationUuid,
+        previous + 2,
+        occupiedReservation.value(QStringLiteral("serial")).toInt(),
+        QStringLiteral("Attempt collision"), &error));
+    QVERIFY(error.startsWith(QStringLiteral("SERIAL_UNAVAILABLE")));
+
+    QVERIFY(!central.adjustSerialReservation(
+        logUuid, administratorStationUuid, reservationUuid,
+        previous, previous + 3, QStringLiteral("Stale correction"), &error));
+    QVERIFY(error.startsWith(QStringLiteral("SERIAL_CHANGED")));
+
+    const QString connectionName = QStringLiteral("serial-adjustment-audit-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(central.databasePath());
+        QVERIFY(database.open());
+        QSqlQuery audit(database);
+        QVERIFY2(audit.exec(QStringLiteral(
+            "SELECT administrator_station_uuid, previous_serial, corrected_serial, "
+            "reason FROM serial_reservation_adjustments")),
+            qPrintable(audit.lastError().text()));
+        QVERIFY(audit.next());
+        QCOMPARE(audit.value(0).toString(), administratorStationUuid);
+        QCOMPARE(audit.value(1).toInt(), previous);
+        QCOMPARE(audit.value(2).toInt(), previous + 2);
+        QCOMPARE(audit.value(3).toString(), QStringLiteral("Correction verified"));
+        database.close();
+        database = QSqlDatabase();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
 }
 
 void CentralRepositoryTest::requiresAndConsumesReservedSerialOnQsoCommit()
