@@ -1,8 +1,8 @@
-# Building, exporting, and recovering logs
+# Budowanie, eksport i odzyskiwanie logów
 
-## Linux build
+## Budowanie w systemie Linux
 
-On Ubuntu, install the build dependencies:
+W systemie Ubuntu zainstaluj zależności i zbuduj aplikację:
 
 ```sh
 sudo apt install cmake ninja-build g++ qt6-base-dev qt6-tools-dev \
@@ -13,91 +13,97 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix package
 ```
 
-Hamlib is optional. To build explicitly without it:
+Hamlib jest opcjonalna. Aby jawnie zbudować program bez niej:
 
 ```sh
 cmake -S . -B build-nohamlib -DLOGGER_ENABLE_HAMLIB=OFF
 ```
 
-The `package` CMake target creates a `.tar.gz` archive. It contains the
-application and example contest YAML files; Qt, SQLite, and yaml-cpp runtime
-libraries must be installed by the Linux package manager.
+Cel CMake `package` tworzy archiwum `.tar.gz` zawierające aplikację
+i przykładowe definicje zawodów YAML. Biblioteki wykonawcze Qt, SQLite
+i yaml-cpp należy zainstalować za pomocą menedżera pakietów systemu.
 
-The radio integration tests use Hamlib's Dummy rig (model 1), including a local
-`rigctld` process for the TCP transport test (NET rigctl model 2). They require
-Hamlib at build time; the `rigctld` test is skipped when the utility is not on
-`PATH`, and both integration tests are skipped in builds without Hamlib.
+Testy integracyjne radia używają Hamlib Dummy (model 1), w tym lokalnego
+procesu `rigctld` do sprawdzania transportu TCP (model NET rigctl 2). Wymagają
+Hamlib podczas budowania. Test `rigctld` jest pomijany, jeśli narzędzie nie
+znajduje się w `PATH`; oba testy integracyjne są pomijane w kompilacji bez
+Hamlib.
 
-## Linux installation packages
+## Pakiety instalacyjne dla Linuxa
 
-Build on the target distribution and architecture: a DEB from Ubuntu is not
-necessarily compatible with Debian or another Ubuntu release, and RPMs must
-match the target Fedora release. The script does not cross-compile or bundle
-system libraries. Use a separate build directory for each distribution.
+Buduj pakiet dla docelowej dystrybucji i architektury. Pakiet DEB z Ubuntu nie
+musi być zgodny z Debianem ani innym wydaniem Ubuntu, a pakiet RPM powinien
+odpowiadać docelowemu wydaniu Fedory. Skrypt nie wykonuje kompilacji
+skrośnej ani nie dołącza bibliotek systemowych. Używaj oddzielnego katalogu
+budowania dla każdej dystrybucji.
 
 ```sh
-# Debian / Ubuntu: installs compiler, CMake, Qt 6, yaml-cpp, Hamlib and DEB tools.
+# Debian / Ubuntu: instaluje kompilator, CMake, Qt 6, yaml-cpp, Hamlib i narzędzia DEB.
 bash tools/package-linux.sh --install-deps
 sudo apt install ./packages/deb/contest-logger_*.deb
 
-# Fedora: installs the corresponding build dependencies and RPM tools.
+# Fedora: instaluje odpowiednie zależności budowania i narzędzia RPM.
 bash tools/package-linux.sh --install-deps
 sudo dnf install ./packages/rpm/contest-logger-*.rpm
 
-# Slackware: first install the dependencies described below.
+# Slackware: najpierw zainstaluj opisane niżej zależności.
 bash tools/package-linux.sh
 sudo upgradepkg --install-new ./packages/slackware/contest-logger-*.txz
 ```
 
-Select a single package filename if the output directory contains multiple
-versions. APT and DNF resolve library dependencies from enabled repositories.
-The packages also explicitly require Qt's SQLite driver and GUI/platform
-plugins, which are loaded dynamically and are not detected by ELF dependency
-scanners. Both `contest_logger` and `contest_logger_server`, the example
-contests, documentation and license are included. No service is automatically
-started, no system users are created, and user settings/logs are not packaged.
+Jeśli katalog wyjściowy zawiera kilka wersji, wybierz jedną nazwę pakietu.
+APT i DNF pobierają zależności bibliotek z włączonych repozytoriów. Pakiety
+wymagają także wtyczki SQLite dla Qt oraz wtyczek GUI/platformy, ładowanych
+dynamicznie i niewykrywanych przez skanery zależności ELF. Pakiet zawiera
+programy `contest_logger` i `contest_logger_server`, przykładowe definicje
+zawodów, dokumentację i licencję. Nie uruchamia automatycznie usługi, nie
+tworzy użytkownika systemowego i nie zawiera ustawień ani logów użytkownika.
 
-The build runs as the current user; only `--install-deps` invokes sudo (or runs
-directly when already root). Without that option, missing tools or libraries
-cause a diagnostic rather than modifying the system. Hamlib is required by
-default so that packaging cannot silently omit hardware CAT/CW support.
+Budowanie odbywa się z uprawnieniami bieżącego użytkownika. Tylko opcja
+`--install-deps` używa `sudo` (lub wykonuje polecenie bezpośrednio, jeśli
+proces działa jako root). Bez niej brakujące narzędzia i biblioteki powodują
+komunikat o błędzie, a skrypt nie zmienia systemu. Domyślnie Hamlib jest
+wymagana, aby pakowanie nie pomijało po cichu sprzętowej obsługi CAT/CW.
 
-Options:
+Opcje skryptu:
 
-- `--format auto|deb|rpm|slackware`: auto-detect by `/etc/os-release`;
-  explicit formats must match the host distribution.
-- `--no-hamlib`: intentionally omit Hamlib support and its build dependency.
-- `--skip-tests`: omit test compilation/execution (tests run by default).
-- `--build-dir PATH`, `--output-dir PATH`: directories relative to the invoking
-  shell's working directory, or absolute paths. Defaults are
-  `build-package-<format>` and `packages/<format>`.
-- `--jobs N`: positive number of parallel build jobs (default 2).
-- `--maintainer 'Name <email>'`: DEB/RPM contact; set this for releases.
-- `--help`: print usage.
+- `--format auto|deb|rpm|slackware` — automatyczny wybór na podstawie
+  `/etc/os-release`; jawny format musi pasować do dystrybucji hosta.
+- `--no-hamlib` — celowe pominięcie obsługi Hamlib i zależności budowania.
+- `--skip-tests` — pominięcie kompilacji i uruchamiania testów (domyślnie
+  testy są wykonywane).
+- `--build-dir PATH`, `--output-dir PATH` — ścieżki względne względem
+  bieżącego katalogu powłoki lub bezwzględne. Domyślnie
+  `build-package-<format>` oraz `packages/<format>`.
+- `--jobs N` — dodatnia liczba równoległych zadań budowania (domyślnie 2).
+- `--maintainer 'Name <email>'` — kontakt dla pakietu DEB/RPM; ustaw go
+  przy wydaniu.
+- `--help` — wyświetla pomoc.
 
-For Slackware, provide CMake >= 3.21, a C++20 compiler (`gcc-g++`), `make`
-(or Ninja), Qt >= 6.2 (`qt6`, including development files, Qt Test for the
-default test build, the QSQLITE plugin and platform plugins), yaml-cpp >= 0.7,
-Hamlib development/runtime files, GNU tar and xz. Install official packages
-from the matching Slackware release using `slackpkg`; libraries absent from
-that release need separately built packages, including their dependencies.
-Slackware 15.0's stock Qt 5 does not satisfy the Qt 6 requirement.
-`--no-hamlib` removes the Hamlib requirement.
+Slackware wymaga CMake >= 3.21, kompilatora C++20 (`gcc-g++`), `make` (lub
+Ninja), Qt >= 6.2 (`qt6`, w tym plików deweloperskich, Qt Test dla domyślnej
+konfiguracji testów, wtyczki QSQLITE i wtyczek platformy), yaml-cpp >= 0.7,
+plików deweloperskich i wykonawczych Hamlib, GNU tar i xz. Oficjalne pakiety
+instaluj z pasującego wydania Slackware przez `slackpkg`; bibliotek
+niedostępnych w tym wydaniu niezbędne będzie zbudowanie wraz z ich zależnościami.
+Qt 5 dołączone do Slackware 15.0 nie spełnia wymagania Qt 6. Opcja
+`--no-hamlib` usuwa zależność od Hamlib.
 
-Slackware packages contain `install/slack-desc` and an informational
-`install/slack-required` list. Neither `installpkg` nor `upgradepkg`
-automatically resolves that list; install dependencies before installing or
-running Contest Logger. `--install-deps` deliberately stops on Slackware
-instead of pretending these dependencies can be resolved automatically.
+Pakiet Slackware zawiera `install/slack-desc` oraz informacyjną listę
+`install/slack-required`. Polecenia `installpkg` i `upgradepkg` nie rozwiązują
+automatycznie zależności z tej listy; trzeba je zainstalować przed
+Contest Logger. Opcja `--install-deps` celowo kończy działanie w Slackware,
+zamiast sugerować, że zależności można rozwiązać automatycznie.
 
-## Windows build and package
+## Budowanie i pakowanie w Windows
 
-Use Visual Studio 2022 x64 C++ tools, Qt 6 (MSVC 2022 64-bit), CMake, and
-vcpkg. Hamlib's vcpkg port does not support the MSVC `x64-windows` triplet, so
-obtain a Windows Hamlib package containing its headers, DLL, and `.def` file.
-The script creates an MSVC import library from that definition file, installs
-`yaml-cpp` with vcpkg, requires Hamlib at configure time, builds/tests, deploys
-Qt and runtime DLL dependencies, checks the Hamlib DLL, and creates the ZIP:
+Wymagane są narzędzia C++ x64 z Visual Studio 2022, Qt 6 dla MSVC 2022 64-bit,
+CMake i vcpkg. Port Hamlib w vcpkg nie obsługuje tripletu MSVC `x64-windows`.
+Pobierz więc pakiet Hamlib dla Windows zawierający nagłówki, bibliotekę DLL
+i plik `.def`. Skrypt tworzy bibliotekę importową MSVC na podstawie `.def`,
+instaluje yaml-cpp przez vcpkg, wymaga Hamlib podczas konfiguracji, buduje
+i testuje program, wdraża Qt oraz biblioteki wykonawcze, sprawdza obecność
+DLL Hamlib i tworzy archiwum ZIP:
 
 ```powershell
 .\tools\package-windows.ps1 `
@@ -106,200 +112,208 @@ Qt and runtime DLL dependencies, checks the Hamlib DLL, and creates the ZIP:
   -QtRoot "C:\Qt\6.8.0\msvc2022_64"
 ```
 
-For a build without Hamlib, set `LOGGER_ENABLE_HAMLIB=OFF` and leave
-`LOGGER_REQUIRE_HAMLIB=OFF`. Release packaging must use the script above:
-`LOGGER_REQUIRE_HAMLIB=ON` prevents a silently degraded build, and the installed
-package is checked for the Hamlib runtime DLL. Run the package on the actual
-target Windows machine before release; successful compilation/package creation
-does not verify COM-port access or radio firmware compatibility.
+Aby zbudować bez Hamlib, ustaw `LOGGER_ENABLE_HAMLIB=OFF` i pozostaw
+`LOGGER_REQUIRE_HAMLIB=OFF`. Pakowanie wydania wykonuj powyższym skryptem:
+`LOGGER_REQUIRE_HAMLIB=ON` zapobiega niezauważonemu utworzeniu okrojonej
+kompilacji, a zawartość pakietu jest sprawdzana pod kątem biblioteki DLL
+Hamlib. Przed wydaniem uruchom pakiet na docelowym komputerze Windows.
+Pomyślne budowanie nie potwierdza dostępu do portu COM ani zgodności
+z oprogramowaniem układowym radia.
 
-## Hamlib CAT configuration
+## Konfiguracja CAT przez Hamlib
 
-1. Install Hamlib development/runtime packages and enable it with
-   `-DLOGGER_ENABLE_HAMLIB=ON`. CMake detects Hamlib when its headers and library
-   are on the standard search path; otherwise set `HAMLIB_INCLUDE_DIR` and
-   `HAMLIB_LIBRARY`.
-2. Find the radio's numeric Hamlib model ID in the Hamlib rig list/documentation.
-   Select **Radio > Radio A/B CAT settings...**, enter that ID, and choose
-   either the serial device plus baud rate or a `rigctld` TCP endpoint.
-3. On Linux, grant the operator access to the serial device (commonly through
-   the `dialout` group, then log in again). On Windows, choose the assigned
-   `COM` port. Do not open a serial port directly in another application while
-   the logger owns it.
-4. To share a rig connection with another application or a Hamlib CW provider,
-   run `rigctld` and point the other client at its host/port rather than opening
-   the same serial port twice. Restrict the network listener to trusted/local
-   clients.
-5. Connect and confirm the radio status/frequency before enabling SO2V/SO2R.
-   The Mock backend supports software testing without a transceiver. A successful
-   Hamlib build is not evidence of hardware compatibility; test CAT, CW, and
-   dual-receiver behavior with the exact radio/firmware/interface in use.
+1. Zainstaluj pliki deweloperskie i wykonawcze Hamlib oraz włącz ją opcją
+   `-DLOGGER_ENABLE_HAMLIB=ON`. CMake wykrywa Hamlib, jeśli nagłówki i
+   biblioteka znajdują się w standardowej ścieżce wyszukiwania. W przeciwnym
+   razie ustaw `HAMLIB_INCLUDE_DIR` i `HAMLIB_LIBRARY`.
+2. Znajdź numeryczny identyfikator modelu radia w wykazie modeli Hamlib lub
+   dokumentacji. Wybierz **Radio > Radio A/B CAT settings...**, wpisz
+   identyfikator i ustaw port szeregowy z prędkością transmisji albo punkt
+   końcowy TCP `rigctld`.
+3. W systemie Linux przyznaj operatorowi dostęp do urządzenia szeregowego
+   (zwykle przez grupę `dialout`, a następnie ponowne zalogowanie). W Windows
+   wybierz przypisany port `COM`. Nie otwieraj portu szeregowego w innej
+   aplikacji, gdy korzysta z niego logger.
+4. Aby współdzielić połączenie z radiem z inną aplikacją lub providerem CW
+   Hamlib, uruchom `rigctld` i skieruj pozostałych klientów do jego hosta
+   i portu, zamiast otwierać ten sam port szeregowy dwukrotnie. Ogranicz
+   nasłuch sieciowy do zaufanych/lokalnych klientów.
+5. Połącz radio i sprawdź jego status oraz częstotliwość przed włączeniem
+   SO2V/SO2R. Backend Mock pozwala testować program bez transceivera. Udana
+   kompilacja z Hamlib nie potwierdza zgodności sprzętowej; CAT, CW i pracę
+   z dwoma odbiornikami sprawdź z konkretnym radiem, firmware i interfejsem.
 
-## Contest definitions
+## Definicje zawodów
 
-Contest definitions use YAML schema version 1. Import them using **Contest >
-Import YAML definition...** or place examples under `contests/examples/` before
-building. Definitions specify contest ID/name, supported bands/modes,
-sent/received exchange fields, serial generation, QSO points, multipliers, and
-the duplicate key. Field types are `rst`, `serial`, `integer`, `text`, `grid`,
-`callsign`, and `enum`; supported multiplier types are `exchange`, `prefix`,
-`dxcc`, and `country`. Exchange multipliers use a received field; prefix
-multipliers use the WPX prefix derived from the contacted callsign. DXCC and
-country multipliers are resolved from the contact's callsign (`country` is an
-alias for the CTY DXCC entity). Multipliers can be counted per band and/or mode
-with `per_band` and `per_mode`.
+Definicje zawodów używają schematu YAML w wersji 1. Importuj je przez
+**Contest > Import YAML definition...** albo umieść przykłady w
+`contests/examples/` przed budowaniem. Definicja określa identyfikator
+i nazwę zawodów, dozwolone pasma i emisje, pola wymiany nadawanej
+i odbieranej, generowanie numerów seryjnych, punkty za QSO, mnożniki
+i klucz wykrywania duplikatów. Typy pól to `rst`, `serial`, `integer`, `text`,
+`grid`, `callsign` i `enum`; typy mnożników to `exchange`, `prefix`, `dxcc`
+i `country`. Mnożnik wymiany korzysta z pola odebranego, a mnożnik prefiksowy
+wyznacza prefiks WPX ze znaku korespondenta. Mnożniki DXCC i `country` są
+odczytywane ze znaku korespondenta (`country` jest aliasem encji DXCC z CTY).
+Mnożniki można liczyć osobno dla pasma i/lub emisji przez `per_band`
+i `per_mode`.
 
-The loader rejects malformed YAML, unknown keys, duplicate fields, invalid
-regular expressions, unsupported field types, and values outside configured
-limits. Conditional received fields and ordered `qso_point_rules` can use band,
-mode, received exchange values, or CTY metadata. Sent exchange fields can also
-be conditional on the station's CTY location. Available location facts include
-`dxcc`/`country`, `continent`, `cq_zone`, `itu_zone`, corresponding
-`station.*` facts, and `same_dxcc`, `same_country`, and `same_continent`
-comparisons. The application resolves contact and station location facts when
-a valid `wl_cty.dat` is loaded; this data is required for geographical
-conditions and DXCC/country multipliers. Without it, dependent conditions may
-not match and CTY-based multiplier values remain unresolved. `qso_point_rules`
-are evaluated in order; the first matching rule supplies QSO points, otherwise
-`qso_points` is used. See [CONTEST_DEFINITIONS.md](./CONTEST_DEFINITIONS.md)
-for the condition syntax. Start with one of the bundled definitions and run
-`ctest --test-dir build --output-on-failure` after changing contest rules.
+Loader odrzuca błędny YAML, nieznane klucze, powtórzone pola, nieprawidłowe
+wyrażenia regularne, nieobsługiwane typy i wartości poza skonfigurowanymi
+limitami. Warunkowe pola wymiany odbieranej i uporządkowane
+`qso_point_rules` mogą korzystać z pasma, emisji, wartości odebranej wymiany
+lub metadanych CTY. Pola wymiany nadawanej mogą również zależeć od położenia
+stacji w CTY. Dostępne informacje lokalizacyjne obejmują `dxcc`/`country`,
+`continent`, `cq_zone`, `itu_zone`, odpowiadające im pola `station.*` oraz
+porównania `same_dxcc`, `same_country` i `same_continent`. Aplikacja
+rozpoznaje położenie stacji i korespondenta po wczytaniu prawidłowego pliku
+`wl_cty.dat`; plik jest wymagany dla warunków geograficznych i mnożników
+DXCC/kraju. Bez niego warunki zależne od lokalizacji mogą nie pasować,
+a wartość mnożnika CTY może pozostać nierozpoznana. Reguły
+`qso_point_rules` są sprawdzane po kolei; pierwsza pasująca reguła określa
+punkty QSO, a gdy żadna nie pasuje, używana jest wartość `qso_points`.
+Składnię warunków opisuje [CONTEST_DEFINITIONS.md](./CONTEST_DEFINITIONS.md).
+Po zmianie reguł uruchom `ctest --test-dir build --output-on-failure`.
 
-Bundled starter profiles cover CQ WW CW/SSB, CQ WPX CW/SSB, IARU HF, SP DX,
-WAG, ARRL DX CW/SSB/10m, EU DX, and EU HF Championship. They are not certified
-implementations of every sponsor rule; verify profile conditions, point
-values, and annual rule changes against the current sponsor rules. Enter
-station-specific sent exchange values in the QSO form; they persist per contest
-and entry context. Standard RST values follow the selected mode (voice 59,
-CW/digital 599).
+Dołączone profile startowe obejmują CQ WW CW/SSB, CQ WPX CW/SSB, IARU HF,
+SP DX, WAG, ARRL DX CW/SSB/10m, EU DX i EU HF Championship. Nie są
+certyfikowanymi implementacjami wszystkich reguł organizatorów; przed
+zawodami zweryfikuj warunki profilu, punktację i coroczne zmiany regulaminu.
+Wartości wymiany nadawanej dla danej stacji wprowadza się w formularzu QSO;
+są zapamiętywane dla danego contestu i kontekstu wejściowego. Domyślne
+wartości RST zależą od emisji (fonia 59, CW/cyfrowa 599).
 
-## Main window layout
+## Układ okna głównego
 
-The operator entry form stays in the center, with the contest log docked below
-and the DX bandmap, CW keyer, and contest summary available as tabs on the
-right. Use the **Window** menu to show/hide panels or restore the default
-arrangement. The window geometry and dock layout are persisted in `QSettings`.
-Radio CAT, DX cluster, and CW keyer configuration are available from **Radio**;
-operator/station settings are under **Options**.
+Formularz operatora znajduje się pośrodku, a dziennik zawodów jest
+dokowany poniżej. Bandmapa DX, keyer CW i podsumowanie contestu są dostępne
+jako karty po prawej stronie. Menu **Window** pozwala pokazywać i ukrywać
+panel lub przywrócić układ domyślny. Geometria okna i układ doków są
+zapisywane przez `QSettings`. Konfiguracja radia CAT, DX Cluster i keyera CW
+znajduje się w menu **Radio**, a ustawienia operatora/stacji — w **Options**.
 
-## Callsign support data and keyboard operation
+## Dane pomocnicze znaków i obsługa klawiatury
 
-**File > Import support data** accepts call-history CSV/TXT, `master.cpy`, and
-standard multiline `wl_cty.dat`. The app validates each imported file, stores
-its path in application settings, and reloads the selected data at startup.
-Call history supports callsign completion and exchange suggestions. CTY
-prefix/exact-call matches provide country (DXCC entity), continent, and CQ/ITU
-zones for call hints, contest scoring conditions, and DXCC/country multipliers;
-without CTY data, these location-dependent scoring values cannot be resolved.
+Polecenie **File > Import support data** przyjmuje historię znaków CSV/TXT,
+`master.cpy` i standardowy wielowierszowy `wl_cty.dat`. Aplikacja sprawdza
+pliki, zapisuje ich ścieżki w ustawieniach i wczytuje je ponownie przy starcie.
+Historia znaków podpowiada znak i wymianę. Dopasowanie prefiksu lub dokładnego
+znaku CTY dostarcza kraj (encję DXCC), kontynent i strefy CQ/ITU dla
+podpowiedzi, warunków punktacji i mnożników DXCC/kraju. Bez danych CTY nie
+można rozstrzygnąć wartości zależnych od lokalizacji.
 
-Use a call-history header beginning `CALL` or `CALLSIGN` with columns such as
-`NAME`, `QTH`, `STATE`, `GRID`, `SECTION`, `SERIAL`, `REPORT`, and `EXCHANGE`.
-Headerless whitespace rows are interpreted as `CALL NAME QTH EXCHANGE`.
-`master.cpy` accepts one callsign per line with optional trailing columns.
-In the bandmap, **Up/Down** selects a spot and **Enter** tunes it. Space moves
-through callsign and received-exchange fields and cycles back to callsign.
+Nagłówek historii znaków może zaczynać się od `CALL` lub `CALLSIGN`; obsługiwane
+kolumny to m.in. `NAME`, `QTH`, `STATE`, `GRID`, `SECTION`, `SERIAL`, `REPORT`
+i `EXCHANGE`. Wiersze bez nagłówka rozdzielone białymi znakami mają format
+`CALL NAME QTH EXCHANGE`. `master.cpy` zawiera jeden znak w każdym wierszu,
+opcjonalnie z dodatkowymi kolumnami. W bandmapie klawisze **Up/Down** wybierają
+spot, **Enter** dostraja radio. Spacja przechodzi przez pola znaku i odebranej
+wymiany, a następnie wraca do pola znaku.
 
-## Export validation and formats
+## Walidacja i formaty eksportu
 
-Select a contest and use **File > Export Cabrillo...** or **File > Export
-ADIF...**. Before writing, the exporter validates the selected contest, calls,
-UTC timestamps, band/frequency, supported mode, duplicate keys, and configured
-exchange fields. Failed validation is shown to the operator and does not
-replace an existing file. Successful exports are written through a temporary
-file and atomically committed.
+Wybierz zawody i użyj **File > Export Cabrillo...** lub
+**File > Export ADIF...**. Przed zapisem eksporter sprawdza zawody, znaki,
+czasy UTC, pasmo/częstotliwość, obsługiwaną emisję, klucze duplikatów
+i skonfigurowane pola wymiany. Błąd walidacji jest wyświetlany operatorowi
+i nie zastępuje istniejącego pliku. Eksport jest zapisywany do pliku
+tymczasowego, a następnie zatwierdzany atomowo.
 
-Cabrillo output uses the v3 record layout and maps common modes (for example
-USB/LSB/SSB to `PH`, RTTY to `RY`, and FT8/FT4/data to `DG`). When a contact
-has no CAT frequency, its band designator is used. Cabrillo contest-specific
-category headers and each contest sponsor's submission rules should be checked
-before submitting the file. ADIF output includes standard contact/time/band/
-mode/frequency and sent/received exchange fields; frequencies are omitted when
-not recorded. Older QSO records that only contain plain exchange strings are
-mapped to contest fields in definition order; strings in `field=value` form
-are also recognized. This allows validation and Cabrillo output to use the
-original exchange without requiring a database migration.
+Cabrillo używa układu rekordów wersji 3 i mapuje popularne emisje (np.
+USB/LSB/SSB na `PH`, RTTY na `RY`, FT8/FT4/dane na `DG`). Jeśli QSO nie ma
+częstotliwości CAT, używany jest identyfikator pasma. Przed wysłaniem logu
+sprawdź nagłówki kategorii właściwe dla contestu i wymagania organizatora.
+ADIF zawiera standardowe pola kontaktu, czasu, pasma, emisji, częstotliwości
+i wymiany nadawanej/odbieranej; częstotliwość jest pomijana, jeśli jej nie
+zapisano. Starsze wpisy QSO zawierające wyłącznie tekst wymiany są mapowane
+na pola contestu według kolejności definicji; rozpoznawany jest też format
+`field=value`. Dzięki temu można walidować i eksportować oryginalną wymianę
+bez migracji bazy.
 
-## Local SQLite backups and recovery
+## Lokalne kopie zapasowe SQLite i odzyskiwanie
 
-The database uses SQLite WAL journaling, `synchronous=FULL`, a busy timeout,
-and a startup `quick_check`. SQLite replays a valid WAL after an interrupted
-process. A corrupt database is not silently replaced: startup reports the
-failure.
+Baza używa dziennika SQLite WAL, `synchronous=FULL`, limitu oczekiwania na
+blokadę i kontroli `quick_check` podczas uruchamiania. Po przerwaniu działania
+SQLite odtwarza poprawny dziennik WAL. Uszkodzona baza nie jest po cichu
+zastępowana — aplikacja zgłasza błąd.
 
-Use **File > Back up database...** to create and integrity-check an online
-snapshot. The application also creates one verified automatic snapshot per
-day, retaining the most recent 30 daily backups, under Qt's application data
-directory in `backups/`.
+Polecenie **File > Back up database...** tworzy i sprawdza spójny zrzut online.
+Aplikacja tworzy również jedną zweryfikowaną kopię automatyczną dziennie,
+zachowując 30 ostatnich kopii w katalogu danych Qt, w podkatalogu `backups/`.
 
-To restore a backup, close Contest Logger and run:
+Aby odtworzyć kopię, zamknij Contest Logger i uruchom:
 
 ```text
-contest_logger --restore-backup <path-to-backup.sqlite>
+contest_logger --restore-backup <ścieżka-do-kopii.sqlite>
 ```
 
-The application checks SQLite integrity and the logger schema before replacing
-the database. It preserves the prior database (and any WAL/SHM files) beside
-the restored database with a `.before-restore-...sqlite` suffix. The restore
-command is blocked while another logger instance is running. Restart the
-application normally after the success message.
+Aplikacja sprawdza integralność SQLite i schemat loggera przed zastąpieniem
+bazy. Poprzednia baza (oraz pliki WAL/SHM) jest zachowywana obok z sufiksem
+`.before-restore-...sqlite`. Odtwarzanie jest zablokowane, jeśli działa inna
+instancja loggera. Po komunikacie o powodzeniu uruchom aplikację ponownie.
 
-## Central synchronization server operations
+## Obsługa centralnego serwera synchronizacji
 
-Packages include `contest_logger_server` but do not create a service or
-service account. The server uses a separate `central-log.sqlite` under
-`--data-dir`; GUI Host and the CLI may have different default data locations.
-Do not apply the local GUI recovery command above to the central database.
+Pakiet zawiera `contest_logger_server`, ale nie tworzy usługi ani konta
+systemowego. Serwer korzysta z osobnego pliku `central-log.sqlite` w katalogu
+`--data-dir`; interfejsowy Host i serwer CLI mogą mieć różne domyślne katalogi
+danych. Nie używaj lokalnego polecenia odtwarzania aplikacji do bazy serwera.
 
-With the server stopped, restore a verified central backup using:
+Gdy serwer jest zatrzymany, odtwórz zweryfikowaną kopię centralną:
 
 ```sh
-contest_logger_server --restore-backup <backup.sqlite> --data-dir <central-data-directory>
-contest_logger_server --check --data-dir <central-data-directory>
+contest_logger_server --restore-backup <kopia.sqlite> --data-dir <katalog-danych-serwera>
+contest_logger_server --check --data-dir <katalog-danych-serwera>
 ```
 
-The server preserves the previous database before installing the backup.
-Automatic pre-migration copies are not a scheduled backup policy. See the
-[server operations runbook](./NETWORKING_OPERATIONS.md) for installation,
-TCP/firewall, TLS, token rotation, backup/restore, upgrades, host loss and
-the required deployment restore drill.
+Serwer zachowuje poprzednią bazę przed instalacją kopii. Automatyczne kopie
+przed migracją nie zastępują harmonogramu backupów. Procedura instalacji,
+trusted TCP/firewall, kopii i odzyskiwania, aktualizacji oraz utraty hosta
+jest opisana w
+[NETWORKING_OPERATIONS.md](./NETWORKING_OPERATIONS.md).
 
-Client tokens can optionally use Windows Credential Manager or Linux Secret
-Service. Linux requires `secret-tool` and an accessible Secret Service;
-failure is reported rather than saving a plaintext token. Additional CA
-certificates and automatic Client/Host startup are opt-in. The
-`station_identity` capability carries computer name, station callsign and
-operator labels; UUIDs remain protocol identifiers. Verify both client and
-server versions when validating these labels; older peers show **Not provided**.
+Aktualne GUI/CLI nie konfiguruje tokenów ani certyfikatów: połączenia
+wykorzystują nieszyfrowany trusted TCP, bez uwierzytelniania klientów.
+Automatyczne uruchamianie Clienta/Hosta jest opcjonalne. `station_identity`
+przekazuje etykiety nazwy komputera, znaku stacji i operatora; UUID jest
+identyfikatorem protokołu, ale w tym trybie nie uwierzytelnia stacji. Wartości
+opisowe są deklarowane przez klienta i nie należy traktować ich jako
+zweryfikowanej tożsamości.
 
-Before deployment, run the existing `ui_tests` and `sync_server_tests`.
-They cover the connected-station table, identity updates, read-only access,
-legacy clients and invalid descriptions, in addition to synchronization
-flows. Automated tests do not replace failure testing and a multi-station
-pilot; see [NETWORKING.md](../NETWORKING.md).
+Przed wdrożeniem uruchom testy `ui_tests` i `sync_server_tests`. Obejmują
+tabelę podłączonych stacji, aktualizowanie opisów, starszych klientów,
+nieprawidłowe opisy i przepływy synchronizacji. Testy uprawnień read-only
+dotyczą zachowanego wariantu TLS/token, a nie bieżącego trusted TCP, w którym
+każdy połączony klient ma odczyt i zapis.
+Testy automatyczne nie zastępują testów awarii i pilotażu wielostacyjnego;
+szczegóły opisuje [NETWORKING.md](../NETWORKING.md).
 
-## Hardware integration matrix
+## Macierz testów sprzętowych
 
-CI verifies builds/tests on Linux and Windows, including mock CAT, CW keyer,
-and local TCP/Telnet cluster tests. It does not emulate a physical serial port,
-radio firmware, Windows sleep/resume behavior, or external PTT/audio switching.
-Before field use, test each supported platform with the target transceiver and
-USB/serial adapter, both direct CAT and `rigctld`, cluster loss/reconnect, and
-system suspend/resume. Record radio model, firmware, Hamlib version, transport,
-and results for any hardware-specific issue. Software-side SO2V routing binds
-each queued CW message to its selected transmit VFO; Hamlib receives explicit
-VFO A/B, while cwdaemon refuses VFO B because its protocol cannot select the
-transmit VFO. This does not replace an RF-safety test on the target radio.
+CI buduje i testuje program w Linuxie i Windows, w tym mock CAT, keyer CW
+i lokalny test DX Cluster TCP/Telnet. Nie emuluje fizycznego portu szeregowego,
+firmware radia, usypiania i wznawiania systemu Windows ani zewnętrznego
+przełączania PTT/audio. Przed pracą w terenie sprawdź każdą obsługiwaną
+platformę z docelowym transceiverem i adapterem USB/szeregowym, zarówno przy
+bezpośrednim CAT, jak i przez `rigctld`; sprawdź także utratę i ponowne
+połączenie z klastrem oraz uśpienie/wznowienie systemu. Zapisz model radia,
+wersję firmware, Hamlib, transport i wyniki problemów sprzętowych.
+Programowe trasowanie SO2V wiąże każdą wiadomość CW w kolejce z wybranym
+VFO nadawczym. Hamlib otrzymuje jawne A/B, natomiast cwdaemon odrzuca VFO B,
+bo jego protokół nie pozwala wybrać VFO nadawczego. Nie zastępuje to testu
+bezpieczeństwa RF na docelowym radiu.
 
-Use this record for every supported radio/platform combination; do not mark a
-combination supported based only on Hamlib Dummy or `rigctld`:
+Prowadź poniższy rejestr dla każdej obsługiwanej kombinacji radia i platformy.
+Nie oznaczaj kombinacji jako obsługiwanej wyłącznie na podstawie Hamlib Dummy
+lub `rigctld`.
 
-| Platform / version | Radio / firmware | CAT transport / Hamlib | CAT tune & mode | SO2V focus-to-TX A/B | CW provider / VFO | Disconnect / reconnect | Suspend / resume | Result / evidence |
+| Platforma / wersja | Radio / firmware | Transport CAT / Hamlib | Dostrajanie i tryb CAT | SO2V fokus-TX A/B | Provider CW / VFO | Rozłączenie / ponowne połączenie | Uśpienie / wznowienie | Wynik / dowody |
 |---|---|---|---|---|---|---|---|---|
-| Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia | Do sprawdzenia |
 
-For SO2V, verify independently that switching RX focus changes the radio's TX
-VFO, that a queued message remains on the VFO selected when it was queued, and
-that abort/disconnect never redirects transmission to the other VFO. Record
-actual RF/PTT observation and test setup. Mark failures and unsupported
-combinations explicitly rather than inferring compatibility from another
-model using the same Hamlib backend.
+Dla SO2V sprawdź osobno, czy zmiana fokusu RX zmienia VFO nadawcze radia,
+wiadomość w kolejce pozostaje przypisana do VFO wybranego podczas jej
+dodawania oraz czy przerwanie/rozłączenie nigdy nie przekierowuje nadawania
+na drugie VFO. Zanotuj obserwacje rzeczywistego RF/PTT i konfigurację testu.
+Jawnie oznacz niepowodzenia i nieobsługiwane kombinacje; nie wnioskuj
+o zgodności na podstawie innego modelu używającego tego samego backendu Hamlib.

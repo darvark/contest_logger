@@ -1,0 +1,25 @@
+schema_version: 1
+id: arrl-dx-ssb-w-ve
+name: ARRL International DX Contest — SSB (W/VE entrant)
+description: >-
+  Rules: https://contests.arrl.org/ContestRules/DX-Rules.pdf (accessed
+  2026-10-21). For W/VE entrants: send RS plus state/province and receive
+  RS plus the DX station's transmitter power in watts. Each valid QSO is
+  worth 3 points. Each DXCC entity worked is a multiplier per band. DXCC
+  multiplier resolution requires current CTY data. This role-specific profile
+  does not enforce entrant eligibility or category limits.
+bands: [160m, 80m, 40m, 20m, 15m, 10m]
+modes: [SSB]
+cabrillo: {contest: ARRL-DX-SSB}
+exchange:
+  sent:
+    - {name: report, label: RS, type: rst, default: "59"}
+    - {name: state_province, label: State/province (station), type: text, pattern: "^[A-Z]{2,3}$", width: 3}
+  received:
+    - {name: report, label: RS, type: rst}
+    - {name: power, label: Transmitter power (W), type: integer, min: 1, max: 1500}
+scoring:
+  qso_points: 3
+  multipliers:
+    - {type: dxcc, per_band: true, exclude: [United States, Canada]}
+dupe_key: [callsign, band, mode]

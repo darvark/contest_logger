@@ -2,6 +2,8 @@
 #include "logger/contest/contest_definition_loader.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -36,6 +38,11 @@ QString applicationDataDirectory()
 QString contestDefinitionsDirectory()
 {
     return QDir(applicationDataDirectory()).filePath(QStringLiteral("contests"));
+}
+
+QString contestDefinitionVersionsDirectory()
+{
+    return QDir(contestDefinitionsDirectory()).filePath(QStringLiteral("versions"));
 }
 
 bool initializeApplicationData(QString *error)
@@ -196,6 +203,34 @@ bool storeContestDefinitionFile(const QString &yaml, QString *error)
             *error = QStringLiteral("%1: File belongs to a different contest ID.")
                          .arg(target);
             return false;
+        }
+    }
+    QFileInfo currentInfo(target);
+    if (currentInfo.isFile()) {
+        QFile current(target);
+        if (!current.open(QIODevice::ReadOnly)) {
+            *error = QStringLiteral("%1: %2").arg(target, current.errorString());
+            return false;
+        }
+        const QByteArray previous = current.readAll();
+        if (previous != yaml.toUtf8()) {
+            const QByteArray digest = QCryptographicHash::hash(
+                previous, QCryptographicHash::Sha256).toHex().left(12);
+            const QString versionDirectory = QDir(
+                contestDefinitionVersionsDirectory()).filePath(definition.id);
+            if (!QDir().mkpath(versionDirectory)) {
+                *error = QStringLiteral("Could not create contest version directory: %1")
+                             .arg(versionDirectory);
+                return false;
+            }
+            const QString versionPath = QDir(versionDirectory).filePath(
+                QStringLiteral("%1-%2.yaml")
+                    .arg(QDateTime::currentDateTimeUtc()
+                             .toString(QStringLiteral("yyyyMMdd'T'hhmmsszzz'Z'")),
+                         QString::fromLatin1(digest)));
+            if (!writeDefinition(versionPath, previous, error)) {
+                return false;
+            }
         }
     }
     return writeDefinition(target, yaml.toUtf8(), error);

@@ -10,6 +10,7 @@ namespace logger {
 
 QString applicationDataDirectory();
 QString contestDefinitionsDirectory();
+QString contestDefinitionVersionsDirectory();
 bool initializeApplicationData(QString *error);
 bool installBundledContestDefinitions(QString *error);
 QStringList contestDefinitionFiles();

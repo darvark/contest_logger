@@ -44,6 +44,8 @@ add_library(logger_core
     include/logger/data/support_data_parser.h
     include/logger/network/sync_server.h
     include/logger/network/sync_client.h
+    include/logger/network/station_presence.h
+    include/logger/network/sync_consistency.h
     include/logger/network/secret_store.h
     include/logger/radio/radio_service.h
     include/logger/radio/band_plan.h
@@ -251,6 +253,9 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
     target_compile_definitions(contest_tests PRIVATE
+        CONTEST_LOGGER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_compile_definitions(export_tests PRIVATE
         CONTEST_LOGGER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(logger_tests PRIVATE logger_core Qt6::Test)

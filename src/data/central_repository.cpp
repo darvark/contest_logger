@@ -1,4 +1,5 @@
 #include "logger/data/central_repository.h"
+#include "logger/network/sync_consistency.h"
 
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/contest/contest_engine.h"
@@ -126,6 +127,9 @@ QJsonObject qsoSnapshot(const QJsonObject &input, int version, bool deleted)
     QJsonObject snapshot = input;
     snapshot.insert(QStringLiteral("qso_version"), version);
     snapshot.insert(QStringLiteral("is_deleted"), deleted);
+    if (!snapshot.contains(QStringLiteral("is_invalid"))) {
+        snapshot.insert(QStringLiteral("is_invalid"), false);
+    }
     return snapshot;
 }
 
@@ -159,6 +163,7 @@ Qso qsoFromJson(const QJsonObject &object)
     qso.receivedExchangeFields = stringMap(
         object.value(QStringLiteral("received_exchange_fields")));
     qso.points = object.value(QStringLiteral("points")).toInt();
+    qso.invalid = object.value(QStringLiteral("is_invalid")).toBool();
     return qso;
 }
 
@@ -530,7 +535,8 @@ bool CentralRepository::submitBatch(
         QJsonObject qso = operation.value(QStringLiteral("qso")).toObject();
         const QStringList expectedQsoKeys{
             QStringLiteral("band"), QStringLiteral("callsign"),
-            QStringLiteral("frequency_hz"), QStringLiteral("log_uuid"),
+            QStringLiteral("frequency_hz"), QStringLiteral("is_invalid"),
+            QStringLiteral("log_uuid"),
             QStringLiteral("mode"), QStringLiteral("points"),
             QStringLiteral("qso_uuid"), QStringLiteral("received_exchange"),
             QStringLiteral("received_exchange_fields"),
@@ -555,6 +561,7 @@ bool CentralRepository::submitBatch(
             || (operation.keys() != expectedOperationKeys
                 && operation.keys() != keysWithReservation)
             || qso.keys() != expectedQsoKeys
+            || !qso.value(QStringLiteral("is_invalid")).isBool()
             || stringValue(qso, QStringLiteral("qso_uuid")).isEmpty()
             || !isUuid(stringValue(qso, QStringLiteral("qso_uuid")))
             || stringValue(qso, QStringLiteral("log_uuid")) != logUuid
@@ -676,7 +683,8 @@ bool CentralRepository::submitBatch(
             }
         }
 
-        if (hasDefinition && kind != QStringLiteral("qso.delete")) {
+        if (hasDefinition && kind != QStringLiteral("qso.delete")
+            && !qso.value(QStringLiteral("is_invalid")).toBool()) {
             QString readError;
             QVector<Qso> previousQsos = m_repository->qsosForContest(
                 contestId, 0, &readError);
@@ -752,6 +760,9 @@ bool CentralRepository::submitBatch(
             }
             qso.insert(QStringLiteral("points"), evaluation.points);
             pointsNumber = evaluation.points;
+        } else if (qso.value(QStringLiteral("is_invalid")).toBool()) {
+            qso.insert(QStringLiteral("points"), 0);
+            pointsNumber = 0;
         }
 
         qint64 qsoId = 0;
@@ -791,7 +802,8 @@ bool CentralRepository::submitBatch(
                 if (!currentDocument.isObject()) {
                     return rollback(QStringLiteral("Stored QSO snapshot is invalid."));
                 }
-                QJsonObject currentQso = currentDocument.object();
+                QJsonObject currentQso = qsoSnapshot(
+                    currentDocument.object(), currentVersion, false);
                 currentQso.remove(QStringLiteral("qso_version"));
                 currentQso.remove(QStringLiteral("is_deleted"));
                 const bool identical = !deleted
@@ -849,10 +861,12 @@ bool CentralRepository::submitBatch(
             }
         }
 
-        if (kind != QStringLiteral("qso.delete") && !hasDefinition) {
+        if (kind != QStringLiteral("qso.delete") && !hasDefinition
+            && !qso.value(QStringLiteral("is_invalid")).toBool()) {
             QSqlQuery duplicate(m_database);
             duplicate.prepare(QStringLiteral(
                 "SELECT qso_uuid FROM qsos WHERE contest_id = ? AND is_deleted = 0 "
+                "AND is_invalid = 0 "
                 "AND callsign = ? COLLATE NOCASE AND band = ? COLLATE NOCASE "
                 "AND mode = ? COLLATE NOCASE AND (? = 0 OR qso_uuid <> ?) LIMIT 1"));
             duplicate.addBindValue(contestId);
@@ -879,8 +893,8 @@ bool CentralRepository::submitBatch(
                 "INSERT INTO qsos(contest_id, callsign, station_callsign, band, "
                 "timestamp_utc, frequency_hz, mode, sent_exchange, received_exchange, "
                 "sent_exchange_json, received_exchange_json, points, qso_uuid, "
-                "station_uuid, qso_version, reservation_uuid) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"));
+                "station_uuid, qso_version, reservation_uuid, is_invalid) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"));
             insert.addBindValue(contestId);
             insert.addBindValue(stringValue(qso, QStringLiteral("callsign")).trimmed().toUpper());
             insert.addBindValue(stringValue(qso, QStringLiteral("station_callsign"))
@@ -902,6 +916,8 @@ bool CentralRepository::submitBatch(
             insert.addBindValue(stationUuid);
             insert.addBindValue(reservationUuid.isEmpty()
                 ? QStringLiteral("") : reservationUuid);
+            insert.addBindValue(
+                qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
             if (!insert.exec()) {
                 return rollback(sqlError(insert));
             }
@@ -936,7 +952,7 @@ bool CentralRepository::submitBatch(
                     "UPDATE qsos SET callsign = ?, station_callsign = ?, band = ?, "
                     "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
                     "received_exchange = ?, sent_exchange_json = ?, received_exchange_json = ?, "
-                    "points = ?, qso_version = ? "
+                    "points = ?, qso_version = ?, is_invalid = ? "
                     "WHERE id = ? AND qso_version = ? AND is_deleted = 0"));
                 update.addBindValue(stringValue(qso, QStringLiteral("callsign"))
                                         .trimmed().toUpper());
@@ -958,6 +974,8 @@ bool CentralRepository::submitBatch(
                                                            .toJson(QJsonDocument::Compact)));
                 update.addBindValue(static_cast<int>(pointsNumber));
                 update.addBindValue(newVersion);
+                update.addBindValue(
+                    qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
                 update.addBindValue(qsoId);
                 update.addBindValue(currentVersion);
             }
@@ -2020,6 +2038,10 @@ QJsonArray CentralRepository::eventsSince(
             setError(error, QStringLiteral("Stored event payload is invalid."));
             return {};
         }
+        const QJsonObject snapshot = payload.object();
+        const QJsonObject normalizedSnapshot = qsoSnapshot(
+            snapshot, snapshot.value(QStringLiteral("qso_version")).toInt(),
+            snapshot.value(QStringLiteral("is_deleted")).toBool());
         result.append(QJsonObject{
             {QStringLiteral("event_uuid"), query.value(0).toString()},
             {QStringLiteral("log_uuid"), query.value(1).toString()},
@@ -2027,7 +2049,7 @@ QJsonArray CentralRepository::eventsSince(
             {QStringLiteral("operation_uuid"), query.value(3).toString()},
             {QStringLiteral("kind"), query.value(4).toString()},
             {QStringLiteral("entity_uuid"), query.value(5).toString()},
-            {QStringLiteral("payload"), payload.object()},
+            {QStringLiteral("payload"), normalizedSnapshot},
             {QStringLiteral("created_at_utc"), query.value(7).toString()}
         });
     }
@@ -2162,7 +2184,10 @@ QJsonObject CentralRepository::snapshotPage(
             setError(error, QStringLiteral("Stored snapshot QSO is invalid."));
             return {};
         }
-        qsos.append(document.object());
+        const QJsonObject object = document.object();
+        qsos.append(qsoSnapshot(
+            object, object.value(QStringLiteral("qso_version")).toInt(),
+            object.value(QStringLiteral("is_deleted")).toBool()));
     }
     const QByteArray checksum = QCryptographicHash::hash(
         QJsonDocument(canonicalJsonValue(qsos).toArray())
@@ -2181,6 +2206,56 @@ QJsonObject CentralRepository::snapshotPage(
         {QStringLiteral("qsos"), page},
         {QStringLiteral("has_more"), end < qsos.size()}
     };
+}
+
+QJsonObject CentralRepository::syncConsistencyDigest(
+    const QString &logUuid, qint64 revision, QString *error) const
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (!m_database.isOpen() || !isUuid(logUuid) || revision < 0) {
+        setError(error, QStringLiteral("Consistency audit request is invalid."));
+        return {};
+    }
+    QString revisionError;
+    const qint64 current = currentRevision(logUuid, &revisionError);
+    if (!revisionError.isEmpty() || revision > current) {
+        setError(error, revisionError.isEmpty()
+            ? QStringLiteral("Consistency audit revision is newer than the central log.")
+            : revisionError);
+        return {};
+    }
+    QJsonArray snapshots;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT h.snapshot_json FROM qso_history h "
+        "WHERE h.log_uuid = ? AND h.revision <= ? AND h.qso_version = ("
+        "SELECT MAX(h2.qso_version) FROM qso_history h2 "
+        "WHERE h2.log_uuid = h.log_uuid AND h2.qso_uuid = h.qso_uuid "
+        "AND h2.revision <= ?) ORDER BY h.qso_uuid"));
+    query.addBindValue(logUuid);
+    query.addBindValue(revision);
+    query.addBindValue(revision);
+    if (!query.exec()) {
+        setError(error, sqlError(query));
+        return {};
+    }
+    while (query.next()) {
+        const QJsonDocument snapshot =
+            QJsonDocument::fromJson(query.value(0).toByteArray());
+        if (!snapshot.isObject()) {
+            setError(error, QStringLiteral("Stored consistency snapshot is invalid."));
+            return {};
+        }
+        const QJsonObject object = snapshot.object();
+        snapshots.append(qsoSnapshot(
+            object, object.value(QStringLiteral("qso_version")).toInt(),
+            object.value(QStringLiteral("is_deleted")).toBool()));
+    }
+    QJsonObject result = logger::syncConsistencyDigest(snapshots);
+    result.insert(QStringLiteral("revision"), revision);
+    return result;
 }
 
 qint64 CentralRepository::earliestRevision(
@@ -2244,7 +2319,10 @@ QJsonObject CentralRepository::currentQso(
         setError(error, QStringLiteral("Stored QSO snapshot is invalid."));
         return {};
     }
-    return snapshot.object();
+    const QJsonObject object = snapshot.object();
+    return qsoSnapshot(
+        object, object.value(QStringLiteral("qso_version")).toInt(),
+        object.value(QStringLiteral("is_deleted")).toBool());
 }
 
 qint64 CentralRepository::currentRevision(

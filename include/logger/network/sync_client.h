@@ -4,11 +4,13 @@
 
 #include <QHash>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QSslCertificate>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 
@@ -25,6 +27,9 @@ struct SyncClientConfiguration {
     QString computerName;
     QString stationCallsign;
     QString operatorName;
+    QString operatingBand;
+    QString operatingMode;
+    bool trustedNetworkMode = false;
     QString token;
     QString logUuid;
     QString contestDefinitionSha256;
@@ -74,7 +79,9 @@ public slots:
     QString getChanges(qint64 afterRevision, int limit = 500);
     QString acknowledgeRevision(qint64 revision);
     QString getStatus();
+    QString checkConsistency();
     void setStationIdentity(const QString &stationCallsign, const QString &operatorName);
+    void setOperatingState(const QString &band, const QString &mode);
     QString getMetrics();
     QString reserveSerial(const QString &reservationUuid, const QString &band,
                           const QString &mode);
@@ -96,6 +103,10 @@ signals:
     void requestFailed(const QString &requestId, const QString &code,
                        const QString &message, bool retryable);
     void logsDiscovered(const QJsonArray &logs);
+    void synchronizationStarted();
+    void synchronizationFinished(int uploadedOperations, int downloadedEvents,
+                                 qint64 elapsedMs, bool success,
+                                 const QString &detail);
 
 private:
     struct PendingRequest {
@@ -118,6 +129,7 @@ private:
     void heartbeat();
     void expireRequests();
     void closeSocket();
+    void finishManualSynchronization(bool success, const QString &detail);
     void pumpSynchronization();
     QString pumpSerialReservationRequests(const QString &operation = {},
                                          const QString &reservationUuid = {});
@@ -135,7 +147,7 @@ private:
     QHash<QString, PendingRequest> m_pendingRequests;
     QString m_handshakeRequestId;
     QString m_outboxRequestId;
-    QString m_outboxOperationUuid;
+    QStringList m_outboxOperationUuids;
     QString m_changesRequestId;
     QString m_snapshotRequestId;
     QString m_sessionUuid;
@@ -156,6 +168,13 @@ private:
     bool m_syncPending = false;
     bool m_readOnly = false;
     bool m_stationIdentitySupported = false;
+    bool m_operatingStateSupported = false;
+    bool m_trustedNetworkSupported = false;
+    int m_outboxBatchSize = 16;
+    int m_manualUploadedOperations = 0;
+    int m_manualDownloadedEvents = 0;
+    QElapsedTimer m_manualSyncTimer;
+    bool m_manualSyncActive = false;
     State m_state = State::Disconnected;
 };
 

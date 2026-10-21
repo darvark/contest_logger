@@ -1,8 +1,11 @@
 #include "logger/data/log_exporter.h"
+#include "logger/contest/contest_definition_loader.h"
 
+#include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -72,9 +75,12 @@ private slots:
     void writesValidatedCabrilloAtomically();
     void writesCabrilloCategoriesFromLogProperties();
     void writesCompleteCabrilloV3Header();
+    void writesArrlSweepstakesCabrilloWithoutRst();
+    void exportsBundledProfileCabrilloExchanges();
     void writesAdifWithByteLengths();
     void exportsLegacyExchangeStrings();
     void rejectsInvalidLogWithoutReplacingFile();
+    void omitsInvalidQsosFromExport();
 };
 
 void LogExporterTest::writesValidatedCabrilloAtomically()
@@ -207,6 +213,300 @@ void LogExporterTest::writesCompleteCabrilloV3Header()
     QCOMPARE(contents.split(QLatin1Char('\n'), Qt::SkipEmptyParts), expectedHeader);
 }
 
+void LogExporterTest::writesArrlSweepstakesCabrilloWithoutRst()
+{
+    logger::ContestDefinition contestDefinition;
+    QString error;
+    const QString yamlPath = QStringLiteral(
+        CONTEST_LOGGER_TEST_SOURCE_DIR "/contests/examples/arrl-ss-cw.yaml");
+    QVERIFY2(logger::ContestDefinitionLoader().loadFile(
+                 yamlPath, contestDefinition, &error),
+             qPrintable(error));
+
+    logger::Contest sweepstakes = contest();
+    sweepstakes.code = contestDefinition.id;
+    logger::Station station;
+    station.callsign = QStringLiteral("K1TEST");
+    logger::Qso contact = qso();
+    contact.sentExchangeFields = {
+        {QStringLiteral("serial"), QStringLiteral("001")},
+        {QStringLiteral("precedence"), QStringLiteral("A")},
+        {QStringLiteral("check"), QStringLiteral("79")},
+        {QStringLiteral("section"), QStringLiteral("CT")}
+    };
+    contact.receivedExchangeFields = {
+        {QStringLiteral("serial"), QStringLiteral("027")},
+        {QStringLiteral("precedence"), QStringLiteral("B")},
+        {QStringLiteral("check"), QStringLiteral("72")},
+        {QStringLiteral("section"), QStringLiteral("EMA")}
+    };
+    contact.sentExchange.clear();
+    contact.receivedExchange.clear();
+    contact.points = 2;
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("sweepstakes.log"));
+    QVERIFY2(logger::LogExporter::writeFile(
+                 path, logger::LogExportFormat::Cabrillo, sweepstakes,
+                 &contestDefinition, {contact}, station, &error),
+             qPrintable(error));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray contents = file.readAll();
+    QVERIFY(contents.contains("CONTEST: ARRL-SS-CW\n"));
+    QVERIFY(contents.contains(
+        "QSO: 14025 CW 2026-10-15 1000 K1TEST 001 A 79 CT W1AW 027 B 72 EMA\n"));
+    QVERIFY(!contents.contains("K1TEST 599 001"));
+}
+
+void LogExporterTest::exportsBundledProfileCabrilloExchanges()
+{
+    struct Scenario {
+        QString file;
+        QString band;
+        QString mode;
+        QMap<QString, QString> sent;
+        QMap<QString, QString> received;
+        QString sentCabrillo;
+        QString receivedCabrillo;
+    };
+    const QVector<Scenario> scenarios{
+        {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("10m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("exchange"), QStringLiteral("CT")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("exchange"), QStringLiteral("CA")}},
+         QStringLiteral("CT"), QStringLiteral("CA")},
+        {QStringLiteral("arrl-dx-cw.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("exchange"), QStringLiteral("100")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("exchange"), QStringLiteral("CT")}},
+         QStringLiteral("100"), QStringLiteral("CT")},
+        {QStringLiteral("arrl-dx-ssb.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("exchange"), QStringLiteral("100")}},
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("exchange"), QStringLiteral("CT")}},
+         QStringLiteral("100"), QStringLiteral("CT")},
+        {QStringLiteral("arrl-dx-cw-w-ve.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("state_province"), QStringLiteral("CT")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("power"), QStringLiteral("100")}},
+         QStringLiteral("CT"), QStringLiteral("100")},
+        {QStringLiteral("arrl-dx-ssb-w-ve.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("state_province"), QStringLiteral("CT")}},
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("power"), QStringLiteral("100")}},
+         QStringLiteral("CT"), QStringLiteral("100")},
+        {QStringLiteral("arrl-ss-cw.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("serial"), QStringLiteral("001")},
+          {QStringLiteral("precedence"), QStringLiteral("A")},
+          {QStringLiteral("check"), QStringLiteral("72")},
+          {QStringLiteral("section"), QStringLiteral("CT")}},
+         {{QStringLiteral("serial"), QStringLiteral("027")},
+          {QStringLiteral("precedence"), QStringLiteral("B")},
+          {QStringLiteral("check"), QStringLiteral("79")},
+          {QStringLiteral("section"), QStringLiteral("EMA")}},
+         QStringLiteral("001 A 72 CT"), QStringLiteral("027 B 79 EMA")},
+        {QStringLiteral("arrl-ss-ssb.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("serial"), QStringLiteral("001")},
+          {QStringLiteral("precedence"), QStringLiteral("A")},
+          {QStringLiteral("check"), QStringLiteral("72")},
+          {QStringLiteral("section"), QStringLiteral("CT")}},
+         {{QStringLiteral("serial"), QStringLiteral("027")},
+          {QStringLiteral("precedence"), QStringLiteral("B")},
+          {QStringLiteral("check"), QStringLiteral("79")},
+          {QStringLiteral("section"), QStringLiteral("EMA")}},
+         QStringLiteral("001 A 72 CT"), QStringLiteral("027 B 79 EMA")},
+        {QStringLiteral("cqww-cw.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("zone"), QStringLiteral("05")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("zone"), QStringLiteral("04")}},
+         QStringLiteral("05"), QStringLiteral("04")},
+        {QStringLiteral("cqww-ssb.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("zone"), QStringLiteral("05")}},
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("zone"), QStringLiteral("04")}},
+         QStringLiteral("05"), QStringLiteral("04")},
+        {QStringLiteral("cqwpx-cw.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")},
+        {QStringLiteral("cqwpx-ssb.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("report"), QStringLiteral("59")},
+          {QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")},
+        {QStringLiteral("eudx.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("region"), QStringLiteral("EM10")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("region"), QStringLiteral("EM20")}},
+         QStringLiteral("EM10"), QStringLiteral("EM20")},
+        {QStringLiteral("euhfc.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("year"), QStringLiteral("82")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("year"), QStringLiteral("75")}},
+         QStringLiteral("82"), QStringLiteral("75")},
+        {QStringLiteral("iaruhfc.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("itu_zone"), QStringLiteral("08")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("itu_zone"), QStringLiteral("05")}},
+         QStringLiteral("08"), QStringLiteral("05")},
+        {QStringLiteral("spdx.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("province"), QStringLiteral("M")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("M"), QStringLiteral("027")},
+        {QStringLiteral("spdx-dx.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("province"), QStringLiteral("M")}},
+         QStringLiteral("001"), QStringLiteral("M")},
+        {QStringLiteral("wag.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("exchange"), QStringLiteral("F11")}},
+         QStringLiteral("001"), QStringLiteral("F11")},
+        {QStringLiteral("general-logging.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")}},
+         {{QStringLiteral("report"), QStringLiteral("599")}},
+         QString(), QString()},
+        {QStringLiteral("grid-field-day.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("grid"), QStringLiteral("FN20")}},
+         QString(), QStringLiteral("FN20")},
+        {QStringLiteral("serial-sprint.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("report"), QStringLiteral("599")},
+          {QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")}
+    };
+    QCOMPARE(scenarios.size(), 20);
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    logger::Station station;
+    station.callsign = QStringLiteral("K1TEST");
+    const auto expectedFrequency = [](const QString &band) {
+        return band == QStringLiteral("10m") ? QStringLiteral("28025")
+                                              : QStringLiteral("14025");
+    };
+    for (qsizetype index = 0; index < scenarios.size(); ++index) {
+        const Scenario &scenario = scenarios.at(index);
+        logger::ContestDefinition contestDefinition;
+        QString error;
+        const QString definitionPath = QStringLiteral(
+            CONTEST_LOGGER_TEST_SOURCE_DIR "/contests/examples/%1")
+                                           .arg(scenario.file);
+        QVERIFY2(logger::ContestDefinitionLoader().loadFile(
+                     definitionPath, contestDefinition, &error),
+                 qPrintable(error));
+
+        logger::Qso record = qso();
+        record.band = scenario.band;
+        record.mode = scenario.mode;
+        record.frequencyHz = scenario.band == QStringLiteral("10m")
+            ? 28'025'000 : 14'025'000;
+        record.sentExchangeFields = scenario.sent;
+        record.receivedExchangeFields = scenario.received;
+        const auto legacyExchange = [](
+            const QVector<logger::ExchangeFieldDefinition> &fields,
+            const QMap<QString, QString> &values) {
+            QStringList parts;
+            for (const logger::ExchangeFieldDefinition &field : fields) {
+                const QString value = values.value(field.name).trimmed();
+                if (!value.isEmpty()) {
+                    parts.append(value);
+                }
+            }
+            return parts.join(QLatin1Char(' '));
+        };
+        record.sentExchange = legacyExchange(contestDefinition.sentExchange,
+                                             scenario.sent);
+        record.receivedExchange = legacyExchange(
+            contestDefinition.receivedExchange, scenario.received);
+        const QString outputPath = directory.filePath(
+            QStringLiteral("profile-%1.log").arg(index));
+        QVERIFY2(logger::LogExporter::writeFile(
+                     outputPath, logger::LogExportFormat::Cabrillo, contest(),
+                     &contestDefinition, {record}, station, &error),
+                 qPrintable((scenario.file + QStringLiteral(": ") + error)));
+        QFile output(outputPath);
+        QVERIFY(output.open(QIODevice::ReadOnly));
+        const QString mode = scenario.mode == QStringLiteral("SSB")
+            ? QStringLiteral("PH") : scenario.mode;
+        QStringList expectedFields{
+            QStringLiteral("QSO:"), expectedFrequency(scenario.band), mode,
+            QStringLiteral("2026-10-15"), QStringLiteral("1000"),
+            QStringLiteral("K1TEST")
+        };
+        const auto hasRst = [](const QVector<logger::ExchangeFieldDefinition> &fields) {
+            return std::any_of(
+                fields.cbegin(), fields.cend(),
+                [](const logger::ExchangeFieldDefinition &field) {
+                    return field.type == logger::ExchangeFieldType::Rst;
+                });
+        };
+        if (hasRst(contestDefinition.sentExchange)) {
+            expectedFields.append(scenario.sent.value(QStringLiteral("report")));
+        }
+        if (!scenario.sentCabrillo.isEmpty()) {
+            expectedFields.append(scenario.sentCabrillo);
+        }
+        expectedFields.append(QStringLiteral("W1AW"));
+        if (hasRst(contestDefinition.receivedExchange)) {
+            expectedFields.append(scenario.received.value(QStringLiteral("report")));
+        }
+        if (!scenario.receivedCabrillo.isEmpty()) {
+            expectedFields.append(scenario.receivedCabrillo);
+        }
+        const QString expectedLine
+            = expectedFields.join(QLatin1Char(' ')) + QLatin1Char('\n');
+        const QByteArray outputData = output.readAll();
+        QVERIFY2(outputData.contains(expectedLine.toUtf8()),
+                 qPrintable(scenario.file + QStringLiteral(": expected ")
+                            + expectedLine + QStringLiteral(" in:\n")
+                            + QString::fromUtf8(outputData)));
+    }
+}
+
 void LogExporterTest::writesAdifWithByteLengths()
 {
     QTemporaryDir directory;
@@ -287,6 +587,23 @@ void LogExporterTest::rejectsInvalidLogWithoutReplacingFile()
 
     QVERIFY(existing.open(QIODevice::ReadOnly));
     QCOMPARE(existing.readAll(), QByteArray("existing"));
+}
+
+void LogExporterTest::omitsInvalidQsosFromExport()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    logger::Station station;
+    station.callsign = QStringLiteral("K1TEST");
+    const logger::ContestDefinition contestDefinition = definition();
+    logger::Qso invalid = qso();
+    invalid.invalid = true;
+    QString error;
+    QVERIFY(!logger::LogExporter::writeFile(
+        directory.filePath(QStringLiteral("empty.log")),
+        logger::LogExportFormat::Cabrillo, contest(), &contestDefinition,
+        {invalid}, station, &error));
+    QVERIFY(error.contains(QStringLiteral("no QSOs"), Qt::CaseInsensitive));
 }
 
 QTEST_GUILESS_MAIN(LogExporterTest)

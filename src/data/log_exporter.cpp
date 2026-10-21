@@ -8,6 +8,7 @@
 #include <QSet>
 
 #include <algorithm>
+#include <iterator>
 
 namespace logger {
 namespace {
@@ -385,12 +386,31 @@ QByteArray cabrillo(const Contest &contest, const ContestDefinition *definition,
         const QString frequencyKhz = qso.frequencyHz > 0
             ? QString::number(qso.frequencyHz / 1000)
             : bandFrequencyKhz(qso.band);
-        lines.append(QStringLiteral("QSO: %1 %2 %3 %4 %5 %6 %7 %8 %9 %10")
-                         .arg(frequencyKhz, cabrilloMode(qso.mode), date, time,
-                              station.callsign.trimmed().toUpper(),
-                              rstValue(qso, true, sentOrder), sentExchange,
-                              qso.callsign.trimmed().toUpper(),
-                              rstValue(qso, false, receivedOrder), receivedExchange));
+        QStringList fields{QStringLiteral("QSO:"), frequencyKhz,
+                           cabrilloMode(qso.mode), date, time,
+                           station.callsign.trimmed().toUpper()};
+        if (sentOrder != nullptr
+            && std::any_of(sentOrder->cbegin(), sentOrder->cend(),
+                           [](const ExchangeFieldDefinition &field) {
+                               return field.type == ExchangeFieldType::Rst;
+                           })) {
+            fields.append(rstValue(qso, true, sentOrder));
+        }
+        if (!sentExchange.isEmpty()) {
+            fields.append(sentExchange);
+        }
+        fields.append(qso.callsign.trimmed().toUpper());
+        if (receivedOrder != nullptr
+            && std::any_of(receivedOrder->cbegin(), receivedOrder->cend(),
+                           [](const ExchangeFieldDefinition &field) {
+                               return field.type == ExchangeFieldType::Rst;
+                           })) {
+            fields.append(rstValue(qso, false, receivedOrder));
+        }
+        if (!receivedExchange.isEmpty()) {
+            fields.append(receivedExchange);
+        }
+        lines.append(fields.join(QLatin1Char(' ')));
     }
     lines.append(QStringLiteral("END-OF-LOG:"));
     return (lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8();
@@ -486,18 +506,21 @@ bool LogExporter::validate(LogExportFormat format, const Contest &contest,
                            const QVector<Qso> &qsos, QString *error)
 {
     setError(error, {});
+    QVector<Qso> activeQsos;
+    std::copy_if(qsos.cbegin(), qsos.cend(), std::back_inserter(activeQsos),
+                 [](const Qso &qso) { return !qso.invalid; });
     if (contest.id <= 0 || contest.code.trimmed().isEmpty()) {
         setError(error, QStringLiteral("Contest identity is missing."));
         return false;
     }
-    if (qsos.isEmpty()) {
+    if (activeQsos.isEmpty()) {
         setError(error, QStringLiteral("There are no QSOs to export."));
         return false;
     }
     static const QRegularExpression callsignPattern(
         QStringLiteral("^[A-Z0-9/]{3,20}$"));
-    for (qsizetype index = 0; index < qsos.size(); ++index) {
-        const Qso &qso = qsos.at(index);
+    for (qsizetype index = 0; index < activeQsos.size(); ++index) {
+        const Qso &qso = activeQsos.at(index);
         const QString prefix = QStringLiteral("QSO %1").arg(index + 1);
         if (qso.contestId != contest.id) {
             setError(error, QStringLiteral("%1 belongs to a different contest.").arg(prefix));
@@ -530,7 +553,7 @@ bool LogExporter::validate(LogExportFormat format, const Contest &contest,
         if (definition != nullptr) {
             ContestEvaluationContext context;
             for (qsizetype previous = 0; previous < index; ++previous) {
-                context.previousQsos.append(qsos.at(previous));
+                context.previousQsos.append(activeQsos.at(previous));
             }
             const QMap<QString, QString> sentValues =
                 exchangeValues(qso, true, &definition->sentExchange);
@@ -584,7 +607,10 @@ bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
                             const LogExportOptions &options, QString *error)
 {
     setError(error, {});
-    if (!validate(format, contest, definition, qsos, error)) {
+    QVector<Qso> activeQsos;
+    std::copy_if(qsos.cbegin(), qsos.cend(), std::back_inserter(activeQsos),
+                 [](const Qso &qso) { return !qso.invalid; });
+    if (!validate(format, contest, definition, activeQsos, error)) {
         return false;
     }
     if (station.callsign.trimmed().isEmpty()) {
@@ -597,8 +623,8 @@ bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
         return false;
     }
     const QByteArray contents = format == LogExportFormat::Cabrillo
-        ? cabrillo(contest, definition, qsos, station, options)
-        : adif(contest, definition, qsos, station);
+        ? cabrillo(contest, definition, activeQsos, station, options)
+        : adif(contest, definition, activeQsos, station);
     QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly)) {
         setError(error, file.errorString());

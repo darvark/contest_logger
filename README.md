@@ -1,27 +1,27 @@
 # Contest Logger
 
-Cross-platform C++20/Qt 6 starting point for an amateur radio contest logger.
-It provides the domain model, SQLite persistence with schema migrations,
-operator settings, YAML contest definitions, exchange validation, dupe checks,
-serial numbering, QSO points, multiplier tracking, live QSO entry, and
-asynchronous CAT radio monitoring, and opt-in central log synchronization
-over TCP/TLS.
+Wieloplatformowy logger zawodów krótkofalarskich dla systemów Linux i Windows,
+napisany w C++20 i Qt 6. Obsługuje lokalne logi SQLite, definicje zawodów YAML,
+walidację wymiany, sprawdzanie duplikatów, punktację i mnożniki, wprowadzanie
+QSO z klawiatury, łączność CAT z radiem oraz opcjonalną synchronizację
+centralnego logu przez niezabezpieczony TCP w zaufanej sieci LAN/VPN.
 
-**User guide (Polish, with screenshots, configuration reference, keyboard
-shortcuts and known limitations): [docs/USER_GUIDE.md](./docs/USER_GUIDE.md).**
-Implemented features are catalogued in [FUNKCJONALNOSCI.md](./FUNKCJONALNOSCI.md).
+**[Instrukcja użytkownika](docs/USER_GUIDE.md)** zawiera zrzuty ekranu, opis
+konfiguracji, skróty klawiszowe i znane ograniczenia. **[Architektura
+aplikacji](docs/ARCHITECTURE.md)** opisuje moduły i ich zależności. Przegląd
+zaimplementowanych funkcji znajduje się w [FUNKCJONALNOSCI.md](FUNKCJONALNOSCI.md).
 
-## Requirements
+## Wymagania
 
-- CMake 3.21 or newer
-- C++20 compiler
-- Qt 6.2 or newer: Core, Widgets, Sql, Network, and Test
-- Qt's SQLite driver plugin (`QSQLITE`)
-- yaml-cpp 0.7 or newer
-- Hamlib development library for hardware CAT support (optional at build time;
-  without it, the application reports that the backend is unsupported)
+- CMake 3.21 lub nowszy i kompilator C++20.
+- Qt 6.2 lub nowszy: Core, Widgets, Sql, Network, SerialPort oraz Test
+  (moduł Test jest potrzebny do budowania testów).
+- Wtyczka sterownika SQLite dla Qt (`QSQLITE`).
+- yaml-cpp 0.7 lub nowszy.
+- Biblioteka deweloperska Hamlib do sprzętowej obsługi CAT i CW (opcjonalna
+  podczas budowania; bez niej backend Hamlib jest niedostępny).
 
-## Build and test
+## Budowanie i testy
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -29,42 +29,31 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-On first launch (including after package installation), the application creates
-the platform-specific application data directory reported by Qt. It contains
-`contest-logger.sqlite`, configuration under
-`config/ContestLogger/ContestLogger.ini` (accessed using `QSettings`), and a
-`contests/` directory with writable copies of the bundled contest YAML files.
-On Linux the default root is `~/.local/share/ContestLogger/ContestLogger/`;
-on Windows it is `%APPDATA%\ContestLogger\ContestLogger\`.
-Existing native settings are copied into the INI file once, without deleting
-the original settings. Missing bundled YAML files are restored on startup;
-existing files are never overwritten.
-If Hamlib is installed in a non-standard location, set `HAMLIB_INCLUDE_DIR` and
-`HAMLIB_LIBRARY` when configuring CMake.
+Przy pierwszym uruchomieniu aplikacja tworzy katalog danych wyznaczony przez
+Qt. Znajdują się w nim baza `contest-logger.sqlite`, konfiguracja
+`config/ContestLogger/ContestLogger.ini` (obsługiwana przez `QSettings`) oraz
+katalog `contests/` z kopiami wbudowanych definicji YAML. Domyślny katalog w
+systemie Linux to `~/.local/share/ContestLogger/ContestLogger/`, a w Windows:
+`%APPDATA%\ContestLogger\ContestLogger\`. Istniejące ustawienia są jednorazowo
+kopiowane do pliku INI, bez usuwania oryginału. Brakujące wbudowane definicje
+są odtwarzane przy uruchomieniu; istniejące pliki nie są nadpisywane.
 
-### Linux installation packages
+Jeśli Hamlib znajduje się w niestandardowym katalogu, podczas konfiguracji
+CMake podaj `HAMLIB_INCLUDE_DIR` i `HAMLIB_LIBRARY`. Szczegółowe instrukcje
+budowania i pakowania dla Linuxa i Windows znajdują się w
+[docs/BUILD_AND_RELEASE.md](docs/BUILD_AND_RELEASE.md).
 
-Run `bash tools/package-linux.sh --install-deps` on Debian/Ubuntu or Fedora
-to install build dependencies, build with Hamlib, run tests and create a native
-DEB or RPM package under `packages/`. Install it using `sudo apt install ./file.deb`
-or `sudo dnf install ./file.rpm` to resolve runtime dependencies automatically.
-On Slackware, install the build dependencies manually and run
-`bash tools/package-linux.sh` to create a `.txz` for `upgradepkg --install-new`;
-Slackware's pkgtools do not resolve dependencies. See
-[Linux packaging](./docs/BUILD_AND_RELEASE.md#linux-installation-packages)
-for options, dependencies and installation commands.
+## Definicje zawodów YAML
 
-## Contest-definition YAML
-
-Definitions use schema version 1. Unknown keys, malformed YAML, invalid
-regular expressions, duplicate fields, and unsupported exchange/multiplier
-types are rejected with a source-qualified diagnostic.
+Definicje używają schematu w wersji 1. Nieznane klucze, błędny YAML,
+niepoprawne wyrażenia regularne, powtórzone pola oraz nieobsługiwane typy
+wymiany lub mnożników są odrzucane z komunikatem wskazującym źródło błędu.
 
 ```yaml
 schema_version: 1
 id: serial-sprint
 name: Serial Sprint
-description: CW contest with a generated serial exchange.
+description: Zawody CW z automatycznie nadawanym numerem seryjnym.
 
 bands: [80m, 40m, 20m]
 modes: [CW]
@@ -72,11 +61,11 @@ modes: [CW]
 exchange:
   sent:
     - name: report
-      label: Signal report
+      label: Raport sygnału
       type: rst
       default: "599"
     - name: serial
-      label: Serial number
+      label: Numer seryjny
       type: serial
       generated: true
       width: 3
@@ -98,273 +87,58 @@ scoring:
 dupe_key: [callsign, band, mode]
 ```
 
-Exchange field types: `rst`, `serial`, `integer`, `text`, `grid`, `callsign`,
-and `enum`. Fields support `required`, `generated` (sent serials), `default`,
-`pattern` (regular expression), `width`, `min`, and `max`. Enumeration fields
-require a non-empty `values` list. Definition files are limited to 1 MiB,
-exchange lists to 32 fields, and field widths to 32 characters.
-Custom patterns are matched against the whole exchange value.
+Typy pól wymiany to `rst`, `serial`, `integer`, `text`, `grid`, `callsign`
+i `enum`. Pola mogą określać m.in. `required`, `generated`, `default`,
+`pattern`, `width`, `min` i `max`. Mnożniki mogą być oparte na polu wymiany,
+prefiksie WPX lub danych CTY: `exchange`, `prefix`, `dxcc`, `cq_zone`,
+`itu_zone` i `continent`. Mnożniki zależne od CTY wymagają wczytanego pliku
+`wl_cty.dat`. Numeracja seryjna rozpoczyna się od większej z wartości:
+`serial_start` lub najwyższego numeru zachowanego w logu.
 
-Multiplier types are `exchange` (requires a received `field`), `prefix` (WPX
-rules: portable designators and `/digit` overrides are handled) and the
-CTY-resolved types `dxcc`, `cq_zone`, `itu_zone` and `continent`. CTY-resolved
-multipliers count only after `wl_cty.dat` is loaded; QSOs whose value cannot be
-resolved are listed in the final-score tooltip (marked `*`). Worked multipliers
-are rebuilt from the stored log (`ContestEngine::buildContext`/`score`) when
-logging, editing and refreshing the summary, with optional per-band scoping.
+Dołączone definicje są profilami startowymi, a nie certyfikowanymi
+implementacjami wszystkich regulaminów. Przed użyciem należy sprawdzić
+punktację, warunki i aktualne zasady organizatora. Pełny opis składni znajduje
+się w [docs/CONTEST_DEFINITIONS.md](docs/CONTEST_DEFINITIONS.md).
 
-Generated sent serials continue from the highest serial stored in the log
-(never below `serial_start`), so gaps and edited serials are preserved and
-imported or older entries do not cause collisions.
+## Dane pomocnicze
 
-Additional bundled starter profiles cover CQ WW CW/SSB, CQ WPX CW/SSB, IARU HF,
-SP DX, WAG, ARRL DX CW/SSB/10m, EU DX, and EU HF Championship. They provide
-exchange forms and basic scoring only; conditional exchanges, country/prefix
-resolution, and edition-specific sponsor rules must be verified before use.
-Operator-specific sent exchange values are entered in the QSO form and saved
-per contest and entry context. Standard RST defaults follow the selected mode
-(voice 59, CW/digital 599).
+Menu **File > Support data** służy do wczytywania historii znaków w CSV/TXT,
+`master.cpy` i standardowego `wl_cty.dat`. Pliki są walidowane, ich ścieżki
+zapisywane w konfiguracji, a dane ponownie wczytywane przy starcie. Historia
+znaków uzupełnia podpowiedzi wymiany, a dane CTY dostarczają kraju, DXCC,
+kontynentu i stref CQ/ITU.
 
-## Callsign support data
+## Funkcje i ograniczenia
 
-Use **File > Support data** to load call-history CSV/TXT, `master.cpy`,
-and standard `wl_cty.dat` (or download Master.SCP / wl_cty.dat). Imports are validated, file paths are saved in
-application settings, and the files are reloaded at startup. Call-history and
-master callsigns feed the **Check partial** window (there is no completion
-popup in the entry line) and call history suggests matching exchange fields.
-CTY prefix matches show country and CQ/ITU zones and are used to resolve
-DXCC/zone/continent multipliers.
+- Logowanie i edycja QSO, walidacja wymiany, duplikaty, numery seryjne,
+  punktacja i mnożniki.
+- CAT przez Hamlib lub backend Mock, tryby SO2V/SO2R w zakresie opisanym
+  w instrukcji, keyer CW Hamlib/cwdaemon/Mock oraz klient DX Cluster.
+- Eksport Cabrillo 3.0 i ADIF, kopie zapasowe SQLite oraz import logów.
+- Opcjonalna synchronizacja centralna przez trusted TCP bez TLS i logowania;
+  każda stacja ma własną bazę SQLite. Nie należy współdzielić pliku bazy przez
+  sieć.
 
-Call history accepts a header row beginning with `CALL`/`CALLSIGN` and columns
-such as `NAME`, `QTH`, `STATE`, `GRID`, `SECTION`, `SERIAL`, `REPORT`, and
-`EXCHANGE`. Headerless whitespace rows use `CALL NAME QTH EXCHANGE`. The
-master list accepts one callsign per line, optionally followed by other data.
-The CTY reader accepts standard multiline CTY.DAT records.
+Trusted TCP nie szyfruje ruchu i nie uwierzytelnia klientów. Każda stacja,
+która może połączyć się z serwerem, otrzymuje dostęp do odczytu i zapisu;
+zaufanie do LAN/VPN oraz ograniczenia firewall stanowią jedyną granicę dostępu.
+Nie wystawiaj portu serwera do Internetu. Synchronizacja sieciowa nie jest
+zatwierdzona do pracy w zawodach. Przed wdrożeniem potrzebne są pełne testy
+awarii, próba odtworzenia kopii w środowisku docelowym i pilotaż wielostacyjny.
+Szczegóły opisują
+[NETWORKING.md](NETWORKING.md) i
+[docs/NETWORKING_OPERATIONS.md](docs/NETWORKING_OPERATIONS.md).
 
-In QSO entry, press **Space** to advance from callsign through received
-exchange fields and back to callsign. In the bandmap, use **Up/Down** to select
-a spot and **Enter** (or **Tune selected spot**) to populate the active entry
-and tune its active radio; double-click remains available.
+## Dokumentacja
 
-The project includes 15 definitions in `contests/examples/`, including general
-logging, serial/grid examples, and the named contest starter profiles. They
-are bundled into the application and copied to the application data directory's
-`contests/` folder automatically when missing. The application scans this folder
-for `*.yaml` and `*.yml` definitions at startup and when opening **New log**.
-Drop your own definitions there or edit the existing files; disk definitions
-take precedence for new logs, while existing logs retain their saved rules.
-Malformed files and duplicate definition IDs are reported with diagnostics.
-Use **Contest > Import YAML definition...** to add another definition;
-both this action and **New log > Import YAML...** persist the imported YAML
-in the same folder.
-Selecting a contest previews its bands, modes, exchanges, points, serial start,
-multipliers, and duplicate key.
-
-**File > New log...** (Ctrl+N) opens a DXLog-style window: pick the contest
-from the searchable list of installed definitions (or **Import YAML...**),
-enter the station callsign, operators, club, location, soapbox, start date and log name
-(suggested as `CALL Contest YEAR`), choose the Cabrillo categories
-(operator, assisted, band, mode, power, station, transmitter, time, overlay)
-and fill the sent exchange. The log keeps its own callsign, which overrides
-the global station callsign while the log is active. **File > Log
-properties...** edits the same data for the active log. On export the full Cabrillo 3.0 header is filled in: the official
-contest ID (`cabrillo: {contest: ...}` in the definition), log categories
-(missing ones are derived from the QSOs and station power), claimed score,
-CREATED-BY, and name/e-mail/address/grid from **Operator and station**
-settings.
-
-## Current UI and tests
-
-The main window follows the DXLog look and arrangement: a LightSeaGreen log
-window in the center with a yellow status line (UTC time, station callsign,
-contest, QSO/points/multipliers/score), a monospace log (Nr, UTC, Band, Mode,
-kHz, Call, Snt, Rcv, Mult, Pts; new multipliers in red), the QSO-entry panel
-below it, an operator message line, and an F1–F8 function-key bar. Red-titled
-tool windows surround the log: **Check callsign** (band × mode worked grid),
-**Check partial** (white = new, green = worked on another band, red = dupe),
-**Contest info**, **Bandmap** (sorted by frequency,
-nearest spot highlighted, worked spots grey), **Rate**, **Summary** (per-band
-totals and final score) and a black **DX Cluster announcements** window.
-Windows can be moved, floated, hidden from **Window**, and restored with
-**Window > Restore default layout**; geometry and arrangement are saved between
-runs. The top menus are **File**, **Contest**, **Operating**, **Radio**,
-**Options**, and **Window**. This is a similar operating layout, not a pixel
-copy of DXLog.
-
-**File > Import ADIF / Cabrillo...** imports contacts into the current log or a
-new log chosen during import. The destination must have a contest definition.
-A preview shows the number of contacts to add and identical records to skip
-(same UTC timestamp, callsign, band and mode). Other contest duplicates are kept
-with zero points. Imported exchanges are validated against the destination
-contest, sent serials are preserved, and points are recalculated. Invalid data
-or a database error aborts the whole import, including creation of a new log.
-ADIF field lengths, standard reports/serials and exchange strings are supported;
-Cabrillo QSO exchange columns follow the selected contest definition.
-
-The entry panel provides callsign/exchange fields and Enter-to-log. The active
-panel has a red frame and its header shows VFO/radio, frequency, band and mode.
-The badge next to the callsign shows **DUPE**, **NEW MULT** or **NEW**, and the
-worked bands for that call. Dupes are rejected by default; **Operating > Allow
-logging duplicate QSOs** permits saving them with zero points and no new
-multiplier. Dupes and validation errors appear in the message line, and focus
-returns to the offending field. Double-click a log row to edit the contact: the dialog edits the UTC
-time, callsign, band/mode (restricted to the contest definition), frequency, and
-both sent and received exchange. Changes are validated when saving, duplicates
-are checked excluding the edited QSO, errors are listed in the dialog, and
-points/exchange text are recalculated. QSO exchange fields are retained as
-structured maps in SQLite; older text-only exchanges are migrated.
-
-Keyboard: **F1–F8** send the CW messages of the focused entry panel (CW mode
-only; configure them under **Options > CW function key messages...** or edit
-one key under **Operating > Edit function key message**), **Esc** or
-**Ctrl+Esc** aborts CW, **Ctrl+K** opens live CW input, **PageUp/PageDown**
-changes speed by 1 WPM (5–80), **Ctrl+W** wipes the entry, and **Ctrl+Tab** switches
-between entry panels A/B.
-
-Radio CAT settings support a Hamlib model ID, serial device and baud rate, or a
-TCP/rigctld endpoint. The dialog validates the model, transport and baud rate,
-and offers **Test** (a one-off probe reporting frequency, mode, VFO count and
-dual-receive capability), **Save & connect**, **Disconnect** and **Save only**.
-**Connect automatically at startup** restores the CAT connection on the next
-run. Radio operations and one-second polling run on a dedicated
-worker thread per radio. The radio frequency selects the entry band. The radio
-changes the entry mode only when its own mode changed since the previous poll,
-so a mode chosen manually in the form is not overwritten every second. When no
-CAT update arrives for more than 5 seconds the entry header shows **CAT STALE**. The Mock radio backend provides independent VFO A
-(14.025 MHz) and VFO B (7.025 MHz), and is intended for development and
-automated tests without equipment.
-
-SO2V is available only while a connected radio reports two usable VFOs. Enable
-**SO2V (dual VFO)** to show independent QSO-entry contexts for VFO A and B;
-each context has its own callsign, band, mode, exchange and dupe indicator.
-Log a contact with Enter in its callsign field or its **Log** button.
-**RX focus A/B** selects the active receiver, updates the focused frequency and
-mode display, and is reflected in the radio status. QSO records retain the
-frequency of the VFO whose context was logged. A single-VFO radio cannot enable
-SO2V. The entry header marks the transmitting context with **◀ TX** (the
-focused VFO, or the active radio in SO2R). Radios with two VFOs but without
-simultaneous dual receive may still use SO2V; the second context is labelled
-**SO2V, no dual RX** and a warning is shown when enabling it.
-
-SO2R uses independent **Radio A** and **Radio B** CAT controllers and settings
-(**Radio > Radio A/B CAT settings...**). Enable **SO2R (two radios)** only
-after both radios are connected. The two QSO-entry contexts are then routed to
-their corresponding radio, and **Focus Radio A/B** selects the active radio
-for bandmap tuning. A failure or disconnect on one radio leaves the other
-controller running; the disconnected radio's spots can still be copied into
-its entry context but will not trigger a tune. Select the **CW radio** explicitly
-and configure the keyer for that radio before transmission; changing the
-selection invalidates the current CW route until the keyer is reconfigured.
-SO2V and SO2R are mutually exclusive. CAT control is not audio switching:
-automatic audio routing and hardware transmit/receive switching are not
-implemented and require a specific supported external controller.
-
-**Radio > DX cluster...** connects to a TCP/Telnet DX cluster using the
-station callsign. The client strips Telnet negotiation, parses standard `DX de`
-spot lines (rejecting invalid `HHMMZ` times and dating spots correctly across
-midnight), answers the login prompt, records received spots in SQLite (older
-spots are pruned automatically), and reconnects with a backoff that grows up to
-30 seconds. The bandmap filters by band and hides calls already
-worked on that band by default. Double-clicking or pressing Enter on a selected
-spot fills the callsign and tunes the active CAT radio (A or B in SO2R) on its
-current VFO; Up/Down navigates spots. Spots older than one hour are omitted
-from the live bandmap.
-
-**Ctrl+K** opens a small live CW input window instead of a docked keyer panel.
-Typed or pasted text is queued immediately, including spaces, without Enter
-or macro expansion. Transmission follows the active radio and its RX-focus
-VFO; in SO2R it follows the active entry's radio. Stop ongoing CW before switching
-radios. Already queued text cannot be edited; Enter clears the displayed input
-without stopping transmission. **Esc** stops CW and clears the queue; when idle
-it hides the input window. **PageUp/PageDown** changes speed by 1 WPM (5–80),
-also inside the input window. The speed appears beside the clock in CW mode.
-Configure a provider under **Radio > CW keyer...** for the active radio:
-Hamlib (validates `send_morse` support and reports unsupported speed control),
-cwdaemon over its UDP protocol, or the mock provider for tests. Hamlib opens its
-own configured rig connection; use rigctld if a CAT controller already owns the
-radio's serial port. CW message templates accept `{CALL}`, `{MYCALL}`, `{SENT}`
-and sent exchange field tokens such as `{SERIAL}`, plus `{OPERATOR}`, `{WPM}`
-and `{NR}`. With cwdaemon (and the mock) the next queued message is sent only
-after the keyer confirms the end of
-transmission; if no confirmation arrives within the expected time × 3 + 3 s,
-the queue is stopped and a warning is shown rather than transmitting blindly.
-Hamlib uses cancellable PTT polling for backends that use its generic
-`wait_morse` implementation; opaque custom callbacks use estimated timing.
-The CW status line shows which pacing is active.
-ESM messages are configurable per contest. Abort is sent immediately and clears
-the remaining queue.
-
-SQLite schema version 17 preserves existing databases through migrations,
-including structured exchanges, UUIDs, synchronization outbox/cursors,
-QSO history, serial reservations, conflict/import audit and diagnostics.
-Tests cover definition parsing, invalid exchanges, duplicate detection, serial
-generation, points, multipliers, database migration and QSO/spot persistence,
-mock-radio tuning, spot parsing, malformed input, and cluster reconnect.
-Radio tests cover mock CAT connection, independent VFO tuning, RX-focus
-switching, independent-radio failure, and polling after a pause. CW tests cover
-mock queue cancellation and WPM, cwdaemon UDP commands, and Hamlib detection of
-a model without CW text support. Export tests cover Cabrillo/ADIF contents,
-validation and preservation of an existing file after invalid export. Radio
-integration tests use Hamlib's Dummy model and a local `rigctld` (skipped when
-unavailable); cluster tests use a local Telnet simulator. `ui_tests` drives the
-main window offscreen: Enter logging, validation errors, dupes, the edit dialog,
-table refresh and serial numbering.
-
-## Central network synchronization
-
-Local operation remains the default. Use **Options > Central network
-connection...** to connect a Client, or **Options > Host central server on
-this station...** to start a GUI Host. The separate `contest_logger_server`
-executable provides a headless server. Each installation keeps its own
-SQLite database; never share an active database over a network filesystem.
-
-- Verified TLS, per-station tokens and read/write/admin permissions.
-- Durable outbox, idempotent retries, incremental changes, snapshots and
-  event notifications with polling fallback.
-- Read-only clients, conflict comparison and manual field-by-field merging
-  with audit history.
-- Central serial reservations; new serials require the server, while an
-  already confirmed reservation remains usable offline.
-- Optional Client/Host startup, custom CA certificates and Client token
-  storage in Windows Credential Manager or Linux Secret Service
-  (`secret-tool` and a running Secret Service are required on Linux).
-
-**Options > Network status and queue...** displays connection state,
-revisions, pending/error/conflict operations and connected stations for the
-selected log. The station table shows **computer name, station callsign,
-operator and connection state**, not UUIDs. It refreshes every five seconds
-or manually; operator changes are sent without reconnecting. UUIDs remain
-the protocol identifiers. Older peers without description support appear
-as **Not provided**. These descriptions are client-supplied labels, not
-authentication credentials.
-
-The server supports `--check`, `--listen`, and central database recovery via
-`--restore-backup <backup.sqlite> --data-dir <directory>`. GUI database
-recovery and central server recovery target different databases.
-See the [user guide](./docs/USER_GUIDE.md#status-sieci-i-podłączone-stacje),
-[network protocol and implementation status](./NETWORKING.md), and
-[server operations/recovery runbook](./docs/NETWORKING_OPERATIONS.md).
-
-Network synchronization has automated multi-client and UI tests, but is
-not yet qualified for contest use: exhaustive failure testing, a deployment
-restore drill, and a two-/three-station pilot remain required.
-
-## Exports and local database recovery
-
-**File > Export Cabrillo... / Export ADIF...** validates the selected log before
-atomically writing it. **File > Back up database...** writes and verifies a
-consistent online SQLite snapshot. Startup creates a daily verified backup and
-keeps 30 days of automatic snapshots. SQLite WAL recovery, full synchronous
-commits and startup integrity checking support crash recovery; restore a
-verified snapshot while the application is closed with
-`contest_logger --restore-backup <backup.sqlite>`. The current database is kept
-beside the restored copy. See [docs/BUILD_AND_RELEASE.md](./docs/BUILD_AND_RELEASE.md)
-for export limitations, platform build/package instructions, Hamlib setup,
-YAML contest schema, and the hardware integration test matrix.
-
-Use `tools/package-windows.ps1` to build and package a Windows release with
-Hamlib; provide a Windows Hamlib package with headers, DLL, and `.def` file.
-The script creates the MSVC import library, installs `yaml-cpp` via vcpkg,
-requires Hamlib at CMake configure time, and verifies that the runtime DLL is
-included. Actual COM-port/radio behavior still requires testing with target
-hardware, as documented separately.
+- [Instrukcja użytkownika](docs/USER_GUIDE.md) — konfiguracja, praca z logiem,
+  radiem, CW, DX Clusterem, eksportem i kopiami zapasowymi.
+- [Architektura aplikacji](docs/ARCHITECTURE.md) — diagramy architektury
+  i zależności modułów.
+- [Budowanie i wydawanie](docs/BUILD_AND_RELEASE.md) — kompilacja, pakiety,
+  Hamlib, eksport, odzyskiwanie danych i testy sprzętowe.
+- [Definicje zawodów](docs/CONTEST_DEFINITIONS.md) — składnia YAML.
+- [Operacje serwera synchronizacji](docs/NETWORKING_OPERATIONS.md) — trusted
+  TCP, ograniczenia sieci/firewall, backup i odzyskiwanie serwera.
+- [Funkcje programu](FUNKCJONALNOSCI.md) — zestawienie zaimplementowanych
+  możliwości.

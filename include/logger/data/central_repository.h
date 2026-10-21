@@ -71,6 +71,8 @@ public:
     QJsonObject snapshotPage(const QString &logUuid, qint64 revision,
                              int offset, int limit,
                              QString *error = nullptr) const;
+    QJsonObject syncConsistencyDigest(const QString &logUuid, qint64 revision,
+                                      QString *error = nullptr) const;
     qint64 earliestRevision(const QString &logUuid,
                             QString *error = nullptr) const;
     QJsonObject currentQso(const QString &logUuid, const QString &qsoUuid,

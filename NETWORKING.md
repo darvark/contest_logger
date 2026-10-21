@@ -1,3 +1,17 @@
+## Aktualne tryby i granica bezpieczeństwa
+
+- **Local** — domyślna praca bez połączenia z centralnym serwerem.
+- **Client/Host w GUI** oraz **`contest_logger_server --listen`** — bieżące
+  ścieżki uruchamiają trusted TCP: transport nie ma TLS, szyfrowania ani
+  uwierzytelniania klientów. Rejestracja przekazuje UUID i opis stacji, ale
+  serwer ich nie weryfikuje; wszystkie połączone stacje otrzymują odczyt i
+  zapis. Ograniczenie dostępu zapewnia wyłącznie zaufana, zamknięta sieć
+  LAN/VPN oraz jej firewall. Nie wystawiaj portu serwera do Internetu.
+- **TLS/tokeny/role** — starsza ścieżka protokołu i jej szczegóły niżej
+  opisują wewnętrzny/legacy wariant, niewybierany przez bieżące GUI ani CLI.
+  Nie traktuj tych fragmentów jako instrukcji konfiguracji lub gwarancji
+  bezpieczeństwa aktualnego trybu sieciowego.
+
 ## Stan implementacji
 
 Stan poniżej opisuje kod dostępny w bieżącym worktree na 2026-10-20, a nie
@@ -14,15 +28,19 @@ walidowane centralnie według obsługiwanych reguł definicji contestu.
 | NET-002 | Polityki zatwierdzone; pule offline i pełna regułowa deduplikacja nie są wdrożone. Ręczne scalanie konfliktów jest dostępne w aplikacji. |
 | NET-003–004 | UUID, wersje QSO, lokalny outbox, konflikty i kursory wdrożone; baza ma schemat v17. |
 | NET-005–006 | Headless centralny serwer i transakcyjne repozytorium zdarzeń/revizji wdrożone. |
-| NET-007 | Serwer TLS/TCP, API synchronizacji, rezerwacji seriali, admin-only metryk, tworzenia logu i importu historii seriali wdrożone. Centralny zapis przelicza punkty i stosuje `dupe_key`; reguły zależne od CTY wymagają centralnego `wl_cty.dat`. Powiadomienia `event_available` są wysyłane po commicie do klientów deklarujących capability; polling pozostaje ścieżką awaryjną. |
+| NET-007 | Serwer TCP, API synchronizacji i rezerwacji seriali wdrożone. Bieżący tryb trusted rejestruje stację bez poświadczeń w zaufanej sieci i nadaje wszystkim klientom odczyt/zapis. Funkcje wymagające roli administratora z wariantu TLS/token nie są dostępne jako uprawnienia trusted. Centralny zapis przelicza punkty i stosuje `dupe_key`; reguły zależne od CTY wymagają centralnego `wl_cty.dat`. Powiadomienia `event_available` są wysyłane po commicie do klientów deklarujących capability; polling pozostaje ścieżką awaryjną. |
 | NET-008–009 | Synchronizacja przyrostowa, snapshoty oraz atomowe zapisy/edycje/usunięcia z outboxem wdrożone; podstawowe ręczne połączenie Client oraz decyzje konfliktu: przyjęcie serwera, ponowienie lokalnej edycji lub ręczne scalanie pól z kontrolą wersji i audytem. |
-| NET-010 | Rezerwowanie/anulowanie seriali, kontrola band/mode, walidacja i atomowa konsumpcja z QSO, lokalny cache i trwała kolejka żądań wdrożone. Admin może korygować niewykorzystaną rezerwację z potwierdzeniem, wymaganym powodem i audytem. UI pokazuje rezerwacje i żądania offline; nowych numerów nie przydziela się bez serwera. |
-| NET-011 | Client może zapisać token w systemowym magazynie sekretów (Windows Credential Manager lub Linux Secret Service przez `secret-tool`), skonfigurować dodatkowy certyfikat CA i opcjonalnie łączyć się automatycznie z zapisanym logiem. Host może opcjonalnie uruchamiać się automatycznie z zapisanymi ścieżkami PEM i plikiem poświadczeń. Local pozostaje trybem domyślnym; hostowy plik JSON nadal jest dostarczany i zarządzany przez administratora. |
-| NET-012 | Częściowo wdrożone: status/outbox, lista podłączonych stacji aktywnego logu z nazwą komputera, znakiem i operatorem, ręczna synchronizacja, retry, eksport diagnostyczny (w tym ostatnie pobrane metryki serwera), porównanie i ręczne scalanie konfliktu, decyzje accept-server/keep-local z audytem oraz tryb Read-only. Lista stacji odświeża się co 5 sekund i ręcznie; zmiana operatora nie wymaga reconnectu. UUID pozostają identyfikatorami protokołu; ostatni kontakt klienta i heartbeat serwera są trwałe. |
-| NET-013 | Główne przepływy wdrożone: Client może utworzyć centralny log (admin), dołączyć kopię lokalną albo addytywnie scalić istniejący lokalny log; historia rezerwacji seriali jest przenoszona przed synchronizacją QSO. Host nadal obsługuje walidowany import porcjami z podglądem i audytem wznowienia. Konflikty QSO nie są automatycznie nadpisywane; są przekazywane do istniejącego przepływu decyzji konfliktu. |
+| NET-010 | Rezerwowanie/anulowanie seriali, kontrola band/mode, walidacja i atomowa konsumpcja z QSO, lokalny cache i trwała kolejka żądań wdrożone. Korekta administracyjna niewykorzystanej rezerwacji z potwierdzeniem, powodem i audytem należy do wariantu TLS/token; bieżący trusted TCP nie daje klientom roli admin. UI pokazuje rezerwacje i żądania offline; nowych numerów nie przydziela się bez serwera. |
+| NET-011 | Konfiguracja uproszczona: Client podaje IP/port i wybiera log; Host podaje adres nasłuchu/port. UUID stacji i nazwa komputera są przekazywane automatycznie. Tryb zaufanej sieci działa bez TLS i uwierzytelniania, więc dostęp do LAN/VPN jest granicą dostępu. Local pozostaje trybem domyślnym; autostart jest opt-in. |
+| NET-012 | Częściowo wdrożone: status/outbox, lista podłączonych stacji aktywnego logu z nazwą komputera, znakiem i operatorem, ręczna synchronizacja, retry, eksport diagnostyczny, porównanie i ręczne scalanie konfliktu oraz decyzje accept-server/keep-local z audytem. Tryb Read-only i metryki wymagające roli admin należą do wariantu TLS/token, nie do bieżącego trusted TCP. Lista stacji odświeża się co 5 sekund i ręcznie; zmiana operatora nie wymaga reconnectu. UUID pozostają identyfikatorami protokołu; ostatni kontakt klienta i heartbeat serwera są trwałe. |
+| NET-013 | Główne przepływy wdrożone: Client może dołączyć kopię lokalną albo addytywnie scalić istniejący lokalny log; tworzenie logu i walidowany import historyczny pozostają na Host. Historia rezerwacji seriali jest przenoszona przed synchronizacją QSO. Konflikty QSO nie są automatycznie nadpisywane; są przekazywane do istniejącego przepływu decyzji konfliktu. |
 | NET-014 | Test trzech klientów, równoczesnych edycji, restartu klienta i serwera z trwałym outboxem oraz retry po utraconej odpowiedzi wdrożony; nadal brakuje awarii na każdym kroku i restartu w trakcie aktywnego transferu. |
-| NET-015 | Wdrożono diagnostykę i procedurę operacyjną dla instalacji, firewall/TLS, rotacji tokenów, backupu/restore, aktualizacji i utraty hosta. Serwer CLI obsługuje `--restore-backup`; test centralny weryfikuje rewizję, QSO, rezerwację serialu, replay idempotentny i zachowanie poprzedniej bazy. Pełny test operatorski należy wykonać przed wdrożeniem produkcyjnym. Retencja zdarzeń jest opisana w NET-008. |
+| NET-015 | Wdrożono procedurę operacyjną dla instalacji, ograniczenia firewall, backupu/restore, aktualizacji i utraty hosta. Serwer CLI obsługuje `--restore-backup`; test centralny weryfikuje rewizję, QSO, rezerwację serialu, replay idempotentny i zachowanie poprzedniej bazy. Pełny test operatorski należy wykonać przed wdrożeniem produkcyjnym. Retencja zdarzeń jest opisana w NET-008. |
 | NET-016 | Nieukończone: Local pozostaje domyślny, a Client wymaga jawnej konfiguracji (autostart jest opt-in); pilotaż, pomiary wydajności i kryteria wydania wymagają środowiska wdrożeniowego. |
+
+Opis protokołu i stanu kodu może obejmować interfejsy wewnętrzne lub
+legacy. Dla konfiguracji wdrożeniowej obowiązuje powyższe rozróżnienie trybów
+oraz [runbook serwera](docs/NETWORKING_OPERATIONS.md).
 
 Szczegółowa procedura instalacji i odzyskiwania: [Operacje serwera synchronizacji](docs/NETWORKING_OPERATIONS.md).
 
@@ -35,7 +53,7 @@ Stan obecny loggera
 Aplikacja nadal obsługuje zwykłą pracę lokalną przez SQLite, a repozytorium
 zawiera transakcje, backup i migracje schematu (obecnie v17). Dostępny jest
 headless `contest_logger_server` oraz jawnie uruchamiany Host w UI, oba z
-TLS/TCP i oddzielnym centralnym SQLite. Aplikacja ma także klienta
+nieszyfrowanym TCP dla zaufanej sieci i oddzielnym centralnym SQLite. Aplikacja ma także klienta
 synchronizacji przyrostowej, hostowy import lokalnego logu i dołączanie Clienta
 do dostępnego centralnego logu bez lokalnego odpowiednika. Nie należy współdzielić
 pliku SQLite przez udział sieciowy; tryb Host jest uruchamiany ręcznie albo
@@ -46,7 +64,7 @@ Proponowana architektura
 
 Serwer centralny utrzymuje kanoniczny log i jego historię. Na początek może używać SQLite na lokalnym dysku serwera; klienci nigdy nie otwierają bezpośrednio jego pliku. Jeśli wymagania wydajności lub dostępności wzrosną, warstwę serwerowej bazy będzie można później zmienić.
 Każda stacja zachowuje lokalny SQLite dla szybkiego interfejsu, historii i działania kolejki. QSO oczekujące na wysłanie są widoczne jako „oczekujące”, a nie jako potwierdzone przez serwer.
-Transport synchronizacji: potwierdzany protokół TCP/TLS z ramkowaniem i JSON opisany w NET-001 oraz odpytywaniem o zmiany od ostatniej rewizji; opcjonalne komunikaty serwera mogą przyspieszać powiadamianie o nowych zmianach. UDP można zostawić na niekrytyczne odkrywanie serwera lub statusy, ale nie na trwałe QSO.
+Transport synchronizacji: potwierdzany protokół TCP z ramkowaniem i JSON oraz odpytywaniem o zmiany od ostatniej rewizji; opcjonalne komunikaty serwera mogą przyspieszać powiadamianie o nowych zmianach. Aktualny transport nie ma TLS ani uwierzytelniania i może być używany wyłącznie w zaufanej, zamkniętej sieci LAN/VPN. UDP można zostawić na niekrytyczne odkrywanie serwera lub statusy, ale nie na trwałe QSO.
 Identyfikatory: stałe UUID logu i stacji oraz UUID QSO/operacji. Nie opierać synchronizacji na lokalnym id INTEGER, bo identyfikatory z niezależnych baz będą kolidować.
 Rewizje: serwer przydziela monotoniczny numer rewizji dla każdej zaakceptowanej zmiany. Klient przechowuje swój kursor synchronizacji i pobiera brakujące zmiany od ostatniej rewizji.
 Idempotencja: każda wysłana operacja ma swój UUID. Jeśli serwer zatwierdzi zapis, ale odpowiedź zaginie, ponowienie żądania zwróci poprzedni wynik zamiast dodać QSO ponownie.
@@ -64,8 +82,8 @@ W ustawieniach logu lub w sekcji Sieć:
 Opcja	Proponowane ustawienie
 Tryb	Lokalny / Host serwera / Klient centralnego serwera
 Adres i port serwera	Wymagane dla klientów; ręczne wpisanie jako podstawowy sposób dołączenia
-Zabezpieczenie	TLS oraz token dostępu; serwer kontroluje, które stacje mogą zapisywać
-Log do synchronizacji	Wskazanie istniejącego logu centralnego albo utworzenie nowego
+Zabezpieczenie	Obecny uproszczony tryb: plain TCP, bez logowania, tylko zaufana LAN/VPN
+Log do synchronizacji	Wskazanie istniejącego logu centralnego; utworzenie/import na Host
 Tożsamość stacji	Unikalny identyfikator stacji i etykieta widoczna w historii
 Synchronizacja	Automatyczna; ponawianie po rozłączeniu; widoczny stan i ostatnia zsynchronizowana rewizja
 Zachowanie offline	Blokuj zapisy wymagające serwera / kolejkuj bez numerów / używaj zarezerwowanej puli
@@ -76,7 +94,7 @@ Odkrywanie serwera przez broadcast/mDNS można dodać później; nie powinno by�
 Kolejność implementacji
 Protokół i decyzje zachowania: UUID, rewizje, polityka duplikatów, reguły edit/delete oraz zachowanie podczas utraty serwera.
 Migracja schematu i lokalny outbox: trwałe operacje oczekujące, identyfikatory stacji/QSO i kursor serwera; migracja bez utraty istniejących logów.
-Serwer centralny: uwierzytelnianie, wybór logu, zapis transakcyjny, historia rewizji, rezerwowanie numerów, backup i odzyskiwanie.
+Serwer centralny: rejestracja klienta w sieci zaufanej, wybór logu, zapis transakcyjny, historia rewizji, rezerwowanie numerów, backup i odzyskiwanie. Trusted TCP nie zapewnia uwierzytelnienia ani autoryzacji per klient.
 Klient synchronizacji: kolejka idempotentna, pobieranie od kursora, stosowanie zmian w transakcji, ponawianie po awarii i pełne odtworzenie cache.
 Interfejs operatora: konfiguracja hosta/klienta, status połączenia, licznik zmian oczekujących, ręczna synchronizacja, lista konfliktów i import logu do serwera.
 Testy awarii i obciążenia: kilka równoczesnych stacji, utrata odpowiedzi po commitcie, restart serwera/klienta, duplikaty, konflikt edycji i rezerwacje numerów.
@@ -103,15 +121,19 @@ nigdy bezpośrednio przez klienta ani udział sieciowy.
 
 #### Kontrakt protokołu synchronizacji v1
 
-Poniższe reguły są normatywne dla implementacji v1. Zmiana niekompatybilna
-wymaga zwiększenia wersji protokołu. Klient i serwer nie mogą interpretować
+Poniższy kontrakt v1 dokumentuje pierwotny wariant TLS/token oraz zachowane
+interfejsy protokołu. Nie opisuje bieżącego trybu trusted TCP używanego przez
+GUI/CLI; szczególnie sekcje transportu, uwierzytelniania i ról nie są
+konfiguracją dostępną operatorowi. Zmiana tego historycznego wariantu wymaga
+zwiększenia wersji protokołu. Klient i serwer nie mogą interpretować
 niejednoznacznie pól ani stosować cichych fallbacków.
 
 ##### Transport i ramkowanie
 
-- Klient łączy się przez TCP z TLS 1.2 lub nowszym. Walidacja certyfikatu
-  serwera jest obowiązkowa; błędny certyfikat, nieoczekiwany host lub brak TLS
-  kończą połączenie.
+- W wariancie TLS/token klient łączy się przez TCP z TLS 1.2 lub nowszym.
+  Walidacja certyfikatu serwera jest obowiązkowa; błędny certyfikat,
+  nieoczekiwany host lub brak TLS kończą połączenie. Bieżący wariant
+  wdrożeniowy używa trusted TCP bez szyfrowania (zob. sekcję powyżej).
 - Strumień TCP składa się z ramek: 4-bajtowa długość payloadu unsigned
   big-endian, po niej dokładnie tyle bajtów kompaktowego JSON UTF-8. Długość
   nie obejmuje prefiksu. Zerowa długość, niepoprawny UTF-8/JSON i ramka większa
@@ -120,8 +142,11 @@ niejednoznacznie pól ani stosować cichych fallbacków.
   deklarujący capability `event_notifications` może otrzymać asynchroniczne
   `event_available` z `request_id: null`; zawiera ono tylko UUID logu i
   najwyższą rewizję, więc klient pobiera właściwe zdarzenia przez `get_changes`.
-  Mutacje od jednej stacji są wysyłane kolejno, bez równoległych batchy.
-- Limit batcha mutacji to 100 operacji, a limit strony zmian to 500 eventów.
+  Klient wysyła operacje outboxa w kolejności w porcjach do 16 operacji;
+  serwer akceptuje maksymalnie 100 operacji w jednym atomowym batchu. Po
+  niepowodzeniu batcha klient przełącza się na wysyłanie pojedyncze, aby
+  zidentyfikować wadliwą operację i nie blokować pozostałych.
+- Limit strony zmian to 500 eventów.
   Timeout odpowiedzi wynosi 30 sekund. Heartbeat jest wysyłany co 15 sekund;
   60 sekund bezczynności zamyka połączenie. Retry może użyć nowego
   `request_id`, ale zachowuje pierwotne `operation_uuid`/`reservation_uuid`.
@@ -148,7 +173,7 @@ Każda wiadomość ma kopertę:
   koperty są odrzucane błędem `INVALID_MESSAGE`. Schemat v1 jawnie określa,
   czy ignorowane są nieznane pola payloadu; w żądaniach mutujących są odrzucane.
 
-##### Uwierzytelnienie i handshake
+##### Uwierzytelnienie i handshake — wariant TLS/token
 
 1. Po zestawieniu TLS klient wysyła `hello` z `client_version`,
    `min_protocol_version`, `max_protocol_version` i listą `capabilities`.
@@ -288,6 +313,12 @@ instalacji/stacji, etykieta stacji pozostaje osobnym edytowalnym polem;
 - Cursor klienta przesuwa wyłącznie lokalny commit ciągłego strumienia zmian;
   samo potwierdzenie mutacji nie może przeskoczyć nieodebranych wcześniejszych
   rewizji.
+- Ręczny audyt `get_consistency_digest` przyjmuje `digest_version: 1`,
+  `log_uuid` i `revision`. Serwer zwraca wersjonowaną liczbę QSO oraz SHA-256
+  zgrupowane według dwóch pierwszych znaków UUID. Skrót obejmuje
+  deterministycznie uporządkowane obrazy QSO, w tym wersję i tombstone.
+  Klient może wykonać audyt tylko przy pustym outboxie i dokładnie zgodnym
+  kursorze; audyt nie zmienia danych, a rozbieżność zgłasza operatorowi.
 
 ##### Wiadomości i błędy
 
@@ -304,6 +335,7 @@ instalacji/stacji, etykieta stacji pozostaje osobnym edytowalnym polem;
 | `submit_batch` | `log_uuid`, `atomic`, `operations[]` | `batch_result` |
 | `get_changes` | `log_uuid`, `after_revision`, `limit` | `changes` |
 | `get_snapshot` | `log_uuid`, `offset`, `limit`, opcjonalny `snapshot_revision` | `snapshot_page` |
+| `get_consistency_digest` | `digest_version: 1`, `log_uuid`, `revision` | `consistency_digest` z liczbą QSO i skrótami grup |
 | `ack_revision` | `log_uuid`, `revision` | `acknowledged` |
 | `get_status` | `log_uuid` | `status` z rewizją, kursorem i aktywnymi stacjami |
 | `get_metrics` | `log_uuid` (wymaga uprawnienia admin) | `metrics` z rewizją, eventami/operacjami, klientami i ich statusem, czasem transakcji/historią, QSO i rezerwacjami |
@@ -486,10 +518,11 @@ tworzy log ogólny oraz wykonuje backup przed migracją istniejącej bazy.
 Dostępny jest osobny headless target `contest_logger_server` oraz ręczny tryb
 Host w menu Options wybranej stacji:
 `--check [--data-dir <ścieżka>]` inicjalizuje i weryfikuje bazę, a `--listen`
-uruchamia długotrwały host TCP/TLS. Host UI uruchamia ten sam typ serwera z
-oddzielnym centralnym SQLite i wymaga adresu/portu, certyfikatu i klucza PEM
-oraz pliku poświadczeń stacji. Działa do zamknięcia aplikacji; dla wdrożenia
-produkcyjnego zalecany jest osobny proces/serwis.
+uruchamia długotrwały host TCP w zaufanej sieci. Host UI uruchamia ten sam typ
+serwera z oddzielnym centralnym SQLite i wymaga wyłącznie adresu nasłuchu oraz
+portu. Ruch nie jest szyfrowany, a klient nie uwierzytelnia się; ogranicz
+dostęp do zamkniętej sieci LAN/VPN. Host UI działa do zamknięcia aplikacji;
+dla ciągłej pracy zalecany jest osobny proces/serwis.
 
 **NET-006 — Zapisywać zdarzenia i rewizje atomowo**
 
@@ -729,33 +762,26 @@ obsługiwane w trybie zgodności, bez regułowej walidacji punktacji i dupe.
   (adres, port, token, TLS, UUID stacji).
 - Klient wskazuje centralny log po UUID, a nie po lokalnym `contestId`.
   Host może utworzyć nowy log albo jawnie zaimportować log lokalny.
-- Umieścić konfigurację serwera w konfiguracji hosta, a klienta/stacji w
-  ustawieniach instalacji; sekrety przechowywać w magazynie systemowym, nie
-  w YAML/logach/URL.
+- Bieżąca konfiguracja umieszcza adres nasłuchu i port w ustawieniach Host,
+  a adres IP, port i wybór logu w Client. Nie wprowadza poświadczeń sieciowych.
 - **Pliki orientacyjne:** istniejące ustawienia operatora, `main.cpp`,
   `src/ui/` oraz nowe dialogi sieciowe.
 - **Odbiór:** przejście z Local do Client nie nadpisuje ani nie usuwa lokalnych
   logów; przed połączeniem klient pokazuje, który log zostanie użyty.
 
-**Stan: częściowo wdrożone w bieżącym worktree.** Menu Options udostępnia
-połączenie Client przez zweryfikowane TLS, opcjonalne zapisanie tokenu Client
-w Windows Credential Manager lub Linux Secret Service (`secret-tool`), dodatkowe
-CA oraz opcjonalny automatyczny start Clienta dla istniejącego lokalnego logu.
-Host można uruchomić ręcznie lub włączyć jego autostart na podstawie zapisanych
-ścieżek; Local pozostaje domyślnym trybem. Host wskazuje bind address, port,
-łańcuch certyfikatu PEM,
-niezaszyfrowany klucz RSA PEM i plik poświadczeń; plik musi zawierać UUID
-lokalnej stacji z uprawnieniami `read`, `write` i `admin`. Centralna baza jest
-oddzielna, zapisywana w lokalnym katalogu danych aplikacji i blokowana przed
-równoczesnym drugim procesem. Host można zatrzymać z menu. Ścieżki konfiguracji
-zapisywane są w `QSettings`, ale token Clienta nie jest tam kopiowany. Plik
-poświadczeń Host nadal pozostaje plikiem dostarczanym przez administratora;
-ta ścieżka nie migruje tokenów serwera do magazynu sekretów. Client może
-synchronizować istniejący lokalny log albo pobrać listę dostępnych logów
-centralnych i utworzyć lokalną kopię z wybranym UUID. Linux wymaga narzędzia
-`secret-tool` i skonfigurowanego Secret Service do zapisu tokenu. Uprawnienia `read` bez `write`
-są rozpoznawane po uwierzytelnieniu; serwer nadal autoryzuje każdą operację,
-a klient nie wysyła zaległego outboxu ani żądań rezerwacji dla takiej stacji.
+**Stan: uproszczony tryb zaufanej sieci wdrożony; pilotaż pozostaje otwarty.**
+Menu Options udostępnia połączenie Client z adresem IP i portem, wyborem logu
+i opcjonalnym autostartem. Klient automatycznie rejestruje UUID, nazwę
+komputera, znak i operatora. Host wymaga tylko adresu nasłuchu i portu, a
+GUI oraz `contest_logger_server` używają nieszyfrowanego TCP bez poświadczeń.
+Każdy osiągalny klient otrzymuje odczyt/zapis; administracyjne tworzenie/
+import historycznych logów pozostaje operacją lokalną na Host. Local pozostaje
+domyślnym trybem. Centralna baza jest oddzielna, zapisywana w lokalnym katalogu
+danych aplikacji i blokowana przed równoczesnym drugim procesem. Dane połączeń
+są zapisywane w `QSettings`. Client może synchronizować istniejący lokalny log
+albo pobrać listę dostępnych logów centralnych i utworzyć lokalną kopię z
+wybranym UUID. Wszystkie stacje trusted otrzymują uprawnienia read/write;
+operacje administracyjne pozostają lokalne na Host.
 
 **NET-012 — Dodać status sieci, kolejkę i konflikty**
 
@@ -782,33 +808,33 @@ tokenu ani payloadów QSO. Outbox nie ma akcji czyszczenia.
 
 Panel **Options > Network status and queue...** zawiera również tabelę
 podłączonych stacji dla wybranego logu: nazwę komputera, znak stacji,
-operatora i stan połączenia (z oznaczeniem własnej stacji). Dane są pobierane przez
-`get_status` po otwarciu, po zmianie stanu połączenia, co 5 sekund oraz
-przyciskiem **Refresh**. Wymagane jest tylko uprawnienie `read`, a nie
-`admin`. Przy aktywnym GUI Host panel może odczytać tę samą listę bezpośrednio
-z lokalnego serwera. Lista obejmuje wyłącznie uwierzytelnione sesje z wybranym
-logiem, nie wszystkie historycznie zarejestrowane stacje; po rozłączeniu
+operatora i stan połączenia (z oznaczeniem własnej stacji). Dane są pobierane
+przez `get_status` po otwarciu, po zmianie stanu połączenia, co 5 sekund oraz
+przyciskiem **Refresh**. W bieżącym trybie trusted TCP klient nie
+uwierzytelnia się i nie ma indywidualnych ról. Wszystkie połączone stacje
+mają odczyt i zapis. Przy
+aktywnym GUI Host panel może odczytać tę samą listę bezpośrednio z lokalnego
+serwera. Lista obejmuje wyłącznie aktywne sesje z wybranym logiem, nie
+wszystkie historycznie zarejestrowane stacje; po rozłączeniu
 Clienta bez aktywnego Hosta jest czyszczona i oznaczana jako niedostępna.
 Błędy pobrania lub nieprawidłowa odpowiedź są pokazywane nad tabelą.
-Rozszerzenie capability `station_identity` pozwala wysłać w `authenticate`
-opcjonalny obiekt `station_identity` z polami `computer_name`,
-`station_callsign`, `operator_name`. Wszystkie trzy pola są stringami
-do 255 znaków bez znaków sterujących; mogą być puste. Klient pobiera nazwę
-komputera z systemu, a znak/operatora z ustawień stacji. Żądanie
-`set_station_identity` aktualizuje te same opisy w uwierzytelnionej sesji,
-np. po zmianie operatora; nie wymaga `admin`. Nie zmienia UUID ani uprawnień.
-Opisy są deklarowane przez klienta, nie są zaufanym identyfikatorem.
+Rejestracja trusted może przekazać `station_identity` z polami
+`computer_name`, `station_callsign` i `operator_name`. Wszystkie trzy pola
+są stringami do 255 znaków bez znaków sterujących; mogą być puste. Klient
+pobiera nazwę komputera z systemu, a znak/operatora z ustawień stacji.
+Żądanie `set_station_identity` aktualizuje te same opisy w aktywnej sesji,
+np. po zmianie operatora. Nie zmienia UUID ani dostępu. Opisy są deklarowane
+przez klienta i nie są zaufanym identyfikatorem.
 Serwer dodaje je do `connected_stations` obok niezmienionych `station_uuid`
 i `session_uuid`; nie zapisuje ich jako danych uwierzytelniających.
 Nowy klient wysyła opisy tylko po uzgodnieniu capability, więc współpracuje
-ze starym serwerem; starszy klient może nadal wysłać samo UUID/token.
+ze starszym serwerem; UUID oraz opisy nadal nie są danymi uwierzytelniającymi.
 Brak opisu jest prezentowany jako `Not provided`, nigdy jako UUID w tabeli.
 
 Status rozróżnia Offline, Connecting, Connected, Syncing, Pending i Conflict.
-Połączenie z uprawnieniem tylko `read` jest oznaczane jako Read-only; UI
-blokuje dodawanie/edycję/usuwanie QSO i rezerwowanie/anulowanie seriali.
-Klient pozostawia istniejące lokalne operacje w outboxie i pobiera zdalne
-zmiany. Ta blokada jest egzekwowana również przez uprawnienia serwera.
+Read-only i role serwerowe należą do zachowanego wariantu TLS/token
+opisanego wyżej; bieżąca konfiguracja trusted TCP nie oferuje połączeń tylko
+do odczytu i nadaje wszystkim stacjom odczyt/zapis.
 Wybrany konflikt można otworzyć w widoku porównującym pola lokalnego i
 serwerowego payloadu. Operator może wybrać lokalną lub serwerową wartość każdego
 pola i zapisać scalony wynik jako nową edycję opartą o ostatnią znaną wersję
@@ -879,14 +905,14 @@ callsign, band i mode.
   bazami klienta; synchronizacja pełna i przyrostowa, zmiana jednego rekordu
   równocześnie na dwóch klientach, ponowne połączenie po utracie sieci.
 - Testy numeracji z równoczesnymi żądaniami i retry po symulowanej utracie
-  odpowiedzi. Testy TLS/tokenów, niepoprawnych wiadomości, limitu rozmiaru i
-  przerwania połączenia.
+  odpowiedzi. Testy legacy TLS/tokenów i trusted TCP, rejestracji stacji,
+  wiązania UUID QSO, niepoprawnych wiadomości, limitu rozmiaru i przerwania połączenia.
 - **Odbiór:** identyczny zbiór zatwierdzonych UUID QSO i identyczna rewizja
   logu na wszystkich klientach po synchronizacji; brak niejawnego „last write
   wins”.
 
 **Stan: rozszerzone pokrycie, etap nadal otwarty.** Istnieją testy migracji i transakcji SQLite,
-centralnego repozytorium, snapshotu oraz TLS dla synchronizacji add/update/
+centralnego repozytorium, snapshotu oraz legacy TLS dla synchronizacji add/update/
 delete, retry, konfliktu i rezerwacji seriali. Test TLS numeracji wysyła
 równoczesne żądania z dwóch stacji. Nowy test uruchamia trzy niezależne bazy
 klientów, sprawdza zgodny zestaw UUID i rewizję po pełnej synchronizacji, a
@@ -907,8 +933,8 @@ każdej z tych awarii.
   ani niepotrzebne dane wrażliwe.
 - Dodać metryki: klienci online, cursor lag, pending/error outbox, konflikty,
   czas transakcji, rezerwacje seriali i rozmiar event logu.
-- [x] Udokumentować instalację, firewall/port, TLS, kopię zapasową, restore,
-  rotację tokenów, aktualizację protokołu oraz zachowanie przy utracie hosta:
+- [x] Udokumentować instalację, firewall/port, kopię zapasową, restore,
+  aktualizację protokołu oraz zachowanie przy utracie hosta:
   [procedura operacyjna](docs/NETWORKING_OPERATIONS.md). Dodać serwerowe
   `--restore-backup`; kopia jest walidowana, a istniejąca baza zachowywana
   przed instalacją.
@@ -923,7 +949,9 @@ każdej z tych awarii.
 
 **Stan: wdrożone w kodzie i dokumentacji; test produkcyjnej procedury pozostaje
 zadaniem operatorskim.** Endpoint `get_metrics` wymaga uprawnienia
-administratora i zwraca online station count, rewizję, eventy, operacje,
+administratora w wariancie TLS/token. Trusted TCP nie przydziela tej roli,
+więc endpointu nie udostępnia zwykłym klientom tego trybu. W wariancie
+uprawnionym zwraca online station count, rewizję, eventy, operacje,
 zarejestrowane stacje, lag, QSO, rezerwacje, per-stacja pending/error/conflict
 oraz trwały ostatni kontakt. Serwer zapisuje czas i wynik transakcji;
 odpowiedź udostępnia agregaty i do 100 ostatnich pomiarów, a baza przechowuje
@@ -931,7 +959,7 @@ do 1000 na log. Eksport diagnostyczny może dołączyć pobrane metryki. Backup
 bazy i test backup/restore istnieją, a serwer tworzy backup przed migracją.
 Tryb CLI `--restore-backup` odtwarza zweryfikowaną kopię centralną i zachowuje
 poprzednią bazę. Test obejmuje rewizję, QSO, rezerwację serialu i replay
-idempotentny. Procedura operatorska obejmuje instalację, sieć/TLS, rotację,
+idempotentny. Procedura operatorska obejmuje instalację, trusted TCP/firewall,
 backup, restore, aktualizacje i utratę hosta; próbę odtworzenia należy wykonać
 na oddzielnym katalogu danych przed wdrożeniem produkcyjnym.
 
@@ -964,15 +992,14 @@ NET-010 zależy od polityk NET-001/002 i transakcji NET-006; serwer, trwały
 cache klienta, kolejka żądań, status oczekujących rezerwacji i administracyjna
 korekta z audytem są wdrożone. Pula offline jest świadomie wyłączona; nowe
 numery wymagają potwierdzenia serwera. NET-011–012 mają ręczne lub opcjonalnie
-automatyczne połączenie Client/Host, sekret Clienta w magazynie systemowym,
-dodatkowe CA, status, read-only i trzy decyzje konfliktu z trwałym heartbeatem.
-Poświadczenia Host są nadal importowane z pliku administratora. NET-013 obsługuje dołączanie, tworzenie centralnego logu
-przez administratora, addytywne scalanie lokalnego logu i transfer historii
+automatyczne połączenie Client/Host, rejestrację trusted TCP, status, read-only
+i trzy decyzje konfliktu z trwałym heartbeatem. NET-013 obsługuje dołączanie,
+addytywne scalanie lokalnego logu i transfer historii
 seriali; ograniczenia są opisane w sekcji etapu.
 
 ### Pierwszy inkrement do wdrożenia
 
-Fundamentalny wycinek (TLS/token, istniejący log, idempotentny outbox,
+Fundamentalny wycinek (trusted TCP, istniejący log, idempotentny outbox,
 pobieranie przyrostowe, klient read-only, audyt konfliktu i importu oraz
 metryki administratora) ma testy automatyczne, w tym integrację trzech baz
 klientów. Nie jest to gotowe wydanie. Następne kroki to uzupełnienie scenariuszy
@@ -992,9 +1019,9 @@ Dopiero potem można przeprowadzić pilotaż i wykonać pomiary NET-016.
 |---|---|---|
 | P0 — poprawność danych | NET-007 | Zrealizowane dla reguł obsługiwanych przez YAML/ContestEngine: centralne punkty, `dupe_key` oraz jawny błąd przy brakujących danych CTY. Loader obsługuje callsign (wymagany), band i mode; brak wsparcia dla innych składników dupe pozostaje ograniczeniem formatu. |
 | P0 — odbiór i niezawodność | NET-014 | Testy pokrywają równoczesne edycje, restart klienta i serwera z trwałym outboxem, utratę odpowiedzi po commicie i idempotentny retry QSO/rezerwacji. Pozostają awarie na każdym kroku, aktywny transfer podczas restartu serwera i pełna weryfikacja replik po awariach. |
-| P1 — operacje sieciowe | NET-007/008 | Admin-only tworzenie logu i import historii są dostępne przez protokół; retencja zdarzeń, odzyskiwanie snapshotem i powiadomienia `event_available` są wdrożone. Polling pozostaje ścieżką awaryjną. |
+| P1 — operacje sieciowe | NET-007/008 | Tworzenie logu i import historii w bieżącym trusted TCP wykonuje się lokalnie z GUI Host; endpointy admin-only są częścią wariantu TLS/token. Retencja zdarzeń, odzyskiwanie snapshotem i powiadomienia `event_available` są wdrożone. Polling pozostaje ścieżką awaryjną. |
 | P1 — numeracja | NET-010 | Administracyjna korekta niewykorzystanej rezerwacji z uzasadnieniem/audytem i widok stanu oczekującego/offline są wdrożone. Pula numerów offline jest świadomie wyłączona; nowy numer wymaga serwera, a żądanie może oczekiwać w trwałej kolejce. |
-| P1 — konfiguracja | NET-011 | Client secret store, dodatkowe CA i opcjonalny autostart Client/Host są wdrożone. Hostowe poświadczenia nadal pochodzą z pliku JSON zarządzanego przez administratora. |
+| P1 — konfiguracja | NET-011 | Uproszczone GUI Client/Host oraz opt-in autostart są wdrożone. Bieżące GUI/CLI nie konfiguruje TLS, tokenów, dodatkowych CA ani hostowych poświadczeń; te elementy należą do zachowanego wariantu legacy TLS/token. |
 | P1 — obsługa konfliktów | NET-012 | Przyjęcie serwera, ponowienie lokalnej edycji i ręczne scalanie pól z audytem są dostępne; heartbeat i czas kontaktu są trwałe. |
 | P1 — adopcja logów | NET-013 | Dołączanie, tworzenie centralnego logu przez administratora, addytywne scalanie lokalnego logu i transfer historii seriali są wdrożone. Pozostają limity transferu (1000 rezerwacji na żądanie), ograniczenie scalania Client do własnych QSO i odbiór konfliktów/awarii w środowisku wielostacyjnym. |
 | P2 — eksploatacja | NET-015 | Metryki, czas transakcji, stan outbox per klient, procedura operacyjna i CLI restore wdrożone; próba produkcyjnej procedury pozostaje zadaniem operatorskim. |

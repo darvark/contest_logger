@@ -33,7 +33,8 @@ QString dupeIdentity(const QStringList &dupeKey, const Qso &qso)
 
 QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
                                       const QMap<QString, QString> &exchange,
-                                      const QMap<QString, QString> &resolved)
+                                      const QMap<QString, QString> &resolved,
+                                      const QMap<QString, QString> &sentExchange = {})
 {
     QMap<QString, QString> facts;
     for (auto it = resolved.cbegin(); it != resolved.cend(); ++it) {
@@ -50,13 +51,30 @@ QMap<QString, QString> conditionFacts(const QString &band, const QString &mode,
         const QString value = normalized(it.value());
         facts.insert(QStringLiteral("exchange.%1").arg(key), value);
         facts.insert(QStringLiteral("received.%1").arg(key), value);
+        if (!value.isEmpty()) {
+            facts.insert(QStringLiteral("has_received.%1").arg(key),
+                         QStringLiteral("true"));
+        }
+    }
+    for (auto it = sentExchange.cbegin(); it != sentExchange.cend(); ++it) {
+        const QString receivedValue = normalized(exchange.value(it.key()));
+        const QString sentValue = normalized(it.value());
+        if (!sentValue.isEmpty() && !receivedValue.isEmpty()
+            && it.key().compare(QStringLiteral("itu_zone"),
+                                Qt::CaseInsensitive) == 0) {
+            facts.insert(QStringLiteral("same_itu_zone"),
+                         sentValue == receivedValue
+                             ? QStringLiteral("true")
+                             : QStringLiteral("false"));
+        }
     }
     if (facts.contains(QStringLiteral("dxcc"))) {
         facts.insert(QStringLiteral("country"), facts.value(QStringLiteral("dxcc")));
     }
     for (const QString &key : {QStringLiteral("same_dxcc"),
                                QStringLiteral("same_country"),
-                               QStringLiteral("same_continent")}) {
+                               QStringLiteral("same_continent"),
+                               QStringLiteral("same_itu_zone")}) {
         if (facts.contains(key)) {
             facts.insert(key, normalized(facts.value(key)));
         }
@@ -77,13 +95,16 @@ bool conditionMatches(const QMap<QString, QString> &condition,
 
 QMap<QString, QString> receivedFieldsFor(
     const Qso &qso, const ContestDefinition &definition);
+QMap<QString, QString> sentFieldsFor(
+    const Qso &qso, const ContestDefinition &definition);
 
 int pointsForQso(const ContestDefinition &definition, const Qso &qso,
                  const QMap<QString, QString> &resolved)
 {
     const QMap<QString, QString> exchange =
         receivedFieldsFor(qso, definition);
-    const auto facts = conditionFacts(qso.band, qso.mode, exchange, resolved);
+    const auto facts = conditionFacts(qso.band, qso.mode, exchange, resolved,
+                                      sentFieldsFor(qso, definition));
     for (const QsoPointsRule &rule : definition.qsoPointRules) {
         if (conditionMatches(rule.when, facts)) {
             return rule.points;
@@ -169,19 +190,36 @@ QString multiplierValue(const MultiplierDefinition &multiplier,
                         const ContestEvaluationContext &context,
                         const QString &callsign)
 {
-    if (multiplier.type == QStringLiteral("exchange")) {
-        return normalized(exchange.value(multiplier.field));
+    QString value;
+    if (multiplier.type == QStringLiteral("exchange")
+        || multiplier.type == QStringLiteral("exchange_prefix")) {
+        value = normalized(exchange.value(multiplier.field));
+        if (multiplier.type == QStringLiteral("exchange_prefix")) {
+            if (value == QStringLiteral("NM")) {
+                return {};
+            }
+            const qsizetype firstLetter = value.indexOf(
+                QRegularExpression(QStringLiteral("[A-Z]")));
+            value = firstLetter < 0 ? QString() : value.mid(firstLetter, 1);
+        }
+    } else if (multiplier.type == QStringLiteral("prefix")) {
+        value = ContestEngine::wpxPrefix(callsign);
+    } else {
+        value = normalized(context.resolvedMultiplierValues.value(multiplier.type));
     }
-    if (multiplier.type == QStringLiteral("prefix")) {
-        return ContestEngine::wpxPrefix(callsign);
-    }
-    return normalized(context.resolvedMultiplierValues.value(multiplier.type));
+    const bool excluded = std::any_of(
+        multiplier.excludedValues.cbegin(), multiplier.excludedValues.cend(),
+        [&value](const QString &excludedValue) {
+            return normalized(excludedValue) == value;
+        });
+    return excluded ? QString() : value;
 }
 
 QString multiplierKey(const MultiplierDefinition &multiplier, const QString &value,
                       const QString &band, const QString &mode)
 {
     QString key = multiplier.type == QStringLiteral("exchange")
+            || multiplier.type == QStringLiteral("exchange_prefix")
         ? multiplier.type + QLatin1Char(':') + multiplier.field
             + QLatin1Char(':') + value
         : multiplier.type + QLatin1Char(':') + value;
@@ -202,6 +240,16 @@ QMap<QString, QString> receivedFieldsFor(const Qso &qso,
     }
     return LogExporter::mapLegacyExchange(qso.receivedExchange,
                                           definition.receivedExchange);
+}
+
+QMap<QString, QString> sentFieldsFor(const Qso &qso,
+                                     const ContestDefinition &definition)
+{
+    if (!qso.sentExchangeFields.isEmpty()) {
+        return qso.sentExchangeFields;
+    }
+    return LogExporter::mapLegacyExchange(qso.sentExchange,
+                                          definition.sentExchange);
 }
 
 } // namespace
@@ -304,6 +352,9 @@ ContestEvaluationContext ContestEngine::buildContext(
     });
     QSet<QString> seenDupeKeys;
     for (const Qso &qso : ordered) {
+        if (qso.invalid) {
+            continue;
+        }
         const QString identity = dupeIdentity(definition.dupeKey, qso);
         if (seenDupeKeys.contains(identity)) {
             continue;
@@ -367,6 +418,9 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
     QSet<QString> worked;
     QSet<QString> seenDupeKeys;
     for (const Qso &qso : ordered) {
+        if (qso.invalid) {
+            continue;
+        }
         ++result.totalQsos;
         ++result.perBand[qso.band.trimmed().toLower()].qsos;
         ++result.perMode[qso.mode.trimmed().toUpper()].qsos;
@@ -504,6 +558,9 @@ ContestEvaluationResult ContestEngine::evaluate(
     }
 
     for (const Qso &previous : context.previousQsos) {
+        if (previous.invalid) {
+            continue;
+        }
         const bool sameCall =
             normalized(previous.callsign) == normalizedCall;
         const bool sameBand = normalized(previous.band).toLower() == normalizedBand;
@@ -598,7 +655,8 @@ ContestEvaluationResult ContestEngine::evaluate(
 
     const auto facts = conditionFacts(normalizedBand, normalizedMode,
                                       result.receivedExchange,
-                                      context.resolvedMultiplierValues);
+                                      context.resolvedMultiplierValues,
+                                      result.sentExchange);
     result.points = definition.qsoPoints;
     for (const QsoPointsRule &rule : definition.qsoPointRules) {
         if (conditionMatches(rule.when, facts)) {

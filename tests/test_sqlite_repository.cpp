@@ -94,7 +94,8 @@ QJsonObject sampleSyncEvent(const QString &logUuid, const QString &stationUuid,
         {QStringLiteral("received_exchange"), QStringLiteral("599 027")},
         {QStringLiteral("points"), 2},
         {QStringLiteral("qso_version"), 1},
-        {QStringLiteral("is_deleted"), false}
+        {QStringLiteral("is_deleted"), false},
+        {QStringLiteral("is_invalid"), false}
     };
     return {
         {QStringLiteral("event_uuid"),
@@ -139,7 +140,10 @@ private slots:
     void findsDuplicateQsos();
     void assignsStableSyncIdentities();
     void persistsAtomicSyncOutbox();
+    void upgradesLegacyOutboxInvalidFlag();
     void deletesQsoWithAtomicOutboxTombstone();
+    void auditsAndUndoesQsoChangesAsVersionedOperations();
+    void undoRollsBackWhenOutboxWriteFails();
     void restoresPendingOutboxAfterDatabaseReopen();
     void atomicallyAppliesSyncChangesAndRecoversInflightOperations();
     void atomicallyReplacesDataFromVerifiedSnapshot();
@@ -220,7 +224,7 @@ void SqliteRepositoryTest::appliesSchemaMigrationOnce()
     QSqlQuery query(database.database());
     QVERIFY(query.exec(QStringLiteral("SELECT MAX(version) FROM schema_migrations")));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 17);
+    QCOMPARE(query.value(0).toInt(), 19);
     query.finish();
 
     QVERIFY2(database.repository().initialize(&error), qPrintable(error));
@@ -801,6 +805,7 @@ void SqliteRepositoryTest::persistsAtomicSyncOutbox()
     error.clear();
 
     logger::Qso qso = sampleQso();
+    qso.invalid = true;
     QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
     auto operations = repository.syncOutbox(logUuid, false, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
@@ -815,11 +820,14 @@ void SqliteRepositoryTest::persistsAtomicSyncOutbox()
     QCOMPARE(createPayload.value(QStringLiteral("expected_version")).toInt(), 0);
     QCOMPARE(createPayload.value(QStringLiteral("qso")).toObject()
                  .value(QStringLiteral("qso_uuid")).toString(), qso.qsoUuid);
+    QVERIFY(createPayload.value(QStringLiteral("qso")).toObject()
+                .value(QStringLiteral("is_invalid")).toBool());
     QCOMPARE(createPayload.value(QStringLiteral("log_uuid")).toString(), logUuid);
 
     auto stored = repository.qsoById(qso.id, &error);
     QVERIFY2(stored.has_value(), qPrintable(error));
     QCOMPARE(stored->syncStatus, logger::QsoSyncStatus::Pending);
+    QVERIFY(stored->invalid);
     QVERIFY2(repository.setSyncOperationState(
                  operationUuid, QStringLiteral("in-flight"), {}, &error),
              qPrintable(error));
@@ -866,6 +874,7 @@ void SqliteRepositoryTest::persistsAtomicSyncOutbox()
     remoteVersion.insert(QStringLiteral("callsign"), QStringLiteral("W1AW"));
     remoteVersion.insert(QStringLiteral("qso_version"), 2);
     remoteVersion.insert(QStringLiteral("is_deleted"), false);
+    remoteVersion.insert(QStringLiteral("is_invalid"), false);
     QVERIFY2(repository.recordSyncConflict(
                  operations.first().operationUuid,
                  QString::fromUtf8(QJsonDocument(remoteVersion)
@@ -952,6 +961,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
     remote.insert(QStringLiteral("callsign"), QStringLiteral("W1SERVER"));
     remote.insert(QStringLiteral("qso_version"), 2);
     remote.insert(QStringLiteral("is_deleted"), false);
+    remote.insert(QStringLiteral("is_invalid"), false);
     QVERIFY2(repository.recordSyncConflict(
                  operations.first().operationUuid,
                  QString::fromUtf8(QJsonDocument(remote)
@@ -1016,6 +1026,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
     remote.insert(QStringLiteral("callsign"), QStringLiteral("W1SERVER"));
     remote.insert(QStringLiteral("qso_version"), 2);
     remote.insert(QStringLiteral("is_deleted"), false);
+    remote.insert(QStringLiteral("is_invalid"), false);
     QVERIFY2(repository.recordSyncConflict(
                  conflictedOperationUuid,
                  QString::fromUtf8(QJsonDocument(remote)
@@ -1090,6 +1101,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
     remote.insert(QStringLiteral("received_exchange"), QStringLiteral("599 202"));
     remote.insert(QStringLiteral("qso_version"), 2);
     remote.insert(QStringLiteral("is_deleted"), false);
+    remote.insert(QStringLiteral("is_invalid"), false);
     QVERIFY2(repository.recordSyncConflict(
                  conflictedOperationUuid,
                  QString::fromUtf8(QJsonDocument(remote)
@@ -1148,6 +1160,45 @@ void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
              QStringLiteral("599 202"));
 }
 
+void SqliteRepositoryTest::upgradesLegacyOutboxInvalidFlag()
+{
+    TestDatabase database;
+    auto &repository = database.repository();
+    QString error;
+    const QString logUuid = repository.contests(&error).first().logUuid;
+    QVERIFY2(repository.setSynchronizationEnabled(logUuid, true, &error),
+             qPrintable(error));
+    logger::Qso qso = sampleQso();
+    QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
+
+    QSqlQuery query(database.database());
+    QVERIFY(query.exec(QStringLiteral(
+        "SELECT operation_uuid, payload_json FROM sync_outbox")));
+    QVERIFY(query.next());
+    const QString operationUuid = query.value(0).toString();
+    QJsonObject operation = QJsonDocument::fromJson(
+        query.value(1).toByteArray()).object();
+    QJsonObject payloadQso = operation.value(QStringLiteral("qso")).toObject();
+    QVERIFY(payloadQso.contains(QStringLiteral("is_invalid")));
+    payloadQso.remove(QStringLiteral("is_invalid"));
+    operation.insert(QStringLiteral("qso"), payloadQso);
+    query.finish();
+    query.prepare(QStringLiteral(
+        "UPDATE sync_outbox SET payload_json = ? WHERE operation_uuid = ?"));
+    query.addBindValue(QString::fromUtf8(
+        QJsonDocument(operation).toJson(QJsonDocument::Compact)));
+    query.addBindValue(operationUuid);
+    QVERIFY(query.exec());
+
+    const auto operations = repository.syncOutbox(logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(operations.size(), 1);
+    const QJsonObject normalized = QJsonDocument::fromJson(
+        operations.first().payloadJson.toUtf8()).object();
+    QVERIFY(!normalized.value(QStringLiteral("qso")).toObject()
+                 .value(QStringLiteral("is_invalid")).toBool());
+}
+
 void SqliteRepositoryTest::deletesQsoWithAtomicOutboxTombstone()
 {
     TestDatabase database;
@@ -1183,6 +1234,101 @@ void SqliteRepositoryTest::deletesQsoWithAtomicOutboxTombstone()
     QVERIFY(stored.next());
     QCOMPARE(stored.value(0).toInt(), 1);
     QCOMPARE(stored.value(1).toInt(), 2);
+}
+
+void SqliteRepositoryTest::auditsAndUndoesQsoChangesAsVersionedOperations()
+{
+    TestDatabase database;
+    auto &repository = database.repository();
+    QString error;
+    const logger::Contest contest = repository.contests(&error).first();
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY2(repository.setSynchronizationEnabled(contest.logUuid, true, &error),
+             qPrintable(error));
+
+    logger::Qso qso = sampleQso();
+    qso.contestId = contest.id;
+    qso.receivedExchangeFields.insert(QStringLiteral("serial"),
+                                      QStringLiteral("027"));
+    QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
+
+    qso.callsign = QStringLiteral("N0CALL");
+    QVERIFY2(repository.updateQso(qso, &error), qPrintable(error));
+    QVERIFY2(repository.deleteQso(qso.id, &error), qPrintable(error));
+    QVERIFY(!repository.qsoById(qso.id, &error).has_value());
+
+    QVERIFY2(repository.undoLastQsoChange(contest.id, &error), qPrintable(error));
+    auto restored = repository.qsoById(qso.id, &error);
+    QVERIFY2(restored.has_value(), qPrintable(error));
+    QCOMPARE(restored->callsign, QStringLiteral("N0CALL"));
+    QCOMPARE(restored->qsoVersion, 4);
+
+    QVERIFY2(repository.undoLastQsoChange(contest.id, &error), qPrintable(error));
+    restored = repository.qsoById(qso.id, &error);
+    QVERIFY2(restored.has_value(), qPrintable(error));
+    QCOMPARE(restored->callsign, QStringLiteral("W1AW"));
+    QCOMPARE(restored->qsoVersion, 5);
+
+    QVERIFY2(repository.undoLastQsoChange(contest.id, &error), qPrintable(error));
+    QVERIFY(!repository.qsoById(qso.id, &error).has_value());
+    QVERIFY(error.isEmpty());
+    QVERIFY(!repository.undoLastQsoChange(contest.id, &error));
+    QVERIFY(error.contains(QStringLiteral("no QSO change to undo")));
+
+    QSqlQuery audit(database.database());
+    QVERIFY(audit.exec(QStringLiteral(
+        "SELECT action, COUNT(*) FROM qso_change_audit "
+        "GROUP BY action ORDER BY action")));
+    QMap<QString, int> actions;
+    while (audit.next()) {
+        actions.insert(audit.value(0).toString(), audit.value(1).toInt());
+    }
+    QCOMPARE(actions.value(QStringLiteral("create")), 1);
+    QCOMPARE(actions.value(QStringLiteral("update")), 1);
+    QCOMPARE(actions.value(QStringLiteral("delete")), 1);
+    QCOMPARE(actions.value(QStringLiteral("undo")), 3);
+
+    const QVector<logger::SyncOutboxOperation> operations =
+        repository.syncOutbox(contest.logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(operations.size(), 6);
+    QCOMPARE(operations.at(3).operation, QStringLiteral("qso.update"));
+    QCOMPARE(QJsonDocument::fromJson(operations.at(3).payloadJson.toUtf8())
+                 .object().value(QStringLiteral("expected_version")).toInt(), 3);
+    QCOMPARE(operations.at(5).operation, QStringLiteral("qso.delete"));
+    QCOMPARE(QJsonDocument::fromJson(operations.at(5).payloadJson.toUtf8())
+                 .object().value(QStringLiteral("expected_version")).toInt(), 5);
+}
+
+void SqliteRepositoryTest::undoRollsBackWhenOutboxWriteFails()
+{
+    TestDatabase database;
+    auto &repository = database.repository();
+    QString error;
+    const logger::Contest contest = repository.contests(&error).first();
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY2(repository.setSynchronizationEnabled(contest.logUuid, true, &error),
+             qPrintable(error));
+
+    logger::Qso qso = sampleQso();
+    QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
+    QSqlQuery trigger(database.database());
+    QVERIFY2(trigger.exec(QStringLiteral(
+        "CREATE TRIGGER fail_undo_outbox BEFORE INSERT ON sync_outbox "
+        "BEGIN SELECT RAISE(ABORT, 'simulated outbox failure'); END")),
+        qPrintable(trigger.lastError().text()));
+
+    QVERIFY(!repository.undoLastQsoChange(contest.id, &error));
+    QVERIFY(error.contains(QStringLiteral("simulated outbox failure")));
+    const auto unchanged = repository.qsoById(qso.id, &error);
+    QVERIFY2(unchanged.has_value(), qPrintable(error));
+    QCOMPARE(unchanged->qsoVersion, 1);
+    QSqlQuery audit(database.database());
+    QVERIFY2(audit.exec(QStringLiteral(
+        "SELECT COUNT(*) FROM qso_change_audit WHERE action = 'undo'")),
+        qPrintable(audit.lastError().text()));
+    QVERIFY(audit.next());
+    QCOMPARE(audit.value(0).toInt(), 0);
 }
 
 void SqliteRepositoryTest::restoresPendingOutboxAfterDatabaseReopen()
@@ -1274,9 +1420,13 @@ void SqliteRepositoryTest::atomicallyAppliesSyncChangesAndRecoversInflightOperat
         .toString(QUuid::WithoutBraces).toLower();
     const QString remoteOperation = QUuid::createUuid()
         .toString(QUuid::WithoutBraces).toLower();
-    const QJsonObject event = sampleSyncEvent(
+    QJsonObject event = sampleSyncEvent(
         logUuid, remoteStation, remoteQso, remoteOperation, 1,
         QStringLiteral("W1AW"));
+    QJsonObject invalidPayload = event.value(QStringLiteral("payload")).toObject();
+    invalidPayload.insert(QStringLiteral("is_invalid"), true);
+    invalidPayload.insert(QStringLiteral("points"), 0);
+    event.insert(QStringLiteral("payload"), invalidPayload);
     const QString concurrentOperation = QUuid::createUuid()
         .toString(QUuid::WithoutBraces).toLower();
     const QJsonObject concurrentEvent = sampleSyncEvent(
@@ -1307,6 +1457,8 @@ void SqliteRepositoryTest::atomicallyAppliesSyncChangesAndRecoversInflightOperat
     QVERIFY(found != qsos.cend());
     QCOMPARE(found->callsign, QStringLiteral("W1AW"));
     QCOMPARE(found->qsoVersion, 1);
+    QVERIFY(found->invalid);
+    QCOMPARE(found->points, 0);
     const auto conflicted = repository.qsoById(local.id, &error);
     QVERIFY2(conflicted.has_value(), qPrintable(error));
     QCOMPARE(conflicted->callsign, QStringLiteral("K2REMOTE"));

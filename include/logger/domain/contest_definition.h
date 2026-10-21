@@ -43,6 +43,7 @@ struct MultiplierDefinition {
     QString field;
     bool perBand = false;
     bool perMode = false;
+    QStringList excludedValues;
 };
 
 struct QsoPointsRule {

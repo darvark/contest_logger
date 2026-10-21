@@ -18,6 +18,7 @@
 #include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include <QSettings>
 #include <QSplashScreen>
 
 int main(int argc, char *argv[])
@@ -127,7 +128,17 @@ int main(int argc, char *argv[])
         logger::SqliteRepository repository(database);
         QString error;
         const QFileInfo currentDatabase(databasePath);
-        if (currentDatabase.exists() && currentDatabase.size() > 0) {
+        QSettings backupSettings;
+        const bool automaticBackupsEnabled = backupSettings.value(
+            QStringLiteral("backups/automaticEnabled"), true).toBool();
+        const int backupIntervalDays = qBound(
+            1, backupSettings.value(
+                   QStringLiteral("backups/automaticIntervalDays"), 1).toInt(), 365);
+        const int backupRetentionCount = qBound(
+            1, backupSettings.value(
+                   QStringLiteral("backups/automaticRetentionCount"), 30).toInt(), 365);
+        if (automaticBackupsEnabled && currentDatabase.exists()
+            && currentDatabase.size() > 0) {
             const QString backupDirectory = dataDirectory + QStringLiteral("/backups");
             if (!QDir().mkpath(backupDirectory)) {
                 showStartupError(
@@ -135,30 +146,45 @@ int main(int argc, char *argv[])
                     QObject::tr("Could not create the automatic backup directory."));
                 return 1;
             }
-            const QString backupPath = backupDirectory
-                + QStringLiteral("/automatic-%1.sqlite")
-                      .arg(QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")));
-            if (!QFileInfo::exists(backupPath)
-                && !repository.backupTo(backupPath, &error)) {
-                showStartupError(
-                    nullptr, QObject::tr("Automatic database backup failed"),
-                    QObject::tr("A safety backup could not be created; the database "
-                                "was not opened for writing.\n\n%1").arg(error));
-                return 1;
-            }
-            const QFileInfoList backups = QDir(backupDirectory).entryInfoList(
-                {QStringLiteral("automatic-*.sqlite")},
-                QDir::Files, QDir::Name);
-            const QDate oldestDate = QDate::currentDate().addDays(-30);
+            QDir backupDir(backupDirectory);
+            QFileInfoList backups = backupDir.entryInfoList(
+                {QStringLiteral("automatic-*.sqlite")}, QDir::Files, QDir::Name);
             static const QRegularExpression backupName(
                 QStringLiteral("^automatic-(\\d{4}-\\d{2}-\\d{2})\\.sqlite$"));
+            QDate latestBackupDate;
             for (const QFileInfo &backup : backups) {
                 const auto match = backupName.match(backup.fileName());
                 const QDate backupDate = match.hasMatch()
                     ? QDate::fromString(match.captured(1), QStringLiteral("yyyy-MM-dd"))
                     : QDate();
-                if (backupDate.isValid() && backupDate < oldestDate) {
-                    QFile::remove(backup.absoluteFilePath());
+                if (backupDate.isValid() && backupDate > latestBackupDate) {
+                    latestBackupDate = backupDate;
+                }
+            }
+            const QDate today = QDate::currentDate();
+            if (!latestBackupDate.isValid()
+                || latestBackupDate.daysTo(today) >= backupIntervalDays) {
+                const QString backupPath = backupDir.filePath(
+                    QStringLiteral("automatic-%1.sqlite")
+                        .arg(today.toString(QStringLiteral("yyyy-MM-dd"))));
+                if (!QFileInfo::exists(backupPath)
+                    && !repository.backupTo(backupPath, &error)) {
+                    showStartupError(
+                        nullptr, QObject::tr("Automatic database backup failed"),
+                        QObject::tr("A safety backup could not be created; the database "
+                                    "was not opened for writing.\n\n%1").arg(error));
+                    return 1;
+                }
+            }
+            backups = backupDir.entryInfoList(
+                {QStringLiteral("automatic-*.sqlite")},
+                QDir::Files, QDir::Name | QDir::Reversed);
+            for (qsizetype index = backupRetentionCount; index < backups.size(); ++index) {
+                if (!QFile::remove(backups.at(index).absoluteFilePath())) {
+                    QMessageBox::warning(
+                        nullptr, QObject::tr("Automatic backup retention failed"),
+                        QObject::tr("Could not remove old backup %1.")
+                            .arg(backups.at(index).absoluteFilePath()));
                 }
             }
         }

@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
-        QStringLiteral("Contest Logger central database initialization check"));
+        QStringLiteral("Contest Logger central database and trusted-network server"));
     parser.addHelpOption();
     const QCommandLineOption dataDirectoryOption(
         QStringList{QStringLiteral("data-dir")},
@@ -27,34 +27,22 @@ int main(int argc, char *argv[])
         QStringLiteral("Initialize/check the central database and exit."));
     const QCommandLineOption listenOption(
         QStringList{QStringLiteral("listen")},
-        QStringLiteral("Run the TLS synchronization server."));
+        QStringLiteral("Run the plain-TCP synchronization server for a trusted LAN/VPN."));
     const QCommandLineOption restoreOption(
         QStringList{QStringLiteral("restore-backup")},
         QStringLiteral("Restore a verified central database backup and exit."),
         QStringLiteral("backup-file"));
     const QCommandLineOption addressOption(
         QStringList{QStringLiteral("address")},
-        QStringLiteral("Numeric bind address (default: 0.0.0.0)."),
+        QStringLiteral("Numeric bind address (default: 0.0.0.0; use only on a trusted network)."),
         QStringLiteral("ip"), QStringLiteral("0.0.0.0"));
     const QCommandLineOption portOption(
         QStringList{QStringLiteral("port")},
-        QStringLiteral("TCP port (default: 7443; use 0 for an ephemeral port)."),
+        QStringLiteral("TCP port (default: 7443)."),
         QStringLiteral("port"), QStringLiteral("7443"));
-    const QCommandLineOption certificateOption(
-        QStringList{QStringLiteral("tls-cert")},
-        QStringLiteral("PEM TLS certificate chain."),
-        QStringLiteral("file"));
-    const QCommandLineOption privateKeyOption(
-        QStringList{QStringLiteral("tls-key")},
-        QStringLiteral("Unencrypted RSA PEM private key."),
-        QStringLiteral("file"));
-    const QCommandLineOption tokenFileOption(
-        QStringList{QStringLiteral("tokens")},
-        QStringLiteral("JSON station credential file."),
-        QStringLiteral("file"));
     const QCommandLineOption maximumConnectionsOption(
         QStringList{QStringLiteral("max-connections")},
-        QStringLiteral("Maximum active TLS sessions (1-256)."),
+        QStringLiteral("Maximum concurrent client stations (1–256, default: 16)."),
         QStringLiteral("count"), QStringLiteral("16"));
     parser.addOption(dataDirectoryOption);
     parser.addOption(checkOption);
@@ -62,9 +50,6 @@ int main(int argc, char *argv[])
     parser.addOption(restoreOption);
     parser.addOption(addressOption);
     parser.addOption(portOption);
-    parser.addOption(certificateOption);
-    parser.addOption(privateKeyOption);
-    parser.addOption(tokenFileOption);
     parser.addOption(maximumConnectionsOption);
     parser.process(application);
 
@@ -123,30 +108,32 @@ int main(int argc, char *argv[])
     if (parser.isSet(listenOption)) {
         bool portValid = false;
         const uint portValue = parser.value(portOption).toUInt(&portValid);
-        bool connectionsValid = false;
-        const int maximumConnections =
-            parser.value(maximumConnectionsOption).toInt(&connectionsValid);
-        if (!portValid || portValue > 65535 || !connectionsValid
-            || maximumConnections < 1 || maximumConnections > 256
-            || parser.value(certificateOption).isEmpty()
-            || parser.value(privateKeyOption).isEmpty()
-            || parser.value(tokenFileOption).isEmpty()) {
-            errorOutput << "Listen options are invalid or missing TLS/token files.\n";
+        if (!portValid || portValue == 0 || portValue > 65535) {
+            errorOutput << "Listen port must be between 1 and 65535.\n";
+            return 2;
+        }
+        bool maximumConnectionsValid = false;
+        const uint maximumConnectionsValue =
+            parser.value(maximumConnectionsOption).toUInt(&maximumConnectionsValid);
+        if (!maximumConnectionsValid || maximumConnectionsValue < 1
+            || maximumConnectionsValue > 256) {
+            errorOutput << "Maximum connections must be between 1 and 256.\n";
             return 2;
         }
         logger::SyncServer server(repository);
-        if (!server.listen(parser.value(addressOption), static_cast<quint16>(portValue),
-                           parser.value(certificateOption),
-                           parser.value(privateKeyOption),
-                           parser.value(tokenFileOption),
-                           maximumConnections, &error)) {
-            errorOutput << "Could not start TLS synchronization server: "
+        if (!server.listenTrustedNetwork(
+                parser.value(addressOption), static_cast<quint16>(portValue),
+                static_cast<int>(maximumConnectionsValue), &error)) {
+            errorOutput << "Could not start trusted-network synchronization server: "
                         << error << '\n';
             return 1;
         }
         QTextStream output(stdout);
-        output << "TLS synchronization server listening on "
+        output << "Unencrypted trusted-network server listening on "
                << parser.value(addressOption) << ':' << server.serverPort() << '\n'
+               << "All connected stations receive read/write access. Keep this service "
+                  "inside a trusted LAN/VPN.\n"
+               << "Maximum connected stations: " << maximumConnectionsValue << '\n'
                << "Central database: "
                << QDir::toNativeSeparators(repository.databasePath()) << '\n';
         output.flush();

@@ -2,13 +2,13 @@ schema_version: 1
 id: wag
 name: Worked All Germany (WAG)
 description: >-
-  Rules: https://www.darc.de/der-club/referate/conteste/wag-contest/en/rules/.
-  This profile is for non-German stations: send a serial starting at 001 and
-  receive a German DOK or NM. Each valid QSO scores 1 point. Multipliers are
-  counted per band and mode. The schema counts the full received DOK/NM text;
-  official scoring uses its district letter and excludes NM, so multiplier
-  totals are provisional. German entrants need a different exchange and
-  DXCC/WAE multipliers.
+  Rules: https://www.darc.de/der-club/referate/conteste/wag-contest/en/rules/
+  (2026 rules, accessed 2026-10-18). This profile is for stations outside
+  Germany: send a serial starting at 001 and receive a German DOK or NM. QSOs
+  with Germany score 1 point; other QSOs score 0. Multipliers use the first
+  letter of a DOK (ignoring leading digits), per band and mode; NM is not a
+  multiplier. German entrants need a separate profile with their own exchange
+  and DXCC/WAE multiplier rules.
 bands: [80m, 40m, 20m, 15m, 10m]
 modes: [CW, SSB]
 cabrillo: {contest: WAG}
@@ -20,7 +20,9 @@ exchange:
     - {name: report, label: RST, type: rst}
     - {name: exchange, label: DOK / NM, type: text}
 scoring:
-  qso_points: 1
+  qso_points: 0
+  qso_point_rules:
+    - {points: 1, when: {country: Germany}}
   multipliers:
-    - {type: exchange, field: exchange, per_band: true, per_mode: true}
+    - {type: exchange_prefix, field: exchange, per_band: true, per_mode: true}
 dupe_key: [callsign, band, mode]

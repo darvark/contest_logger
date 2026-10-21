@@ -3,7 +3,7 @@
 #include "logger/contest/contest_engine.h"
 #include "logger/data/application_data.h"
 #include "logger/data/log_importer.h"
-#include "logger/network/secret_store.h"
+#include "logger/network/station_presence.h"
 #include "logger/radio/band_plan.h"
 #include "logger/ui/new_log_dialog.h"
 #include "logger/ui/operator_dialog.h"
@@ -21,7 +21,6 @@
 #include <QListWidget>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QSslCertificate>
 #include <QStyle>
 #include <QAbstractButton>
 #include <QAbstractItemView>
@@ -29,6 +28,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QComboBox>
+#include <QCompleter>
 #include <QCloseEvent>
 #include <QCryptographicHash>
 #include <QDockWidget>
@@ -39,6 +39,7 @@
 #include <QFormLayout>
 #include <QFont>
 #include <QGroupBox>
+#include <QHostInfo>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -66,6 +67,7 @@
 #include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QStringListModel>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -142,6 +144,38 @@ bool saveSupportDataFile(const QString &fileName, const QByteArray &contents,
         return false;
     }
     path = QDir(directory).filePath(fileName);
+    if (QFileInfo::exists(path)) {
+        QFile previousFile(path);
+        if (!previousFile.open(QIODevice::ReadOnly)) {
+            error = QStringLiteral("%1: %2").arg(path, previousFile.errorString());
+            return false;
+        }
+        const QByteArray previous = previousFile.readAll();
+        if (previous != contents) {
+            const QString historyDirectory = QDir(directory).filePath(
+                QStringLiteral("support-data-versions/%1").arg(fileName));
+            if (!QDir().mkpath(historyDirectory)) {
+                error = QStringLiteral("Unable to create support-data version directory.");
+                return false;
+            }
+            const QString digest = QString::fromLatin1(
+                QCryptographicHash::hash(previous, QCryptographicHash::Sha256)
+                    .toHex().left(12));
+            const QString versionPath = QDir(historyDirectory).filePath(
+                QStringLiteral("%1-%2.bak")
+                    .arg(QDateTime::currentDateTimeUtc()
+                             .toString(QStringLiteral("yyyyMMdd'T'hhmmsszzz'Z'")),
+                         digest));
+            QSaveFile versionFile(versionPath);
+            if (!versionFile.open(QIODevice::WriteOnly)
+                || versionFile.write(previous) != previous.size()
+                || !versionFile.commit()) {
+                error = QStringLiteral("%1: %2")
+                            .arg(versionPath, versionFile.errorString());
+                return false;
+            }
+        }
+    }
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         error = file.errorString();
@@ -475,9 +509,7 @@ class SyncConnectionDialog final : public QDialog {
 public:
     SyncConnectionDialog(const QVector<Contest> &contests,
                          const QString &savedHost, int savedPort,
-                         const QString &savedLogUuid, const QString &savedCaPath,
-                         const QString &savedToken, bool autoStart,
-                         QWidget *parent)
+                         const QString &savedLogUuid, bool autoStart, QWidget *parent)
         : QDialog(parent)
     {
         setWindowTitle(tr("Central synchronization connection"));
@@ -485,32 +517,14 @@ public:
         auto *form = new QFormLayout;
         m_host = new QLineEdit(savedHost, this);
         m_host->setObjectName(QStringLiteral("syncServerHost"));
-        m_host->setPlaceholderText(tr("Server DNS name"));
-        form->addRow(tr("Server host / TLS name:"), m_host);
+        m_host->setPlaceholderText(tr("Server IPv4 or IPv6 address"));
+        form->addRow(tr("Server IP address:"), m_host);
 
         m_port = new QSpinBox(this);
         m_port->setObjectName(QStringLiteral("syncServerPort"));
         m_port->setRange(1, 65535);
         m_port->setValue(savedPort > 0 ? savedPort : 7443);
         form->addRow(tr("Port:"), m_port);
-
-        auto *caContainer = new QWidget(this);
-        auto *caRow = new QHBoxLayout(caContainer);
-        caRow->setContentsMargins(0, 0, 0, 0);
-        m_caPath = new QLineEdit(savedCaPath, caContainer);
-        m_caPath->setObjectName(QStringLiteral("syncCustomCaPath"));
-        auto *browseCa = new QPushButton(tr("Browse..."), caContainer);
-        connect(browseCa, &QPushButton::clicked, caContainer, [this, caContainer] {
-            const QString path = QFileDialog::getOpenFileName(
-                this, tr("Select custom CA certificate"), m_caPath->text(),
-                tr("PEM certificates (*.pem *.crt *.cer);;All files (*)"));
-            if (!path.isEmpty()) {
-                m_caPath->setText(path);
-            }
-        });
-        caRow->addWidget(m_caPath);
-        caRow->addWidget(browseCa);
-        form->addRow(tr("Custom CA (optional):"), caContainer);
 
         m_log = new QComboBox(this);
         m_log->setObjectName(QStringLiteral("syncLogSelector"));
@@ -521,8 +535,6 @@ public:
         }
         m_log->addItem(tr("Join a remote central log..."),
                        QStringLiteral("@remote"));
-        m_log->addItem(tr("Create a central log from a local log..."),
-                       QStringLiteral("@create"));
         const int savedLogIndex = m_log->findData(savedLogUuid);
         if (savedLogIndex >= 0) {
             m_log->setCurrentIndex(savedLogIndex);
@@ -531,16 +543,6 @@ public:
         }
         form->addRow(tr("Log to synchronize:"), m_log);
 
-        m_token = new QLineEdit(this);
-        m_token->setObjectName(QStringLiteral("syncAccessToken"));
-        m_token->setEchoMode(QLineEdit::Password);
-        m_token->setText(savedToken);
-        m_token->setPlaceholderText(tr("Enter access token"));
-        form->addRow(tr("Access token:"), m_token);
-        m_saveToken = new QCheckBox(tr("Save token in the system secret store"), this);
-        m_saveToken->setObjectName(QStringLiteral("saveSyncTokenCheck"));
-        m_saveToken->setChecked(!savedToken.isEmpty());
-        form->addRow(QString(), m_saveToken);
         m_autoStart = new QCheckBox(
             tr("Connect automatically at application startup"), this);
         m_autoStart->setObjectName(QStringLiteral("autoStartSyncClientCheck"));
@@ -549,10 +551,9 @@ public:
         layout->addLayout(form);
 
         auto *notice = new QLabel(
-            tr("A local log is retained when selected. To join a remote log, "
-               "choose the corresponding option; a local copy will be created "
-               "without changing existing logs. Saving a token requires the "
-               "operating system's secret store."),
+            tr("Stations that can reach this trusted LAN/VPN server receive "
+               "read/write access. Network traffic is not encrypted. A local "
+               "copy is retained when joining a central log."),
             this);
         notice->setWordWrap(true);
         layout->addWidget(notice);
@@ -579,20 +580,14 @@ public:
     }
     bool createRemote() const
     {
-        return m_log->currentData().toString() == QStringLiteral("@create");
+        return false;
     }
-    QString token() const { return m_token->text(); }
-    QString caPath() const { return m_caPath->text().trimmed(); }
-    bool saveToken() const { return m_saveToken->isChecked(); }
     bool autoStart() const { return m_autoStart->isChecked(); }
 
 private:
     QLineEdit *m_host = nullptr;
     QSpinBox *m_port = nullptr;
-    QLineEdit *m_caPath = nullptr;
     QComboBox *m_log = nullptr;
-    QLineEdit *m_token = nullptr;
-    QCheckBox *m_saveToken = nullptr;
     QCheckBox *m_autoStart = nullptr;
 };
 
@@ -928,6 +923,54 @@ QStringList defaultModes()
             QStringLiteral("FM")};
 }
 
+class RatePaceChart final : public QWidget {
+public:
+    explicit RatePaceChart(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("ratePaceChart"));
+        setMinimumHeight(64);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    void setSamples(const QVector<int> &samples)
+    {
+        m_samples = samples;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), palette().window());
+        const QRect area = rect().adjusted(4, 3, -4, -15);
+        if (area.width() <= 0 || area.height() <= 0 || m_samples.isEmpty()) {
+            return;
+        }
+        const int maxValue = qMax(1, *std::max_element(m_samples.cbegin(),
+                                                      m_samples.cend()));
+        const qreal slotWidth = static_cast<qreal>(area.width()) / m_samples.size();
+        painter.setPen(QPen(palette().mid().color(), 1));
+        painter.drawLine(area.bottomLeft(), area.bottomRight());
+        for (qsizetype index = 0; index < m_samples.size(); ++index) {
+            const qreal ratio = static_cast<qreal>(m_samples.at(index)) / maxValue;
+            const int height = qRound(ratio * (area.height() - 3));
+            const QRectF bar(area.left() + index * slotWidth + 1,
+                             area.bottom() - height, qMax<qreal>(1, slotWidth - 2),
+                             height);
+            painter.fillRect(bar, QColor(QStringLiteral("#20B2AA")));
+        }
+        painter.setPen(palette().text().color());
+        painter.drawText(rect().adjusted(4, 0, -4, 0),
+                         Qt::AlignBottom | Qt::AlignLeft,
+                         tr("QSO per 5 min — last hour"));
+    }
+
+private:
+    QVector<int> m_samples;
+};
+
 void selectAdjacentBandmapRow(QTableWidget *bandmap, int direction)
 {
     if (bandmap == nullptr || bandmap->rowCount() == 0 || direction == 0) {
@@ -1222,6 +1265,9 @@ QFrame#fkeyBar QPushButton:pressed { background: #FFFF00; }
 bool sameDupeKey(const QStringList &dupeKey, const Qso &qso, const QString &callsign,
                  const QString &band, const QString &mode)
 {
+    if (qso.invalid) {
+        return false;
+    }
     const QStringList key = dupeKey.isEmpty()
         ? QStringList{QStringLiteral("callsign"), QStringLiteral("band"),
                       QStringLiteral("mode")}
@@ -1403,6 +1449,12 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *importAction = contestMenu->addAction(tr("&Import YAML definition..."));
     connect(importAction, &QAction::triggered,
             this, &MainWindow::importContestDefinition);
+    auto *restoreDefinitionAction =
+        contestMenu->addAction(tr("Restore previous YAML definition..."));
+    restoreDefinitionAction->setObjectName(
+        QStringLiteral("restoreContestDefinitionVersionAction"));
+    connect(restoreDefinitionAction, &QAction::triggered,
+            this, &MainWindow::restoreContestDefinitionVersion);
     auto *operatingMenu = menuBar()->addMenu(tr("O&perating"));
     auto *runModeMenu = operatingMenu->addMenu(tr("Operating mode"));
     auto *runModeGroup = new QActionGroup(runModeMenu);
@@ -1426,6 +1478,11 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     connect(m_esmAction, &QAction::toggled, this, [](bool enabled) {
         QSettings().setValue(QStringLiteral("operating/esmEnabled"), enabled);
     });
+    auto *undoQsoAction = operatingMenu->addAction(tr("Undo last QSO change"));
+    undoQsoAction->setObjectName(QStringLiteral("undoLastQsoChangeAction"));
+    undoQsoAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Z")));
+    connect(undoQsoAction, &QAction::triggered,
+            this, &MainWindow::undoLastQsoChange);
     auto *allowDupeLoggingAction = operatingMenu->addAction(tr("Allow logging duplicate QSOs"));
     allowDupeLoggingAction->setObjectName(QStringLiteral("allowDupeLoggingAction"));
     allowDupeLoggingAction->setCheckable(true);
@@ -1621,6 +1678,81 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     nextSpotAction->setShortcutContext(Qt::WindowShortcut);
     connect(nextSpotAction, &QAction::triggered, this,
             [stepAndActivateSpot] { stepAndActivateSpot(1); });
+    auto *nextNewMultiplierAction =
+        operatingMenu->addAction(tr("Next bandmap spot with a new multiplier"));
+    nextNewMultiplierAction->setObjectName(
+        QStringLiteral("nextNewMultiplierSpotAction"));
+    nextNewMultiplierAction->setShortcut(
+        QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Down));
+    nextNewMultiplierAction->setShortcutContext(Qt::WindowShortcut);
+    connect(nextNewMultiplierAction, &QAction::triggered, this, [this] {
+        QTableWidget *bandmap =
+            (m_so2vToggle->isChecked() || m_so2rToggle->isChecked())
+                && currentEntryContext() == 0
+            ? m_radioABandmap : m_bandmap;
+        const int rowCount = bandmap->rowCount();
+        const int startRow = bandmap->currentRow();
+        const ContestDefinition *definition = activeDefinition();
+        if (rowCount == 0 || definition == nullptr
+            || definition->multipliers.isEmpty()) {
+            statusBar()->showMessage(
+                tr("No eligible multiplier spot is available."), 3000);
+            return;
+        }
+        const int contextIndex = currentEntryContext();
+        const QString currentMode =
+            m_modeSelectors[contextIndex]->currentText().trimmed().toUpper();
+        const auto resolver = multiplierResolver();
+        const ContestEngine engine;
+        for (int offset = 1; offset <= rowCount; ++offset) {
+            const int row = startRow < 0
+                ? offset - 1 : (startRow + offset) % rowCount;
+            const QTableWidgetItem *item = bandmap->item(row, 0);
+            if (item == nullptr) {
+                continue;
+            }
+            const Spot spot = m_spots.value(item->data(Qt::UserRole).toLongLong());
+            Qso candidate;
+            candidate.callsign = spot.callsign.trimmed().toUpper();
+            candidate.band = spot.band.trimmed().toLower();
+            candidate.mode = spot.mode.trimmed().isEmpty()
+                ? currentMode : spot.mode.trimmed().toUpper();
+            if (candidate.callsign.isEmpty() || candidate.band.isEmpty()) {
+                continue;
+            }
+            const bool duplicate = std::any_of(
+                m_logQsos.cbegin(), m_logQsos.cend(),
+                [definition, &candidate](const Qso &worked) {
+                    return !worked.invalid
+                        && sameDupeKey(definition->dupeKey, worked,
+                                       candidate.callsign, candidate.band,
+                                       candidate.mode);
+                });
+            if (duplicate) {
+                continue;
+            }
+            const QStringList keys = engine.multiplierKeys(
+                *definition, candidate, resolver);
+            if (std::none_of(keys.cbegin(), keys.cend(),
+                             [this](const QString &key) {
+                                 return !key.isEmpty()
+                                     && !m_workedMultiplierKeys.contains(key);
+                             })) {
+                continue;
+            }
+            bandmap->setCurrentCell(row, 0);
+            if (bandmap == m_radioABandmap) {
+                const int radio = m_so2rToggle->isChecked()
+                    ? 0 : m_activeRadioSelector->currentData().toInt();
+                activateSpotId(item->data(Qt::UserRole).toLongLong(), radio, 0);
+            } else {
+                activateSpot(row, 0);
+            }
+            return;
+        }
+        statusBar()->showMessage(
+            tr("No unworked new-multiplier spot matches the current filters."), 4000);
+    });
     operatingMenu->addAction(abortCwAction);
     operatingMenu->addSeparator();
     auto *editKeysMenu = new QMenu(tr("Edit function key message"), operatingMenu);
@@ -1649,6 +1781,11 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *backupAction = fileMenu->addAction(tr("Back up database..."));
     connect(backupAction, &QAction::triggered,
             this, &MainWindow::backupDatabase);
+    auto *automaticBackupAction =
+        fileMenu->addAction(tr("Automatic backup settings..."));
+    automaticBackupAction->setObjectName(QStringLiteral("automaticBackupSettingsAction"));
+    connect(automaticBackupAction, &QAction::triggered,
+            this, &MainWindow::configureAutomaticBackups);
     auto *supportDataMenu = fileMenu->addMenu(tr("Support data"));
     auto *callHistoryAction =
         supportDataMenu->addAction(tr("Call history file..."));
@@ -1781,6 +1918,12 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             });
         });
     });
+    auto *restoreSupportDataAction =
+        supportDataMenu->addAction(tr("Restore previous downloaded support data..."));
+    restoreSupportDataAction->setObjectName(
+        QStringLiteral("restoreSupportDataVersionAction"));
+    connect(restoreSupportDataAction, &QAction::triggered,
+            this, &MainWindow::restoreSupportDataVersion);
     auto *ctyDatAction =
         supportDataMenu->addAction(tr("wl_cty.dat from file..."));
     connect(ctyDatAction, &QAction::triggered,
@@ -1902,6 +2045,50 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_topStatus->setTextFormat(Qt::PlainText);
     layout->addWidget(m_topStatus);
 
+    auto *logFilters = new QHBoxLayout;
+    logFilters->setContentsMargins(0, 0, 0, 0);
+    logFilters->setSpacing(4);
+    m_logSearchEdit = new QLineEdit(central);
+    m_logSearchEdit->setObjectName(QStringLiteral("logSearchInput"));
+    m_logSearchEdit->setClearButtonEnabled(true);
+    m_logSearchEdit->setPlaceholderText(
+        tr("Search callsign or exchange"));
+    m_logBandFilter = new QComboBox(central);
+    m_logBandFilter->setObjectName(QStringLiteral("logBandFilter"));
+    m_logModeFilter = new QComboBox(central);
+    m_logModeFilter->setObjectName(QStringLiteral("logModeFilter"));
+    m_logValidityFilter = new QComboBox(central);
+    m_logValidityFilter->setObjectName(QStringLiteral("logValidityFilter"));
+    m_logValidityFilter->addItem(tr("All QSOs"), QStringLiteral("all"));
+    m_logValidityFilter->addItem(tr("Valid"), QStringLiteral("valid"));
+    m_logValidityFilter->addItem(tr("Invalid"), QStringLiteral("invalid"));
+    m_logFilterResultLabel = new QLabel(central);
+    m_logFilterResultLabel->setObjectName(QStringLiteral("logFilterResultCount"));
+    m_logFilterResultLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    logFilters->addWidget(m_logSearchEdit, 2);
+    logFilters->addWidget(m_logBandFilter);
+    logFilters->addWidget(m_logModeFilter);
+    logFilters->addWidget(m_logValidityFilter);
+    logFilters->addWidget(m_logFilterResultLabel, 1);
+    layout->addLayout(logFilters);
+
+    m_logFilterTimer = new QTimer(this);
+    m_logFilterTimer->setSingleShot(true);
+    m_logFilterTimer->setInterval(150);
+    connect(m_logFilterTimer, &QTimer::timeout,
+            this, &MainWindow::refreshRecentQsoTable);
+    connect(m_logSearchEdit, &QLineEdit::textChanged,
+            m_logFilterTimer, qOverload<>(&QTimer::start));
+    const auto refreshLogFilters = [this] {
+        refreshRecentQsoTable();
+    };
+    connect(m_logBandFilter, &QComboBox::currentIndexChanged,
+            this, refreshLogFilters);
+    connect(m_logModeFilter, &QComboBox::currentIndexChanged,
+            this, refreshLogFilters);
+    connect(m_logValidityFilter, &QComboBox::currentIndexChanged,
+            this, refreshLogFilters);
+
     m_recentQsos = new QTableWidget(0, 10, central);
     m_recentQsos->setObjectName(QStringLiteral("recentQsos"));
     m_recentQsos->setHorizontalHeaderLabels(
@@ -1926,7 +2113,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         " border-bottom: 1px solid #178F89; padding: 1px 4px; font-weight: bold; }"));
     m_recentQsos->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_recentQsos->horizontalHeader()->setStretchLastSection(false);
-    m_recentQsos->setToolTip(tr("Double-click a QSO to edit it."));
+    m_recentQsos->setToolTip(
+        tr("Double-click a QSO to edit it. Right-click to edit, invalidate, or restore."));
     connect(m_recentQsos, &QTableWidget::cellDoubleClicked,
             this, &MainWindow::editSelectedQso);
     m_recentQsos->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1937,12 +2125,25 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             return;
         }
         m_recentQsos->setCurrentCell(row, 0);
+        QString error;
+        const auto qso = m_repository.qsoById(
+            m_recentQsos->item(row, 0)->data(Qt::UserRole).toLongLong(), &error);
+        if (!error.isEmpty() || !qso.has_value()) {
+            QMessageBox::critical(
+                this, tr("Unable to load QSO"),
+                error.isEmpty() ? tr("The QSO no longer exists.") : error);
+            return;
+        }
         QMenu menu(this);
         QAction *editAction = menu.addAction(tr("Edit QSO..."));
+        QAction *invalidAction = menu.addAction(
+            qso->invalid ? tr("Restore QSO") : tr("Mark QSO invalid"));
         QAction *deleteAction = menu.addAction(tr("Delete QSO..."));
         QAction *selected = menu.exec(m_recentQsos->viewport()->mapToGlobal(position));
         if (selected == editAction) {
             editSelectedQso(row, 0);
+        } else if (selected == invalidAction) {
+            setSelectedQsoInvalid(row, !qso->invalid);
         } else if (selected == deleteAction) {
             deleteSelectedQso(row);
         }
@@ -2003,6 +2204,13 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         m_callsignEdits[vfo]->setFont(monoFont(18, true));
         m_callsignEdits[vfo]->installEventFilter(this);
         installUppercase(m_callsignEdits[vfo]);
+        m_callCompleterModels[vfo] = new QStringListModel(this);
+        m_callCompleters[vfo] = new QCompleter(m_callCompleterModels[vfo], this);
+        m_callCompleters[vfo]->setCaseSensitivity(Qt::CaseInsensitive);
+        m_callCompleters[vfo]->setCompletionMode(QCompleter::PopupCompletion);
+        m_callCompleters[vfo]->setFilterMode(Qt::MatchStartsWith);
+        m_callCompleters[vfo]->setMaxVisibleItems(12);
+        m_callsignEdits[vfo]->setCompleter(m_callCompleters[vfo]);
         fieldsRow->addWidget(fieldColumn(tr("Band"), m_bandSelectors[vfo], entryPanel));
         fieldsRow->addWidget(fieldColumn(tr("Mode"), m_modeSelectors[vfo], entryPanel));
         fieldsRow->addWidget(fieldColumn(tr("Call"), m_callsignEdits[vfo], entryPanel), 3);
@@ -2067,6 +2275,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                         refreshBandmap();
                         refreshScoreSummary();
                     }
+                    if (vfo == currentEntryContext()) {
+                        updateNetworkOperatingState();
+                    }
                 });
         connect(m_modeSelectors[vfo], &QComboBox::currentTextChanged,
                 this, [this, vfo] {
@@ -2078,6 +2289,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                     updateSentReportForMode(vfo);
                     updateEntryHeaders();
                     updateSerialFields();
+                    if (vfo == currentEntryContext()) {
+                        updateNetworkOperatingState();
+                    }
                 });
         connect(m_focusButtons[vfo], &QPushButton::clicked,
                 this, [this, vfo] { focusVfo(vfo); });
@@ -2452,6 +2666,36 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 m_greylineWidget, qOverload<>(&QWidget::update));
     }
 
+    auto *networkStationsPane = createPane(QStringLiteral("networkStationsPane"));
+    m_networkStationsStatus = new QLabel(networkStationsPane);
+    m_networkStationsStatus->setObjectName(QStringLiteral("networkStationsStatus"));
+    m_networkStationsStatus->setWordWrap(true);
+    networkStationsPane->layout()->addWidget(m_networkStationsStatus);
+    m_networkStationsTable = new QTableWidget(0, 4, networkStationsPane);
+    m_networkStationsTable->setObjectName(QStringLiteral("networkStationsTable"));
+    m_networkStationsTable->setHorizontalHeaderLabels(
+        {tr("Station"), tr("Band"), tr("Mode"), tr("State")});
+    m_networkStationsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_networkStationsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_networkStationsTable->setShowGrid(false);
+    m_networkStationsTable->verticalHeader()->hide();
+    m_networkStationsTable->horizontalHeader()->setStretchLastSection(true);
+    networkStationsPane->layout()->addWidget(m_networkStationsTable);
+    m_networkStationsDock = createPaneDock(
+        tr("Network stations"), QStringLiteral("networkStationsDock"),
+        networkStationsPane);
+    m_networkStationsTimer = new QTimer(this);
+    m_networkStationsTimer->setInterval(5000);
+    connect(m_networkStationsTimer, &QTimer::timeout,
+            this, &MainWindow::refreshNetworkStations);
+    connect(m_networkStationsDock, &QDockWidget::visibilityChanged,
+            this, [this](bool visible) {
+                if (visible) {
+                    refreshNetworkStations();
+                }
+            });
+    m_networkStationsTimer->start();
+
     // Rate.
     auto *ratePane = createPane(QStringLiteral("ratePane"));
     m_rateLabel = new QLabel(ratePane);
@@ -2461,6 +2705,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_rateLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     m_rateLabel->setMargin(4);
     ratePane->layout()->addWidget(m_rateLabel);
+    auto *rateChart = new RatePaceChart(ratePane);
+    m_rateChart = rateChart;
+    ratePane->layout()->addWidget(rateChart);
     m_rateDock = createPaneDock(tr("Rate"), QStringLiteral("rateDock"), ratePane);
 
     // Summary.
@@ -2575,6 +2822,115 @@ void MainWindow::recordNetworkContact()
     }
 }
 
+void MainWindow::updateNetworkOperatingState()
+{
+    if (!m_syncClient || m_activeEntryContext < 0 || m_activeEntryContext > 1
+        || m_bandSelectors[m_activeEntryContext] == nullptr
+        || m_modeSelectors[m_activeEntryContext] == nullptr) {
+        return;
+    }
+    m_syncClient->setOperatingState(
+        m_bandSelectors[m_activeEntryContext]->currentText().trimmed(),
+        m_modeSelectors[m_activeEntryContext]->currentText().trimmed().toUpper());
+}
+
+void MainWindow::refreshNetworkStations()
+{
+    if (m_networkStationsDock == nullptr || !m_networkStationsDock->isVisible()
+        || m_networkStationsTable == nullptr || m_networkStationsStatus == nullptr) {
+        return;
+    }
+    const Contest *contest = activeContest();
+    const QString logUuid = contest != nullptr && !contest->logUuid.isEmpty()
+        ? contest->logUuid
+        : QSettings().value(QStringLiteral("network/client/logUuid")).toString();
+    if (logUuid.isEmpty()) {
+        m_networkStationsTable->setRowCount(0);
+        m_networkStationsStatus->setText(tr("No synchronized log selected."));
+        return;
+    }
+    if (m_hostServer) {
+        QJsonArray stations = m_hostServer->connectedStations(logUuid);
+        if (contest != nullptr && contest->logUuid == logUuid) {
+            const QString band =
+                m_bandSelectors[currentEntryContext()]->currentText().trimmed();
+            const QString mode =
+                m_modeSelectors[currentEntryContext()]->currentText().trimmed();
+            stations.append(QJsonObject{
+                {QStringLiteral("computer_name"), QHostInfo::localHostName()},
+                {QStringLiteral("station_callsign"), m_station.callsign},
+                {QStringLiteral("operating_band"), band},
+                {QStringLiteral("operating_mode"), mode},
+                {QStringLiteral("operating_state_updated_utc"),
+                 QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}
+            });
+        }
+        showNetworkStations(stations);
+        return;
+    }
+    if (m_syncClient && m_syncClient->state() == SyncClient::State::Ready
+        && QSettings().value(QStringLiteral("network/client/logUuid")).toString()
+            == logUuid) {
+        if (m_networkStationsRequestId.isEmpty()) {
+            m_networkStationsRequestId = m_syncClient->getStatus();
+        }
+        if (m_networkStationsRequestId.isEmpty()) {
+            m_networkStationsStatus->setText(
+                tr("Unable to request the connected station list."));
+        }
+        return;
+    }
+    m_networkStationsRequestId.clear();
+    m_networkStationsTable->setRowCount(0);
+    m_networkStationsStatus->setText(
+        tr("Connected stations are unavailable while disconnected."));
+}
+
+void MainWindow::showNetworkStations(const QJsonArray &stations)
+{
+    m_networkStationsTable->setSortingEnabled(false);
+    m_networkStationsTable->setRowCount(stations.size());
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (int row = 0; row < stations.size(); ++row) {
+        const QJsonObject station = stations.at(row).toObject();
+        const QString computerName =
+            station.value(QStringLiteral("computer_name")).toString().trimmed();
+        const QString stationCallsign =
+            station.value(QStringLiteral("station_callsign")).toString().trimmed();
+        const QString label = !computerName.isEmpty()
+            ? computerName
+            : (stationCallsign.isEmpty() ? tr("Unknown station") : stationCallsign);
+        const QString band = station.value(QStringLiteral("operating_band"))
+                                 .toString().trimmed();
+        const QString mode = station.value(QStringLiteral("operating_mode"))
+                                 .toString().trimmed();
+        const QDateTime updated = QDateTime::fromString(
+            station.value(QStringLiteral("operating_state_updated_utc")).toString(),
+            Qt::ISODateWithMs).toUTC();
+        QString state;
+        if (!updated.isValid()) {
+            state = tr("No radio data");
+        } else if (isStationOperatingStateStale(updated, now)) {
+            state = tr("Stale");
+        } else {
+            state = tr("Connected");
+        }
+        const QStringList values{
+            label, band.isEmpty() ? tr("—") : band,
+            mode.isEmpty() ? tr("—") : mode, state
+        };
+        for (int column = 0; column < values.size(); ++column) {
+            m_networkStationsTable->setItem(
+                row, column, new QTableWidgetItem(values.at(column)));
+        }
+    }
+    m_networkStationsTable->setSortingEnabled(true);
+    m_networkStationsTable->sortItems(0);
+    m_networkStationsTable->resizeColumnsToContents();
+    m_networkStationsStatus->setText(
+        tr("Connected stations: %1").arg(stations.size()));
+}
+
 void MainWindow::autoStartNetworkClient()
 {
     QSettings settings;
@@ -2588,17 +2944,13 @@ void MainWindow::autoStartNetworkClient()
         settings.value(QStringLiteral("network/client/logUuid")).toString();
     QString error;
     const QString stationUuid = m_repository.localStationUuid(&error);
-    QString token;
-    if (host.isEmpty() || port < 1 || port > 65535 || logUuid.isEmpty()
-        || stationUuid.isEmpty() || !error.isEmpty()
-        || !SecretStore::read(clientSecretKey(
-                host, static_cast<quint16>(port), stationUuid), &token, &error)
-        || token.size() < 32) {
+    QHostAddress serverAddress;
+    if (host.isEmpty() || !serverAddress.setAddress(host)
+        || port < 1 || port > 65535 || logUuid.isEmpty()
+        || stationUuid.isEmpty() || !error.isEmpty()) {
         statusBar()->showMessage(
-            tr("Automatic network connection was not started: %1")
-                .arg(error.isEmpty()
-                         ? tr("saved configuration or system token is unavailable.")
-                         : error),
+            tr("Automatic network connection was not started: saved IP, port, "
+               "log or station identity is invalid. %1").arg(error),
             15000);
         return;
     }
@@ -2612,19 +2964,6 @@ void MainWindow::autoStartNetworkClient()
             15000);
         return;
     }
-    const QString caPath =
-        settings.value(QStringLiteral("network/client/caPath")).toString();
-    QList<QSslCertificate> caCertificates;
-    if (!caPath.isEmpty()) {
-        caCertificates = QSslCertificate::fromPath(caPath);
-        if (caCertificates.isEmpty()) {
-            statusBar()->showMessage(
-                tr("Automatic network connection was not started: the custom CA file "
-                   "is invalid."),
-                15000);
-            return;
-        }
-    }
     if (!m_repository.setSynchronizationEnabled(logUuid, true, &error)) {
         statusBar()->showMessage(
             tr("Automatic network connection was not started: %1").arg(error), 15000);
@@ -2635,6 +2974,11 @@ void MainWindow::autoStartNetworkClient()
             [this](SyncClient::State state, const QString &message) {
                 if (state == SyncClient::State::Ready) {
                     recordNetworkContact();
+                    updateNetworkOperatingState();
+                    refreshNetworkStations();
+                } else if (state == SyncClient::State::Disconnected
+                           || state == SyncClient::State::Error) {
+                    refreshNetworkStations();
                 }
                 if (!message.isEmpty()) {
                     statusBar()->showMessage(message, 10000);
@@ -2650,26 +2994,40 @@ void MainWindow::autoStartNetworkClient()
                 }
             });
     connect(m_syncClient.get(), &SyncClient::responseReceived, this,
-            [this](const QString &, const QString &, const QJsonObject &) {
+            [this](const QString &requestId, const QString &type,
+                   const QJsonObject &payload) {
                 recordNetworkContact();
+                if (requestId == m_networkStationsRequestId) {
+                    m_networkStationsRequestId.clear();
+                    const QJsonValue connected =
+                        payload.value(QStringLiteral("connected_stations"));
+                    if (type == QStringLiteral("status") && connected.isArray()) {
+                        showNetworkStations(connected.toArray());
+                    }
+                }
             });
     connect(m_syncClient.get(), &SyncClient::requestFailed, this,
-            [this](const QString &, const QString &code,
+            [this](const QString &requestId, const QString &code,
                    const QString &message, bool) {
+                if (requestId == m_networkStationsRequestId) {
+                    m_networkStationsRequestId.clear();
+                    m_networkStationsStatus->setText(
+                        tr("Station list request failed: %1").arg(message));
+                }
                 statusBar()->showMessage(
                     tr("Network request failed (%1): %2").arg(code, message), 15000);
             });
     SyncClientConfiguration configuration;
     configuration.host = host;
-    configuration.peerName = host;
     configuration.port = static_cast<quint16>(port);
     configuration.stationUuid = stationUuid;
+    configuration.computerName = QHostInfo::localHostName();
     configuration.stationCallsign = m_station.callsign;
     configuration.operatorName = m_station.operatorName;
-    configuration.token = token;
+    configuration.trustedNetworkMode = true;
     configuration.logUuid = logUuid;
-    configuration.caCertificates = caCertificates;
     m_syncClient->connectToServer(configuration);
+    updateNetworkOperatingState();
 }
 
 void MainWindow::autoStartHostServer()
@@ -2682,58 +3040,15 @@ void MainWindow::autoStartHostServer()
     const QString address =
         settings.value(QStringLiteral("network/host/address")).toString().trimmed();
     const int port = settings.value(QStringLiteral("network/host/port"), 7443).toInt();
-    const QString certificate =
-        settings.value(QStringLiteral("network/host/certificate")).toString();
-    const QString privateKey =
-        settings.value(QStringLiteral("network/host/privateKey")).toString();
-    const QString credentialsPath =
-        settings.value(QStringLiteral("network/host/tokens")).toString();
+    const int maximumConnections =
+        settings.value(QStringLiteral("network/host/maxConnections"), 16).toInt();
     QString error;
-    const QString stationUuid = m_repository.localStationUuid(&error);
-    if (address.isEmpty() || port < 1 || port > 65535
-        || certificate.isEmpty() || privateKey.isEmpty()
-        || credentialsPath.isEmpty() || stationUuid.isEmpty() || !error.isEmpty()) {
+    QHostAddress bindAddress;
+    if (address.isEmpty() || !bindAddress.setAddress(address)
+        || port < 1 || port > 65535) {
         statusBar()->showMessage(
-            tr("Automatic server startup was not possible: saved settings are incomplete."),
-            15000);
-        return;
-    }
-    QFile credentialsFile(credentialsPath);
-    if (!credentialsFile.open(QIODevice::ReadOnly)
-        || credentialsFile.size() <= 0 || credentialsFile.size() > 1024 * 1024) {
-        statusBar()->showMessage(
-            tr("Automatic server startup was not possible: %1")
-                .arg(credentialsFile.errorString().isEmpty()
-                         ? tr("the credentials file is invalid.")
-                         : credentialsFile.errorString()),
-            15000);
-        return;
-    }
-    const QJsonDocument document = QJsonDocument::fromJson(credentialsFile.readAll());
-    const QJsonArray stations = document.isObject()
-        ? document.object().value(QStringLiteral("stations")).toArray()
-        : QJsonArray{};
-    const auto station = std::find_if(
-        stations.cbegin(), stations.cend(), [&stationUuid](const QJsonValue &value) {
-            return value.isObject()
-                && value.toObject().value(QStringLiteral("station_uuid")).toString()
-                    == stationUuid;
-        });
-    if (station == stations.cend()) {
-        statusBar()->showMessage(
-            tr("Automatic server startup was not possible: credentials for this "
-               "installation are missing."),
-            15000);
-        return;
-    }
-    const QJsonArray permissions =
-        station->toObject().value(QStringLiteral("permissions")).toArray();
-    if (!permissions.contains(QStringLiteral("admin"))
-        || !permissions.contains(QStringLiteral("read"))
-        || !permissions.contains(QStringLiteral("write"))) {
-        statusBar()->showMessage(
-            tr("Automatic server startup was not possible: this station needs "
-               "read, write and admin permissions."),
+            tr("Automatic server startup was not possible: saved bind address or "
+               "port is invalid."),
             15000);
         return;
     }
@@ -2747,8 +3062,8 @@ void MainWindow::autoStartHostServer()
         return;
     }
     auto server = std::make_unique<SyncServer>(*repository);
-    if (!server->listen(address, static_cast<quint16>(port), certificate,
-                        privateKey, credentialsPath, 16, &error)) {
+    if (!server->listenTrustedNetwork(address, static_cast<quint16>(port),
+                                     maximumConnections, &error)) {
         statusBar()->showMessage(
             tr("Automatic server startup failed: %1").arg(error), 15000);
         return;
@@ -2787,6 +3102,7 @@ void MainWindow::applyDefaultDockLayout()
     addDockWidget(Qt::LeftDockWidgetArea, m_radioABandmapDock);
     splitDockWidget(m_checkCallDock, m_radioABandmapDock, Qt::Horizontal);
     addDockWidget(Qt::LeftDockWidgetArea, m_greylineDock);
+    addDockWidget(Qt::LeftDockWidgetArea, m_networkStationsDock);
     tabifyDockWidget(m_contestInfoDock, m_greylineDock);
     addDockWidget(Qt::RightDockWidgetArea, m_bandmapDock);
     addDockWidget(Qt::RightDockWidgetArea, m_rateDock);
@@ -2795,12 +3111,14 @@ void MainWindow::applyDefaultDockLayout()
     splitDockWidget(m_summaryDock, m_clusterDock, Qt::Vertical);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock,
                               m_radioABandmapDock, m_greylineDock,
+                              m_networkStationsDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         dock->setFloating(false);
         dock->show();
     }
     m_radioABandmapDock->hide();
+    m_networkStationsDock->hide();
     m_contestInfoDock->raise();
     resizeDocks({m_checkCallDock, m_radioABandmapDock, m_bandmapDock, m_rateDock},
                 {230, 280, 250, 400}, Qt::Horizontal);
@@ -2815,7 +3133,8 @@ void MainWindow::createWindowMenu()
     QMenu *windowMenu = menuBar()->addMenu(tr("&Window"));
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_bandmapDock,
                               m_clusterDock, m_rateDock, m_summaryDock,
-                              m_contestInfoDock, m_greylineDock}) {
+                              m_contestInfoDock, m_greylineDock,
+                              m_networkStationsDock}) {
         windowMenu->addAction(dock->toggleViewAction());
     }
     windowMenu->addSeparator();
@@ -2860,6 +3179,7 @@ void MainWindow::resetWindowLayout()
     resize(1600, 960);
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock,
                               m_radioABandmapDock, m_greylineDock,
+                              m_networkStationsDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
                               m_summaryDock, m_clusterDock}) {
         removeDockWidget(dock);
@@ -2911,42 +3231,13 @@ void MainWindow::configureHostMode()
     port->setRange(1, 65535);
     port->setValue(settings.value(QStringLiteral("network/host/port"), 7443).toInt());
     form->addRow(tr("TCP port:"), port);
+    auto *maximumConnections = new QSpinBox(&dialog);
+    maximumConnections->setObjectName(QStringLiteral("hostMaximumConnections"));
+    maximumConnections->setRange(1, 256);
+    maximumConnections->setValue(
+        settings.value(QStringLiteral("network/host/maxConnections"), 16).toInt());
+    form->addRow(tr("Maximum connected stations:"), maximumConnections);
 
-    const auto addFileRow = [&dialog, form](
-                                const QString &label, const QString &objectName,
-                                const QString &setting, const QString &filter) {
-        auto *container = new QWidget(&dialog);
-        auto *row = new QHBoxLayout(container);
-        row->setContentsMargins(0, 0, 0, 0);
-        auto *path = new QLineEdit(
-            QSettings().value(setting).toString(), container);
-        path->setObjectName(objectName);
-        auto *browse = new QPushButton(QObject::tr("Browse..."), container);
-        QObject::connect(browse, &QPushButton::clicked, container,
-                         [path, &dialog, filter] {
-                             const QString selected = QFileDialog::getOpenFileName(
-                                 &dialog, QObject::tr("Select server file"),
-                                 path->text(), filter);
-                             if (!selected.isEmpty()) {
-                                 path->setText(selected);
-                             }
-                         });
-        row->addWidget(path);
-        row->addWidget(browse);
-        form->addRow(label, container);
-        return path;
-    };
-    auto *certificate = addFileRow(
-        tr("TLS certificate (PEM):"), QStringLiteral("hostTlsCertificate"),
-        QStringLiteral("network/host/certificate"),
-        tr("PEM certificates (*.pem *.crt);;All files (*)"));
-    auto *privateKey = addFileRow(
-        tr("Unencrypted RSA key (PEM):"), QStringLiteral("hostTlsPrivateKey"),
-        QStringLiteral("network/host/privateKey"),
-        tr("PEM private keys (*.pem *.key);;All files (*)"));
-    auto *tokens = addFileRow(
-        tr("Station credentials JSON:"), QStringLiteral("hostStationCredentials"),
-        QStringLiteral("network/host/tokens"), tr("JSON files (*.json);;All files (*)"));
     layout->addLayout(form);
     auto *autoStartHost = new QCheckBox(
         tr("Start the central server automatically at application startup"), &dialog);
@@ -2955,10 +3246,10 @@ void MainWindow::configureHostMode()
         settings.value(QStringLiteral("network/host/autoStart"), false).toBool());
     layout->addWidget(autoStartHost);
     auto *notice = new QLabel(
-        tr("This station will host the central TLS server. Its credentials file "
-           "must contain this installation's station UUID with read, write and "
-           "admin permissions. The server database is stored in the application "
-           "data directory."),
+        tr("This server accepts any station that can reach the selected network "
+           "interface. Traffic is not encrypted; use only on a trusted LAN/VPN. "
+           "Clients receive read/write access. The server database is stored in "
+           "the application data directory."),
         &dialog);
     notice->setWordWrap(true);
     layout->addWidget(notice);
@@ -2973,54 +3264,10 @@ void MainWindow::configureHostMode()
         return;
     }
     const QString bindAddress = address->text().trimmed();
-    const QString certificatePath = certificate->text().trimmed();
-    const QString keyPath = privateKey->text().trimmed();
-    const QString tokenPath = tokens->text().trimmed();
-    if (bindAddress.isEmpty() || certificatePath.isEmpty() || keyPath.isEmpty()
-        || tokenPath.isEmpty()) {
-        QMessageBox::warning(this, tr("Incomplete server settings"),
-                             tr("Enter the bind address and select the TLS certificate, "
-                                "private key and station credentials file."));
-        return;
-    }
-
-    const QString stationUuid = m_repository.localStationUuid(&error);
-    if (stationUuid.isEmpty() || !error.isEmpty()) {
-        QMessageBox::critical(this, tr("Unable to identify this station"), error);
-        return;
-    }
-    QFile tokenFile(tokenPath);
-    if (!tokenFile.open(QIODevice::ReadOnly) || tokenFile.size() <= 0
-        || tokenFile.size() > 1024 * 1024) {
-        QMessageBox::critical(
-            this, tr("Unable to read station credentials"),
-            tokenFile.errorString().isEmpty()
-                ? tr("The credentials file size is invalid.")
-                : tokenFile.errorString());
-        return;
-    }
-    const QJsonDocument credentialsDocument =
-        QJsonDocument::fromJson(tokenFile.readAll());
-    const QJsonArray stations = credentialsDocument.isObject()
-        ? credentialsDocument.object().value(QStringLiteral("stations")).toArray()
-        : QJsonArray{};
-    const auto stationCredential = std::find_if(
-        stations.cbegin(), stations.cend(), [&stationUuid](const QJsonValue &value) {
-            return value.isObject()
-                && value.toObject().value(QStringLiteral("station_uuid")).toString()
-                    == stationUuid;
-        });
-    if (stationCredential == stations.cend()
-        || !stationCredential->toObject().value(QStringLiteral("permissions"))
-                .toArray().contains(QStringLiteral("admin"))
-        || !stationCredential->toObject().value(QStringLiteral("permissions"))
-                .toArray().contains(QStringLiteral("read"))
-        || !stationCredential->toObject().value(QStringLiteral("permissions"))
-                .toArray().contains(QStringLiteral("write"))) {
-        QMessageBox::critical(
-            this, tr("Host credentials required"),
-            tr("The credentials file must include this station (%1) with read, "
-               "write and admin permissions.").arg(stationUuid));
+    QHostAddress hostAddress;
+    if (bindAddress.isEmpty() || !hostAddress.setAddress(bindAddress)) {
+        QMessageBox::warning(this, tr("Invalid listen address"),
+                             tr("Enter a numeric IPv4 or IPv6 bind address."));
         return;
     }
 
@@ -3033,17 +3280,17 @@ void MainWindow::configureHostMode()
         return;
     }
     auto server = std::make_unique<SyncServer>(*repository);
-    if (!server->listen(bindAddress, static_cast<quint16>(port->value()),
-                        certificatePath, keyPath, tokenPath, 16, &error)) {
+    if (!server->listenTrustedNetwork(
+            bindAddress, static_cast<quint16>(port->value()),
+            maximumConnections->value(), &error)) {
         QMessageBox::critical(this, tr("Unable to start central server"), error);
         return;
     }
 
     settings.setValue(QStringLiteral("network/host/address"), bindAddress);
     settings.setValue(QStringLiteral("network/host/port"), port->value());
-    settings.setValue(QStringLiteral("network/host/certificate"), certificatePath);
-    settings.setValue(QStringLiteral("network/host/privateKey"), keyPath);
-    settings.setValue(QStringLiteral("network/host/tokens"), tokenPath);
+    settings.setValue(QStringLiteral("network/host/maxConnections"),
+                      maximumConnections->value());
     settings.setValue(QStringLiteral("network/host/autoStart"),
                       autoStartHost->isChecked());
     settings.sync();
@@ -3497,47 +3744,19 @@ void MainWindow::configureNetworkConnection()
     const QString defaultLogUuid = active != nullptr && !active->logUuid.isEmpty()
         ? active->logUuid
         : (connectableLogs.isEmpty() ? QString() : connectableLogs.first().logUuid);
-    const QString stationUuid = m_repository.localStationUuid(&error);
-    if (stationUuid.isEmpty() || !error.isEmpty()) {
-        QMessageBox::critical(this, tr("Unable to identify this station"), error);
-        return;
-    }
     const QString savedHost =
         settings.value(QStringLiteral("network/client/host")).toString();
     const quint16 savedPort = static_cast<quint16>(
         settings.value(QStringLiteral("network/client/port"), 7443).toInt());
-    QString savedToken;
-    const QString savedSecretKey =
-        clientSecretKey(savedHost, savedPort, stationUuid);
-    if (!savedHost.isEmpty()
-        && !SecretStore::read(savedSecretKey, &savedToken, &error)) {
-        statusBar()->showMessage(
-            tr("Saved token could not be read from the system secret store: %1")
-                .arg(error),
-            12000);
-        error.clear();
-    }
     SyncConnectionDialog dialog(
         connectableLogs,
         savedHost, savedPort,
         settings.value(QStringLiteral("network/client/logUuid"),
                        defaultLogUuid).toString(),
-        settings.value(QStringLiteral("network/client/caPath")).toString(),
-        savedToken,
         settings.value(QStringLiteral("network/client/autoStart"), false).toBool(),
         this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
-    }
-    QList<QSslCertificate> customCaCertificates;
-    if (!dialog.caPath().isEmpty()) {
-        customCaCertificates = QSslCertificate::fromPath(dialog.caPath());
-        if (customCaCertificates.isEmpty()) {
-            QMessageBox::critical(
-                this, tr("Invalid custom CA certificate"),
-                tr("The selected file does not contain a readable PEM certificate."));
-            return;
-        }
     }
     if (dialog.autoStart() && (dialog.joinRemote() || dialog.createRemote())) {
         QMessageBox::warning(
@@ -3546,14 +3765,13 @@ void MainWindow::configureNetworkConnection()
                "Join or create the central log first, then enable automatic startup."));
         return;
     }
-    if (dialog.host().isEmpty()
+    QHostAddress serverAddress;
+    if (dialog.host().isEmpty() || !serverAddress.setAddress(dialog.host())
         || (!dialog.joinRemote() && !dialog.createRemote()
-            && dialog.logUuid().isEmpty())
-        || dialog.token().size() < 32) {
+            && dialog.logUuid().isEmpty())) {
         QMessageBox::warning(
             this, tr("Invalid network settings"),
-            tr("Enter a server host, choose a local or remote log and provide a "
-               "token of at least 32 characters."));
+            tr("Enter a valid server IP address and choose a local or remote log."));
         return;
     }
     QString definitionYaml;
@@ -3577,28 +3795,12 @@ void MainWindow::configureNetworkConnection()
         }
     }
 
-    const QString selectedSecretKey =
-        clientSecretKey(dialog.host(), dialog.port(), stationUuid);
-    if (dialog.saveToken()) {
-        if (!SecretStore::write(selectedSecretKey, dialog.token(), &error)) {
-            QMessageBox::critical(this, tr("Unable to save access token"), error);
-            return;
-        }
-    } else if (selectedSecretKey == savedSecretKey
-               && !savedToken.isEmpty()
-               && !SecretStore::remove(savedSecretKey, &error)) {
-        QMessageBox::critical(this, tr("Unable to remove saved access token"), error);
-        return;
-    }
-
     settings.setValue(QStringLiteral("network/client/host"), dialog.host());
     settings.setValue(QStringLiteral("network/client/port"), dialog.port());
-    settings.setValue(QStringLiteral("network/client/caPath"), dialog.caPath());
     settings.setValue(QStringLiteral("network/client/autoStart"), dialog.autoStart());
     if (!dialog.joinRemote() && !dialog.createRemote()) {
         settings.setValue(QStringLiteral("network/client/logUuid"), dialog.logUuid());
     }
-    settings.remove(QStringLiteral("network/client/token"));
     settings.sync();
     if (settings.status() != QSettings::NoError) {
         QMessageBox::critical(
@@ -3638,6 +3840,11 @@ void MainWindow::configureNetworkConnection()
                 this, [this](SyncClient::State state, const QString &message) {
                     if (state == SyncClient::State::Ready) {
                         recordNetworkContact();
+                        updateNetworkOperatingState();
+                        refreshNetworkStations();
+                    } else if (state == SyncClient::State::Disconnected
+                               || state == SyncClient::State::Error) {
+                        refreshNetworkStations();
                     }
                     if (m_joiningRemoteLog
                         && (state == SyncClient::State::Error
@@ -4118,6 +4325,11 @@ void MainWindow::configureNetworkConnection()
         connect(m_syncClient.get(), &SyncClient::requestFailed,
         this, [this](const QString &requestId, const QString &code,
                      const QString &message, bool retryable) {
+                    if (requestId == m_networkStationsRequestId) {
+                        m_networkStationsRequestId.clear();
+                        m_networkStationsStatus->setText(
+                            tr("Station list request failed: %1").arg(message));
+                    }
                     if (requestId == m_pendingSerialHistoryRequestId) {
                         m_pendingSerialHistoryRequestId.clear();
                         m_creatingRemoteLog = false;
@@ -4210,6 +4422,19 @@ void MainWindow::configureNetworkConnection()
                 this, [this](const QString &requestId, const QString &type,
                              const QJsonObject &payload) {
                     recordNetworkContact();
+                    if (requestId == m_networkStationsRequestId) {
+                        m_networkStationsRequestId.clear();
+                        const QJsonValue connected =
+                            payload.value(QStringLiteral("connected_stations"));
+                        if (type == QStringLiteral("status")
+                            && connected.isArray()) {
+                            showNetworkStations(connected.toArray());
+                        } else {
+                            m_networkStationsTable->setRowCount(0);
+                            m_networkStationsStatus->setText(
+                                tr("The server returned an invalid station list."));
+                        }
+                    }
                     if (type == QStringLiteral("log_created")
                         && m_creatingRemoteLog) {
                         const QString logUuid =
@@ -4641,23 +4866,28 @@ void MainWindow::configureNetworkConnection()
                 });
     }
 
+    const QString stationUuid = m_repository.localStationUuid(&error);
+    if (stationUuid.isEmpty() || !error.isEmpty()) {
+        QMessageBox::critical(this, tr("Unable to identify this station"), error);
+        return;
+    }
     SyncClientConfiguration configuration;
     configuration.host = dialog.host();
     configuration.port = dialog.port();
-    configuration.peerName = dialog.host();
     configuration.stationUuid = stationUuid;
+    configuration.computerName = QHostInfo::localHostName();
     configuration.stationCallsign = m_station.callsign;
     configuration.operatorName = m_station.operatorName;
-    configuration.token = dialog.token();
+    configuration.trustedNetworkMode = true;
     configuration.logUuid = dialog.joinRemote() || dialog.createRemote()
         ? QString() : dialog.logUuid();
-    configuration.caCertificates = customCaCertificates;
     if (!definitionYaml.trimmed().isEmpty()) {
         configuration.contestDefinitionSha256 = QString::fromLatin1(
             QCryptographicHash::hash(definitionYaml.toUtf8(),
                                      QCryptographicHash::Sha256).toHex());
     }
     m_syncClient->connectToServer(configuration);
+    updateNetworkOperatingState();
     if (!dialog.joinRemote() && !dialog.createRemote()
         && !m_syncClient->startSynchronization(m_repository, &error)) {
         m_syncClient->disconnectFromServer();
@@ -4667,8 +4897,8 @@ void MainWindow::configureNetworkConnection()
     statusBar()->showMessage(
         dialog.joinRemote()
             || dialog.createRemote()
-            ? tr("Connecting securely to discover accessible central logs.")
-            : tr("Connecting to central log %1 over verified TLS.")
+            ? tr("Connecting over the trusted network to discover central logs.")
+            : tr("Connecting over the trusted network to central log %1.")
                   .arg(dialog.logUuid()),
         10000);
 }
@@ -4785,9 +5015,10 @@ void MainWindow::showNetworkStatus()
     layout->addWidget(stationsStatus);
     auto *stations = new QTableWidget(&dialog);
     stations->setObjectName(QStringLiteral("connectedStationsTable"));
-    stations->setColumnCount(4);
+    stations->setColumnCount(6);
     stations->setHorizontalHeaderLabels(
-        {tr("Computer"), tr("Station callsign"), tr("Operator"), tr("State")});
+        {tr("Computer"), tr("Station callsign"), tr("Operator"),
+         tr("Band"), tr("Mode"), tr("State")});
     stations->setEditTriggers(QAbstractItemView::NoEditTriggers);
     stations->setSelectionBehavior(QAbstractItemView::SelectRows);
     stations->horizontalHeader()->setStretchLastSection(true);
@@ -4816,10 +5047,16 @@ void MainWindow::showNetworkStatus()
     layout->addWidget(serialStatus);
 
     auto *buttons = new QHBoxLayout;
+    auto *syncRunStatus = new QLabel(
+        tr("No manual synchronization run in this window."), &dialog);
+    syncRunStatus->setObjectName(QStringLiteral("syncRunStatus"));
+    layout->addWidget(syncRunStatus);
     auto *refresh = new QPushButton(tr("Refresh"), &dialog);
     refresh->setObjectName(QStringLiteral("refreshNetworkStatusButton"));
     auto *syncNow = new QPushButton(tr("Sync now"), &dialog);
     syncNow->setObjectName(QStringLiteral("syncNowButton"));
+    auto *checkConsistency = new QPushButton(tr("Check consistency"), &dialog);
+    checkConsistency->setObjectName(QStringLiteral("checkConsistencyButton"));
     auto *serverMetrics = new QPushButton(tr("Server metrics..."), &dialog);
     serverMetrics->setObjectName(QStringLiteral("serverMetricsButton"));
     auto *adminSerials = new QPushButton(tr("Admin serials..."), &dialog);
@@ -4834,6 +5071,7 @@ void MainWindow::showNetworkStatus()
     auto *close = new QPushButton(tr("Close"), &dialog);
     buttons->addWidget(refresh);
     buttons->addWidget(syncNow);
+    buttons->addWidget(checkConsistency);
     buttons->addWidget(serverMetrics);
     buttons->addWidget(adminSerials);
     buttons->addWidget(retryFailed);
@@ -4843,11 +5081,30 @@ void MainWindow::showNetworkStatus()
     buttons->addWidget(close);
     layout->addLayout(buttons);
     connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    if (m_syncClient) {
+        connect(m_syncClient.get(), &SyncClient::synchronizationStarted,
+                &dialog, [syncRunStatus] {
+                    syncRunStatus->setText(QObject::tr("Synchronization in progress..."));
+                });
+        connect(m_syncClient.get(), &SyncClient::synchronizationFinished,
+                &dialog, [syncRunStatus](int uploaded, int downloaded,
+                                         qint64 elapsedMs, bool success,
+                                         const QString &detail) {
+                    syncRunStatus->setText(
+                        QObject::tr("%1 Uploaded: %2; downloaded: %3; elapsed: %4 ms.")
+                            .arg(detail)
+                            .arg(uploaded)
+                            .arg(downloaded)
+                            .arg(elapsedMs));
+                    syncRunStatus->setProperty("success", success);
+                });
+    }
 
     QVector<SyncOutboxOperation> operations;
     QVector<SyncConflict> conflicts;
     QJsonObject serverMetricsSnapshot;
     QString stationStatusRequestId;
+    QString consistencyDigestRequestId;
     const auto showStations = [stations, stationsStatus, stationUuid](
                                   const QJsonArray &connected) {
         stations->setSortingEnabled(false);
@@ -4863,6 +5120,8 @@ void MainWindow::showNetworkStatus()
                 description(QStringLiteral("computer_name")),
                 description(QStringLiteral("station_callsign")),
                 description(QStringLiteral("operator_name")),
+                description(QStringLiteral("operating_band")),
+                description(QStringLiteral("operating_mode")),
                 uuid == stationUuid ? tr("Connected (this station)") : tr("Connected")
             };
             for (int column = 0; column < values.size(); ++column) {
@@ -4923,6 +5182,7 @@ void MainWindow::showNetworkStatus()
         return tr("Unknown");
     };
     const auto refreshView = [this, summary, queue, serialStatus, retryFailed, syncNow,
+                              checkConsistency,
                               serverMetrics, adminSerials, compareConflict, &operations,
                               &conflicts, &error,
                               logName, logUuid, stationUuid,
@@ -5082,6 +5342,12 @@ void MainWindow::showNetworkStatus()
                             && QSettings().value(
                                    QStringLiteral("network/client/logUuid")).toString()
                                 == logUuid);
+        checkConsistency->setEnabled(
+            operations.isEmpty() && m_syncClient
+            && m_syncClient->state() == SyncClient::State::Ready
+            && !m_syncClient->isReadOnly()
+            && QSettings().value(
+                   QStringLiteral("network/client/logUuid")).toString() == logUuid);
         serverMetrics->setEnabled(m_syncClient
                                   && m_syncClient->state()
                                       == SyncClient::State::Ready
@@ -5415,7 +5681,7 @@ void MainWindow::showNetworkStatus()
                 }
             });
     connect(syncNow, &QPushButton::clicked, &dialog,
-            [this, &dialog, logUuid, refreshView] {
+            [this, &dialog, logUuid, refreshView, syncRunStatus] {
                 if (!m_syncClient
                     || QSettings().value(QStringLiteral("network/client/logUuid"))
                            .toString() != logUuid
@@ -5423,8 +5689,23 @@ void MainWindow::showNetworkStatus()
                     QMessageBox::warning(
                         &dialog, tr("Synchronization unavailable"),
                         tr("Connect this log to its central server before synchronizing."));
+                    syncRunStatus->setText(tr("Synchronization could not be started."));
                 }
                 refreshView();
+            });
+    connect(checkConsistency, &QPushButton::clicked, &dialog,
+            [this, &dialog, logUuid, syncRunStatus,
+             &consistencyDigestRequestId] {
+                if (!m_syncClient || !consistencyDigestRequestId.isEmpty()) {
+                    return;
+                }
+                consistencyDigestRequestId = m_syncClient->checkConsistency();
+                if (consistencyDigestRequestId.isEmpty()) {
+                    syncRunStatus->setText(
+                        tr("Synchronize the log and resolve queued operations before auditing."));
+                    return;
+                }
+                syncRunStatus->setText(tr("Checking replica consistency..."));
             });
     connect(exportReport, &QPushButton::clicked, &dialog,
             [this, &dialog, logName, logUuid, stationUuid, &operations,
@@ -5500,8 +5781,9 @@ void MainWindow::showNetworkStatus()
                     refreshStations();
                 });
         connect(m_syncClient.get(), &SyncClient::responseReceived, &dialog,
-                [this, refreshView, showStations, stations, stationsStatus, logUuid,
-                 &stationStatusRequestId, &serverMetricsSnapshot](
+                [this, &dialog, refreshView, showStations, stations, stationsStatus, logUuid,
+                 &stationStatusRequestId, &serverMetricsSnapshot,
+                 &consistencyDigestRequestId, syncRunStatus](
                     const QString &requestId, const QString &type,
                     const QJsonObject &payload) {
                     recordNetworkContact();
@@ -5523,7 +5805,10 @@ void MainWindow::showNetworkStatus()
                             for (const QString &field : {
                                      QStringLiteral("computer_name"),
                                      QStringLiteral("station_callsign"),
-                                     QStringLiteral("operator_name")}) {
+                                     QStringLiteral("operator_name"),
+                                     QStringLiteral("operating_band"),
+                                     QStringLiteral("operating_mode"),
+                                     QStringLiteral("operating_state_updated_utc")}) {
                                 valid = valid && (!station.contains(field)
                                     || station.value(field).isString());
                             }
@@ -5539,11 +5824,56 @@ void MainWindow::showNetworkStatus()
                     if (type == QStringLiteral("metrics")) {
                         serverMetricsSnapshot = payload;
                     }
+                    if (!consistencyDigestRequestId.isEmpty()
+                        && requestId == consistencyDigestRequestId) {
+                        consistencyDigestRequestId.clear();
+                        QString digestError;
+                        const qint64 cursor =
+                            m_repository.syncCursor(logUuid, &digestError);
+                        QJsonObject localDigest =
+                            m_repository.syncConsistencyDigest(logUuid, &digestError);
+                        QJsonObject serverDigest = payload;
+                        const qint64 serverRevision =
+                            serverDigest.take(QStringLiteral("revision")).toInteger(-1);
+                        const bool valid = digestError.isEmpty()
+                            && type == QStringLiteral("consistency_digest")
+                            && serverRevision == cursor
+                            && serverDigest.value(
+                                QStringLiteral("digest_version")).toInt(-1) == 1
+                            && serverDigest.value(QStringLiteral("count")).isDouble()
+                            && serverDigest.value(QStringLiteral("groups")).isObject();
+                        const bool consistent =
+                            valid && serverDigest == localDigest;
+                        if (consistent) {
+                            syncRunStatus->setText(
+                                tr("Consistency verified at revision %1 (%2 QSOs).")
+                                    .arg(cursor)
+                                    .arg(localDigest.value(
+                                        QStringLiteral("count")).toInt()));
+                            syncRunStatus->setProperty("consistency", "verified");
+                        } else {
+                            const QString detail = !digestError.isEmpty()
+                                ? digestError
+                                : valid
+                                    ? tr("Replica mismatch at revision %1. No local data was changed.")
+                                          .arg(cursor)
+                                    : tr("Consistency result was invalid or the log advanced. Run synchronization and check again.");
+                            syncRunStatus->setText(detail);
+                            syncRunStatus->setProperty("consistency", "mismatch");
+                            if (valid) {
+                                QMessageBox::warning(
+                                    &dialog, tr("Replica consistency mismatch"),
+                                    detail + QLatin1Char('\n')
+                                        + tr("Review diagnostics before considering snapshot recovery."));
+                            }
+                        }
+                    }
                     refreshView();
                 });
         connect(m_syncClient.get(), &SyncClient::requestFailed, &dialog,
-                [refreshView, stations, stationsStatus, &stationStatusRequestId](
-                    const QString &requestId, const QString &,
+                [refreshView, stations, stationsStatus, &stationStatusRequestId,
+                 &consistencyDigestRequestId, syncRunStatus](
+                    const QString &requestId, const QString &code,
                     const QString &message, bool) {
                     if (requestId == stationStatusRequestId
                         && !stationStatusRequestId.isEmpty()) {
@@ -5551,6 +5881,13 @@ void MainWindow::showNetworkStatus()
                         stations->setRowCount(0);
                         stationsStatus->setText(
                             tr("Unable to load connected stations: %1").arg(message));
+                    }
+                    if (requestId == consistencyDigestRequestId
+                        && !consistencyDigestRequestId.isEmpty()) {
+                        consistencyDigestRequestId.clear();
+                        syncRunStatus->setText(
+                            tr("Consistency audit failed (%1): %2")
+                                .arg(code, message));
                     }
                     refreshView();
                 });
@@ -5890,6 +6227,58 @@ void MainWindow::backupDatabase()
         return;
     }
     statusBar()->showMessage(tr("Verified database backup saved to %1").arg(path), 5000);
+}
+
+void MainWindow::configureAutomaticBackups()
+{
+    QSettings settings;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Automatic database backups"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *enabled = new QCheckBox(tr("Create backups automatically"), &dialog);
+    enabled->setObjectName(QStringLiteral("automaticBackupsEnabled"));
+    enabled->setChecked(settings.value(
+        QStringLiteral("backups/automaticEnabled"), true).toBool());
+    auto *interval = new QSpinBox(&dialog);
+    interval->setObjectName(QStringLiteral("automaticBackupIntervalDays"));
+    interval->setRange(1, 365);
+    interval->setValue(qBound(1, settings.value(
+        QStringLiteral("backups/automaticIntervalDays"), 1).toInt(), 365));
+    interval->setSuffix(tr(" days"));
+    auto *retention = new QSpinBox(&dialog);
+    retention->setObjectName(QStringLiteral("automaticBackupRetentionCount"));
+    retention->setRange(1, 365);
+    retention->setValue(qBound(1, settings.value(
+        QStringLiteral("backups/automaticRetentionCount"), 30).toInt(), 365));
+    retention->setSuffix(tr(" backups"));
+    form->addRow(enabled);
+    form->addRow(tr("Minimum interval:"), interval);
+    form->addRow(tr("Keep newest:"), retention);
+    layout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted,
+                     &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected,
+                     &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    settings.setValue(QStringLiteral("backups/automaticEnabled"), enabled->isChecked());
+    settings.setValue(QStringLiteral("backups/automaticIntervalDays"), interval->value());
+    settings.setValue(QStringLiteral("backups/automaticRetentionCount"), retention->value());
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(
+            this, tr("Unable to save backup settings"),
+            tr("The automatic backup settings could not be saved."));
+        return;
+    }
+    statusBar()->showMessage(
+        tr("Automatic backup settings saved; they take effect on next startup."), 5000);
 }
 
 void MainWindow::configureDxCluster()
@@ -7085,6 +7474,56 @@ void MainWindow::importContestDefinition()
     statusBar()->showMessage(tr("Imported contest: %1").arg(definition.name), 5000);
 }
 
+void MainWindow::restoreContestDefinitionVersion()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Restore previous contest definition"),
+        contestDefinitionVersionsDirectory(),
+        tr("Versioned definitions (*.yaml);;All files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, tr("Unable to read definition version"),
+                              QStringLiteral("%1: %2").arg(path, source.errorString()));
+        return;
+    }
+    const QString yaml = QString::fromUtf8(source.readAll());
+    ContestDefinition definition;
+    QString error;
+    if (!ContestDefinitionLoader().loadText(yaml, path, definition, &error)) {
+        QMessageBox::critical(this, tr("Invalid contest definition version"), error);
+        return;
+    }
+    if (QMessageBox::question(
+            this, tr("Restore contest definition?"),
+            tr("Restore the saved version of '%1'? The current definition will "
+               "be saved as another version first.")
+                .arg(definition.name))
+        != QMessageBox::Yes) {
+        return;
+    }
+    if (!storeContestDefinitionFile(yaml, &error)
+        || !m_repository.saveContestDefinition(definition, yaml, &error)) {
+        QMessageBox::critical(this, tr("Unable to restore definition version"), error);
+        return;
+    }
+    loadContests();
+    const QString code = definition.id.toUpper();
+    for (const Contest &contest : m_contests) {
+        if (contest.code == code) {
+            const int index = m_contestSelector->findData(contest.id);
+            if (index >= 0) {
+                m_contestSelector->setCurrentIndex(index);
+            }
+            break;
+        }
+    }
+    statusBar()->showMessage(tr("Restored contest definition: %1")
+                                 .arg(definition.name), 5000);
+}
+
 void MainWindow::importCallHistory()
 {
     const QString path = QFileDialog::getOpenFileName(
@@ -7204,6 +7643,74 @@ void MainWindow::importCtyDat()
     for (int vfo = 0; vfo < 2; ++vfo) {
         updateCallLookup(vfo);
     }
+}
+
+void MainWindow::restoreSupportDataVersion()
+{
+    const QString historyDirectory = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+        .filePath(QStringLiteral("support-data-versions"));
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Restore downloaded support data"), historyDirectory,
+        tr("Saved versions (*.bak);;All files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    const QString fileName = QFileInfo(path).absoluteDir().dirName();
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(this, tr("Unable to read support-data version"),
+                              QStringLiteral("%1: %2").arg(path, source.errorString()));
+        return;
+    }
+    const QByteArray contents = source.readAll();
+    if (fileName != QStringLiteral("master.scp")
+        && fileName != QStringLiteral("wl_cty.dat")) {
+        QMessageBox::warning(
+            this, tr("Unknown support-data version"),
+            tr("Only downloaded Master.SCP and wl_cty.dat versions can be restored."));
+        return;
+    }
+    QStringList callsigns;
+    QVector<CtyPrefixEntry> prefixes;
+    QString error;
+    const bool valid = fileName == QStringLiteral("master.scp")
+        ? SupportDataParser::parseMasterCpy(QString::fromUtf8(contents), callsigns, &error)
+        : SupportDataParser::parseCtyDat(QString::fromUtf8(contents), prefixes, &error);
+    if (!valid) {
+        QMessageBox::critical(this, tr("Invalid support-data version"), error);
+        return;
+    }
+    if (QMessageBox::question(
+            this, tr("Restore support data?"),
+            tr("Restore the selected version of %1? The current downloaded version "
+               "will be saved before it is replaced.")
+                .arg(fileName))
+        != QMessageBox::Yes) {
+        return;
+    }
+    QString restoredPath;
+    if (!saveSupportDataFile(fileName, contents, restoredPath, error)) {
+        QMessageBox::critical(this, tr("Unable to restore support data"), error);
+        return;
+    }
+    QSettings settings;
+    if (fileName == QStringLiteral("master.scp")) {
+        settings.setValue(QStringLiteral("supportData/masterScpPath"), restoredPath);
+        settings.remove(QStringLiteral("supportData/masterScpEtag"));
+    } else {
+        settings.setValue(QStringLiteral("supportData/ctyDat"), restoredPath);
+    }
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(
+            this, tr("Unable to save support-data settings"),
+            tr("The restored file was saved, but its active path could not be stored."));
+        return;
+    }
+    loadSupportData();
+    refreshRecentQsos();
+    statusBar()->showMessage(tr("Restored support data: %1").arg(fileName), 5000);
 }
 
 void MainWindow::loadSupportData()
@@ -7870,27 +8377,107 @@ void MainWindow::refreshRecentQsos()
     }
     const ContestDefinition *definition = activeDefinition();
     m_score = ContestScore{};
-    QVector<int> increments(m_logQsos.size(), 0);
     if (definition != nullptr) {
         const ContestEngine engine;
         const auto resolver = multiplierResolver();
         m_score = engine.score(*definition, m_logQsos, resolver);
         m_workedMultiplierKeys =
             engine.buildContext(*definition, m_logQsos, resolver).workedMultiplierKeys;
-        for (qsizetype index = 0; index < m_logQsos.size(); ++index) {
-            increments[index] = m_score.newMultipliersByQsoId.value(m_logQsos.at(index).id);
-        }
     }
 
-    // Only the tail of the log is rendered; the full log stays cached for checks.
+    const auto updateFilterOptions = [this](
+                                         QComboBox *filter,
+                                         const QStringList &values,
+                                         const QString &allLabel,
+                                         bool lowercase) {
+        const QString selected = filter->currentData().toString();
+        const QSignalBlocker blocker(filter);
+        filter->clear();
+        filter->addItem(allLabel, QStringLiteral("all"));
+        QStringList options = values;
+        for (const Qso &qso : std::as_const(m_logQsos)) {
+            const QString value = lowercase ? qso.band.toLower() : qso.mode.toUpper();
+            if (!value.isEmpty() && !options.contains(value, Qt::CaseInsensitive)) {
+                options.append(value);
+            }
+        }
+        std::sort(options.begin(), options.end(), [](const QString &left, const QString &right) {
+            return left.compare(right, Qt::CaseInsensitive) < 0;
+        });
+        for (const QString &value : std::as_const(options)) {
+            filter->addItem(value, lowercase ? value.toLower() : value.toUpper());
+        }
+        const int selectedIndex = filter->findData(selected);
+        filter->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    };
+    updateFilterOptions(m_logBandFilter,
+                        definition != nullptr ? definition->bands : QStringList{},
+                        tr("All bands"), true);
+    updateFilterOptions(m_logModeFilter,
+                        definition != nullptr ? definition->modes : QStringList{},
+                        tr("All modes"), false);
+    m_logTableNeedsColumnResize = true;
+    refreshRecentQsoTable();
+
+    refreshScoreSummary();
+    refreshRate();
+    updateTopStatus();
+    refreshCheckWindows();
+}
+
+void MainWindow::refreshRecentQsoTable()
+{
+    if (m_recentQsos == nullptr) {
+        return;
+    }
+    const QString query = m_logSearchEdit->text().trimmed();
+    const QString bandFilter = m_logBandFilter->currentData().toString();
+    const QString modeFilter = m_logModeFilter->currentData().toString();
+    const QString validityFilter = m_logValidityFilter->currentData().toString();
+    QVector<qsizetype> matchingIndices;
+    matchingIndices.reserve(qMin<qsizetype>(m_logQsos.size(), 1000));
+    qsizetype matchingCount = 0;
     constexpr qsizetype kVisibleRows = 1000;
-    const qsizetype first = qMax<qsizetype>(0, m_logQsos.size() - kVisibleRows);
+    for (qsizetype index = m_logQsos.size(); index > 0; --index) {
+        const qsizetype qsoIndex = index - 1;
+        const Qso &qso = m_logQsos.at(qsoIndex);
+        if (bandFilter != QStringLiteral("all")
+            && qso.band.compare(bandFilter, Qt::CaseInsensitive) != 0) {
+            continue;
+        }
+        if (modeFilter != QStringLiteral("all")
+            && qso.mode.compare(modeFilter, Qt::CaseInsensitive) != 0) {
+            continue;
+        }
+        if ((validityFilter == QStringLiteral("valid") && qso.invalid)
+            || (validityFilter == QStringLiteral("invalid") && !qso.invalid)) {
+            continue;
+        }
+        if (!query.isEmpty()) {
+            const QString haystack = qso.callsign + QLatin1Char(' ')
+                + qso.band + QLatin1Char(' ') + qso.mode + QLatin1Char(' ')
+                + exchangeDisplay(qso.sentExchangeFields, qso.sentExchange, true)
+                + QLatin1Char(' ')
+                + exchangeDisplay(qso.receivedExchangeFields, qso.receivedExchange, false);
+            if (!haystack.contains(query, Qt::CaseInsensitive)) {
+                continue;
+            }
+        }
+        ++matchingCount;
+        if (matchingIndices.size() < kVisibleRows) {
+            matchingIndices.append(qsoIndex);
+        }
+    }
+    std::reverse(matchingIndices.begin(), matchingIndices.end());
+
     m_recentQsos->setUpdatesEnabled(false);
-    m_recentQsos->setRowCount(static_cast<int>(m_logQsos.size() - first));
+    m_recentQsos->setRowCount(static_cast<int>(matchingIndices.size()));
     const QColor multColor(QStringLiteral("#CE0000"));
-    for (qsizetype index = first; index < m_logQsos.size(); ++index) {
+    for (qsizetype rowIndex = 0; rowIndex < matchingIndices.size(); ++rowIndex) {
+        const qsizetype index = matchingIndices.at(rowIndex);
         const Qso &qso = m_logQsos.at(index);
-        const int row = static_cast<int>(index - first);
+        const int increment = m_score.newMultipliersByQsoId.value(qso.id);
+        const int row = static_cast<int>(rowIndex);
         const QStringList values{
             QString::number(index + 1),
             qso.timestampUtc.toUTC().toString(QStringLiteral("HHmm")),
@@ -7901,7 +8488,7 @@ void MainWindow::refreshRecentQsos()
             qso.callsign,
             exchangeDisplay(qso.sentExchangeFields, qso.sentExchange, true),
             exchangeDisplay(qso.receivedExchangeFields, qso.receivedExchange, false),
-            increments.at(index) > 0 ? QString::number(increments.at(index)) : QString(),
+            increment > 0 ? QString::number(increment) : QString(),
             QString::number(qso.points)};
         for (int column = 0; column < values.size(); ++column) {
             auto *item = new QTableWidgetItem(values.at(column));
@@ -7911,14 +8498,23 @@ void MainWindow::refreshRecentQsos()
             } else if (column == 4 || column == 9) {
                 item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             }
-            if (column == 8 && increments.at(index) > 0) {
+            if (column == 8 && increment > 0) {
                 item->setForeground(multColor);
+            }
+            if (qso.invalid) {
+                QFont font = item->font();
+                font.setStrikeOut(true);
+                item->setFont(font);
+                item->setForeground(QColor(QStringLiteral("#A0A0A0")));
+                item->setToolTip(tr("Invalid QSO; excluded from scoring and exports."));
             }
             m_recentQsos->setItem(row, column, item);
         }
     }
-    m_recentQsos->resizeColumnsToContents();
-    {
+    m_logFilterResultLabel->setText(
+        tr("%1 of %2 QSOs").arg(matchingCount).arg(m_logQsos.size()));
+    if (m_logTableNeedsColumnResize) {
+        m_recentQsos->resizeColumnsToContents();
         const QFontMetrics metrics(m_recentQsos->font());
         static const int minimumChars[] = {5, 5, 5, 4, 8, 11, 8, 10, 6, 4};
         for (int column = 0; column < 10; ++column) {
@@ -7928,14 +8524,10 @@ void MainWindow::refreshRecentQsos()
                 m_recentQsos->setColumnWidth(column, minimum);
             }
         }
+        m_logTableNeedsColumnResize = false;
     }
     m_recentQsos->setUpdatesEnabled(true);
     m_recentQsos->scrollToBottom();
-
-    refreshScoreSummary();
-    refreshRate();
-    updateTopStatus();
-    refreshCheckWindows();
 }
 
 void MainWindow::refreshScoreSummary()
@@ -7961,6 +8553,9 @@ void MainWindow::refreshScoreSummary()
         grand = {m_score.totalQsos, m_score.totalPoints, m_score.totalMultipliers};
     } else {
         for (const Qso &qso : std::as_const(m_logQsos)) {
+            if (qso.invalid) {
+                continue;
+            }
             BandTotals &band = totals[qso.band.toLower()];
             ++band.qsos;
             band.points += qso.points;
@@ -8037,9 +8632,13 @@ void MainWindow::refreshRate()
         return;
     }
     const QDateTime now = QDateTime::currentDateTimeUtc();
+    const ContestDefinition *definition = activeDefinition();
     int lastHour = 0;
     int lastTenMinutes = 0;
     for (auto it = m_logQsos.crbegin(); it != m_logQsos.crend(); ++it) {
+        if (it->invalid) {
+            continue;
+        }
         const qint64 age = it->timestampUtc.secsTo(now);
         if (age > 3600) {
             break;
@@ -8050,27 +8649,69 @@ void MainWindow::refreshRate()
         }
     }
     const auto rateOfLast = [this, &now](qsizetype count) {
-        count = qMin(count, m_logQsos.size());
+        QVector<const Qso *> validQsos;
+        validQsos.reserve(m_logQsos.size());
+        for (const Qso &qso : m_logQsos) {
+            if (!qso.invalid) {
+                validQsos.append(&qso);
+            }
+        }
+        count = qMin(count, validQsos.size());
         if (count == 0) {
             return 0LL;
         }
-        const qint64 seconds =
-            qMax<qint64>(60, m_logQsos.at(m_logQsos.size() - count).timestampUtc.secsTo(now));
+        const qint64 seconds = qMax<qint64>(
+            60, validQsos.at(validQsos.size() - count)->timestampUtc.secsTo(now));
         return static_cast<long long>(count * 3600 / seconds);
     };
+    QVector<int> pace(12, 0);
+    for (const Qso &qso : std::as_const(m_logQsos)) {
+        if (qso.invalid) {
+            continue;
+        }
+        const qint64 age = qso.timestampUtc.secsTo(now);
+        if (age >= 0 && age < 3600) {
+            const int bucket = 11 - static_cast<int>(age / 300);
+            ++pace[bucket];
+        }
+    }
+    if (m_rateChart != nullptr) {
+        static_cast<RatePaceChart *>(m_rateChart)->setSamples(pace);
+    }
+    QString bandSummary = tr("By band:");
+    QString modeSummary = tr("By mode:");
+    if (definition != nullptr) {
+        const auto appendGroups = [](QString &line, const auto &groups) {
+            for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+                line += QStringLiteral(" %1 %2/%3/%4;")
+                    .arg(it.key())
+                    .arg(it->qsos)
+                    .arg(it->points)
+                    .arg(it->multipliers);
+            }
+        };
+        appendGroups(bandSummary, m_score.perBand);
+        appendGroups(modeSummary, m_score.perMode);
+    }
     m_rateLabel->setText(
         tr("Last 10 QSOs  : %1 /h\n"
            "Last 100 QSOs : %2 /h\n"
            "Last 60 min   : %3 QSO\n"
            "Last 10 min   : %4 QSO\n"
            "Total QSOs    : %5\n"
-           "CW speed      : %6 WPM")
+           "CW speed      : %6 WPM\n%7\n%8")
             .arg(rateOfLast(10), 5)
             .arg(rateOfLast(100), 5)
             .arg(lastHour, 5)
             .arg(lastTenMinutes, 5)
-            .arg(m_logQsos.size(), 5)
-            .arg(m_cwWpm, 5));
+            .arg(definition != nullptr
+                    ? m_score.totalQsos
+                    : static_cast<int>(std::count_if(
+                        m_logQsos.cbegin(), m_logQsos.cend(),
+                        [](const Qso &qso) { return !qso.invalid; })),
+                 5)
+            .arg(m_cwWpm, 5)
+            .arg(bandSummary, modeSummary));
 }
 
 void MainWindow::updateTopStatus()
@@ -8094,7 +8735,11 @@ void MainWindow::updateTopStatus()
              m_station.operatorName.isEmpty()
                  ? QString() : QStringLiteral(" (%1)").arg(m_station.operatorName),
              contest)
-        .arg(m_logQsos.size())
+        .arg(definition != nullptr
+                 ? m_score.totalQsos
+                 : static_cast<int>(std::count_if(
+                     m_logQsos.cbegin(), m_logQsos.cend(),
+                     [](const Qso &qso) { return !qso.invalid; })))
         .arg(m_scorePoints);
     if (definition != nullptr && !definition->multipliers.isEmpty()) {
         text += QStringLiteral("  MULT %1").arg(m_scoreMultipliers);
@@ -8143,6 +8788,7 @@ void MainWindow::setActiveEntryContext(int context)
     refreshBandmap();
     refreshScoreSummary();
     updateTopStatus();
+    updateNetworkOperatingState();
 }
 
 void MainWindow::updateEntryHeaders()
@@ -8552,11 +9198,31 @@ void MainWindow::wipeEntry(int context)
     m_callsignEdits[context]->setFocus();
 }
 
+void MainWindow::rebuildCallCompleters()
+{
+    QSet<QString> unique(m_checkCallsigns.cbegin(), m_checkCallsigns.cend());
+    for (const Qso &qso : std::as_const(m_logQsos)) {
+        const QString callsign = qso.callsign.trimmed().toUpper();
+        if (!callsign.isEmpty()) {
+            unique.insert(callsign);
+        }
+    }
+    unique.remove(QString());
+    QStringList candidates(unique.cbegin(), unique.cend());
+    std::sort(candidates.begin(), candidates.end());
+    for (QStringListModel *model : m_callCompleterModels) {
+        if (model != nullptr) {
+            model->setStringList(candidates);
+        }
+    }
+}
+
 void MainWindow::refreshCheckWindows()
 {
     if (m_checkPartial == nullptr) {
         return;
     }
+    rebuildCallCompleters();
     const int context = currentEntryContext();
     const QString callsign = m_callsignEdits[context]->text().trimmed().toUpper();
     const QString band = m_bandSelectors[context]->currentText().trimmed().toLower();
@@ -8568,6 +9234,9 @@ void MainWindow::refreshCheckWindows()
     QSet<QString> loggedCalls;
     QSet<QString> dupeCalls;
     for (const Qso &qso : std::as_const(m_logQsos)) {
+        if (qso.invalid) {
+            continue;
+        }
         const QString call = qso.callsign.toUpper();
         loggedCalls.insert(call);
         if (sameDupeKey(dupeKey, qso, call, band, mode)) {
@@ -8636,7 +9305,8 @@ void MainWindow::refreshCheckWindows()
     QHash<QString, QString> worked;
     int workedCount = 0;
     for (const Qso &qso : std::as_const(m_logQsos)) {
-        if (!callsign.isEmpty() && qso.callsign.compare(callsign, Qt::CaseInsensitive) == 0) {
+        if (!qso.invalid && !callsign.isEmpty()
+            && qso.callsign.compare(callsign, Qt::CaseInsensitive) == 0) {
             worked.insert(qso.band.toLower() + QLatin1Char('|') + qso.mode.toUpper(),
                           qso.timestampUtc.toUTC().toString(QStringLiteral("HHmm")));
             ++workedCount;
@@ -8945,6 +9615,9 @@ void MainWindow::logQsoForVfo(int vfo)
             return;
         }
         for (const Qso &previous : previousQsos) {
+            if (previous.invalid) {
+                continue;
+            }
             if (previous.callsign.compare(callsign, Qt::CaseInsensitive) == 0
                 && previous.band == bandSelector->currentText().trimmed().toLower()
                 && previous.mode == modeSelector->currentText().trimmed().toUpper()) {
@@ -9312,6 +9985,150 @@ void MainWindow::deleteSelectedQso(int row)
     statusBar()->showMessage(tr("QSO #%1 deleted.").arg(id), 3000);
 }
 
+void MainWindow::undoLastQsoChange()
+{
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; QSO changes are disabled."),
+            true);
+        return;
+    }
+    if (m_contestSelector->currentIndex() < 0) {
+        showOperatorMessage(tr("Select a log before undoing a QSO change."), true);
+        return;
+    }
+    const qint64 contestId = m_contestSelector->currentData().toLongLong();
+    QString error;
+    if (!m_repository.undoLastQsoChange(contestId, &error)) {
+        showOperatorMessage(tr("Unable to undo QSO change: %1").arg(error), true);
+        return;
+    }
+    refreshRecentQsos();
+    updateSerialFields();
+    updateDupeIndicator();
+    showOperatorMessage(tr("Last QSO change undone."));
+}
+
+void MainWindow::setSelectedQsoInvalid(int row, bool invalid)
+{
+    if (m_networkReadOnly) {
+        showOperatorMessage(
+            tr("This station has read-only access; QSO changes are disabled."),
+            true);
+        return;
+    }
+    const QTableWidgetItem *idItem = m_recentQsos->item(row, 0);
+    if (idItem == nullptr) {
+        return;
+    }
+    const qint64 id = idItem->data(Qt::UserRole).toLongLong();
+    QString error;
+    const auto stored = m_repository.qsoById(id, &error);
+    if (!error.isEmpty() || !stored.has_value()) {
+        QMessageBox::critical(
+            this, tr("Unable to update QSO"),
+            error.isEmpty() ? tr("The selected QSO no longer exists.") : error);
+        return;
+    }
+    if (stored->invalid == invalid) {
+        return;
+    }
+    if (invalid
+        && QMessageBox::question(
+               this, tr("Mark QSO invalid"),
+               tr("Mark QSO #%1 with %2 invalid? It will remain in the log history "
+                  "but no longer count toward score, multipliers, or exports.")
+                   .arg(id).arg(stored->callsign),
+               QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            != QMessageBox::Yes) {
+        return;
+    }
+
+    Qso changed = *stored;
+    changed.invalid = invalid;
+    if (invalid) {
+        changed.points = 0;
+    } else {
+        const auto definition = m_definitions.constFind(changed.contestId);
+        if (definition != m_definitions.cend()) {
+            QVector<Qso> others = m_repository.qsosForContest(
+                changed.contestId, 0, &error);
+            if (!error.isEmpty()) {
+                QMessageBox::critical(this, tr("Unable to restore QSO"), error);
+                return;
+            }
+            others.erase(std::remove_if(others.begin(), others.end(),
+                                        [&changed](const Qso &other) {
+                                            return other.id == changed.id;
+                                        }),
+                         others.end());
+            const auto resolver = multiplierResolver();
+            ContestEngine engine;
+            ContestEvaluationContext context =
+                engine.buildContext(*definition, others, resolver);
+            if (resolver) {
+                context.resolvedMultiplierValues = resolver(changed);
+            }
+            std::optional<int> serial;
+            for (const ExchangeFieldDefinition &field : definition->sentExchange) {
+                if (field.type != ExchangeFieldType::Serial) {
+                    continue;
+                }
+                bool ok = false;
+                const int value = changed.sentExchangeFields.value(field.name)
+                                      .toInt(&ok);
+                if (ok) {
+                    serial = value;
+                }
+                break;
+            }
+            const bool allowDuplicate = QSettings().value(
+                QStringLiteral("operating/allowDupeLogging"), false).toBool();
+            const ContestEvaluationResult evaluation = engine.evaluate(
+                *definition, changed.callsign, changed.band, changed.mode,
+                changed.receivedExchangeFields, context, serial,
+                changed.sentExchangeFields, allowDuplicate);
+            if (!evaluation.valid) {
+                const QString problem = evaluation.issues.isEmpty()
+                    ? tr("it conflicts with the active contest rules")
+                    : evaluation.issues.first().field + QStringLiteral(": ")
+                        + evaluation.issues.first().message;
+                QMessageBox::warning(
+                    this, tr("Unable to restore QSO"),
+                    tr("Correct the QSO before restoring it: %1").arg(problem));
+                return;
+            }
+            changed.points = evaluation.duplicate ? 0 : evaluation.points;
+        } else {
+            const bool duplicate = std::any_of(
+                m_logQsos.cbegin(), m_logQsos.cend(),
+                [&changed](const Qso &other) {
+                    return other.id != changed.id && !other.invalid
+                        && other.callsign.compare(changed.callsign,
+                                                  Qt::CaseInsensitive) == 0
+                        && other.band.compare(changed.band, Qt::CaseInsensitive) == 0
+                        && other.mode.compare(changed.mode, Qt::CaseInsensitive) == 0;
+                });
+            if (duplicate) {
+                QMessageBox::warning(
+                    this, tr("Unable to restore QSO"),
+                    tr("Another valid QSO already has the same callsign, band, and mode."));
+                return;
+            }
+        }
+    }
+    if (!m_repository.updateQso(changed, &error)) {
+        QMessageBox::critical(this, tr("Unable to update QSO"), error);
+        return;
+    }
+    refreshRecentQsos();
+    updateSerialFields();
+    updateDupeIndicator();
+    showOperatorMessage(invalid
+        ? tr("QSO #%1 with %2 marked invalid").arg(id).arg(changed.callsign)
+        : tr("QSO #%1 with %2 restored").arg(id).arg(changed.callsign));
+}
+
 void MainWindow::updateDupeIndicator()
 {
     updateDupeIndicatorForVfo(0);
@@ -9334,7 +10151,8 @@ void MainWindow::updateDupeIndicatorForVfo(int vfo)
             definition != nullptr ? definition->dupeKey : QStringList{};
         bool duplicate = false;
         for (const Qso &qso : std::as_const(m_logQsos)) {
-            if (qso.callsign.compare(callsign, Qt::CaseInsensitive) != 0) {
+            if (qso.invalid
+                || qso.callsign.compare(callsign, Qt::CaseInsensitive) != 0) {
                 continue;
             }
             if (!workedBands.contains(qso.band)) {
@@ -9700,6 +10518,9 @@ void MainWindow::refreshBandmap()
         const QString mode = spot.mode.trimmed().toUpper();
         return std::any_of(m_logQsos.cbegin(), m_logQsos.cend(),
                            [&](const Qso &qso) {
+                               if (qso.invalid) {
+                                   return false;
+                               }
                                if (mode.isEmpty()) {
                                    return qso.callsign.compare(spot.callsign,
                                                                Qt::CaseInsensitive) == 0

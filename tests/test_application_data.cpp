@@ -71,7 +71,7 @@ void ApplicationDataTest::firstStartCreatesSettingsDatabaseAndDefinitions()
     QVERIFY2(installBundledContestDefinitions(&error), qPrintable(error));
     QVector<ContestDefinitionFile> files;
     QVERIFY2(loadContestDefinitionFiles(&files, &error), qPrintable(error));
-    QCOMPARE(files.size(), 15);
+    QCOMPARE(files.size(), 19);
     for (const ContestDefinitionFile &file : files) {
         QVERIFY(QFileInfo(file.path).isWritable());
     }
@@ -148,7 +148,7 @@ void ApplicationDataTest::preservesEditedDefinitionsAndDiscoversYamlAndYml()
     }
     QVERIFY2(installBundledContestDefinitions(&error), qPrintable(error));
     QVERIFY2(loadContestDefinitionFiles(&files, &error), qPrintable(error));
-    QCOMPARE(files.size(), 16);
+    QCOMPARE(files.size(), 20);
     bool foundCustom = false;
     bool foundEdited = false;
     for (const ContestDefinitionFile &file : files) {
@@ -203,6 +203,16 @@ void ApplicationDataTest::importsPersistAndReplaceTheExistingFile()
     QCOMPARE(files.size(), 1);
     QCOMPARE(files.first().yaml, yaml);
     QCOMPARE(QFileInfo(files.first().path).fileName(), QStringLiteral("renamed.yml"));
+    const QDir versions(QDir(contestDefinitionVersionsDirectory())
+                            .filePath(QStringLiteral("imported-test")));
+    const QStringList versionFiles = versions.entryList(
+        {QStringLiteral("*.yaml")}, QDir::Files);
+    QCOMPARE(versionFiles.size(), 1);
+    QFile savedVersion(versions.filePath(versionFiles.first()));
+    QVERIFY(savedVersion.open(QIODevice::ReadOnly | QIODevice::Text));
+    QVERIFY(QString::fromUtf8(savedVersion.readAll()).contains(
+        QStringLiteral("schema_version: 1")));
+    QVERIFY(!versionFiles.first().isEmpty());
 }
 
 void ApplicationDataTest::reportsDirectoryAndSettingsCreationFailures()

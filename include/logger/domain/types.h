@@ -44,6 +44,7 @@ struct Qso {
     QMap<QString, QString> sentExchangeFields;
     QMap<QString, QString> receivedExchangeFields;
     int points = 0;
+    bool invalid = false;
 };
 
 struct SyncOutboxOperation {

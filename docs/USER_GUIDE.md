@@ -37,7 +37,7 @@ Powiązane dokumenty:
 - [BUILD_AND_RELEASE.md](./BUILD_AND_RELEASE.md) — budowanie, pakowanie, Hamlib,
   macierz testów sprzętowych,
 - [NETWORKING_OPERATIONS.md](./NETWORKING_OPERATIONS.md) — instalacja i obsługa
-  serwera synchronizacji, TLS, tokeny, backup i odzyskiwanie,
+  serwera synchronizacji w zaufanej sieci, firewall, backup i odzyskiwanie,
 - [../NETWORKING.md](../NETWORKING.md) — protokół, stan implementacji
   i ograniczenia synchronizacji,
 - [../TODO.md](../TODO.md) — lista zadań projektu.
@@ -105,7 +105,7 @@ kopiowane do nowego pliku INI. Oryginały pozostają bez zmian.
 Pliki call history i list znaków wczytane „z pliku” **nie są kopiowane** —
 program zapamiętuje ich ścieżki i wczytuje je przy każdym starcie.
 
-Wbudowane definicje zawodów (15 plików z `contests/examples/`) są wkompilowane
+Wbudowane definicje zawodów (18 plików z `contests/examples/`) są wkompilowane
 w program i kopiowane do podkatalogu `contests`, jeśli ich brakuje. Istniejące
 pliki nie są nadpisywane. Program odczytuje z tego katalogu pliki `.yaml` i `.yml`
 przy starcie oraz otwieraniu **New log**. Można tam dopisać własne definicje
@@ -149,10 +149,10 @@ Okna narzędziowe (docki; można je przesuwać, odłączać i ukrywać w menu
 | Okno | Zawartość |
 |---|---|
 | **Check callsign** | Siatka pasmo × emisja z zaznaczeniem, gdzie wpisany znak był już zrobiony; pod spodem stan („not in log”, dupe). |
-| **Check partial** | Znaki pasujące do fragmentu wpisanego znaku z Master.SCP/MASTER.CPY, call history i logu. Biały — nowy, zielony — zrobiony na innym paśmie/emisji, czerwony — dubel, pogrubiony — dokładne trafienie. Kliknięcie wstawia znak do pola Call. |
+| **Check partial** | Znaki pasujące do fragmentu wpisanego znaku z Master.SCP/MASTER.CPY, call history i logu. Biały — nowy, zielony — zrobiony na innym paśmie/emisji, czerwony — dubel, pogrubiony — dokładne trafienie. Kliknięcie wstawia znak do pola Call. Pole Call pokazuje też podpowiedzi dla wpisanego prefiksu; tekst zmienia się dopiero po wybraniu sugestii. |
 | **Contest info** | Opis aktywnej definicji: pasma, emisje, wymiana, punktacja, mnożniki, klucz dubli. |
 | **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Kolumny `kHz, Call, Age, Spotter, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
-| **Rate** | QSO/h z ostatnich 10 i 100 QSO, liczba QSO z ostatnich 60 i 10 minut, suma QSO, prędkość CW. |
+| **Rate** | QSO/h z ostatnich 10 i 100 QSO, liczba QSO z ostatnich 60 i 10 minut, suma QSO, prędkość CW oraz wykres liczby QSO w kolejnych 5-minutowych przedziałach ostatniej godziny. Zawiera też podsumowanie QSO/punktów/mnożników per pasmo i emisja. |
 | **Summary** | Tabela per pasmo: QSO, punkty, mnożniki, średnia; wiersz TOTAL i **FINAL SCORE**. |
 | **DX Cluster announcements** | Surowa, chronologiczna lista ogłoszeń clustera; dwuklik — przejście do spotu. |
 
@@ -252,6 +252,20 @@ częstotliwość w Hz oraz wymianę nadaną i odebraną. Przy zapisie dane są
 walidowane, dublety sprawdzane z pominięciem edytowanego QSO, a punkty
 i tekst wymiany przeliczane. Błędy wyświetlane są w oknie.
 
+Kliknij prawym przyciskiem wiersz logu, aby oznaczyć QSO jako nieważne lub
+przywrócić je do punktacji. Nieważne QSO pozostaje w historii i synchronizacji,
+ale nie wpływa na punkty, mnożniki ani eksport. Przywrócenie jest walidowane
+według reguł aktywnego contestu; QSO pozostające duplikatem może wymagać
+włączenia opcji zapisywania duplikatów.
+
+Polecenie **Operating → Undo last QSO change** (`Ctrl+Alt+Z`) cofa ostatnie
+niecofnięte utworzenie, edycję, usunięcie lub zmianę ważności QSO w aktywnym
+logu. Zmiana i jej cofnięcie pozostają w lokalnym audycie; cofnięcie zapisuje
+nową wersję QSO i jest wysyłane przez zwykły outbox synchronizacji. Undo jest
+dostępne dla zmian zapisanych po aktualizacji bazy do schematu 19. Nie cofa
+zmian przychodzących z synchronizacji, które nie zostały wykonane przez lokalne
+API zapisu QSO, ani nie rozwiązuje istniejących konfliktów synchronizacji.
+
 ## 7. Radio (CAT), SO2V i SO2R
 
 **Radio → Radio A CAT settings…** / **Radio B CAT settings…**
@@ -326,7 +340,10 @@ częstotliwość i komentarz.
 
 Bandmapa: `Ctrl+Up`/`Ctrl+Down` (lub `Up`/`Down` w tabeli) wybiera spot,
 `Enter`, **Tune** lub dwuklik wpisuje znak do aktywnego panelu i stroi aktywne
-radio. Filtry pasma, emisji i kontynentu są niezależne. Rozpoznanie kontynentu
+radio. **Operating → Next bandmap spot with a new multiplier** (`Ctrl+Alt+Down`)
+przechodzi do następnego spotu, który nie jest duplikatem i którego rozpoznany
+mnożnik nie został jeszcze zaliczony; wybór uwzględnia aktywne filtry oraz
+przypisanie bandmapy do VFO/radia. Filtry pasma, emisji i kontynentu są niezależne. Rozpoznanie kontynentu
 korzysta z załadowanego `wl_cty.dat`; bez pasującego wpisu spot trafia do filtra
 **Unknown**. Spoty starsze niż 1 h nie są wyświetlane.
 
@@ -528,9 +545,16 @@ wymianę nadaną i odebraną.
 ## 12. Kopie zapasowe i odtwarzanie
 
 - **File → Back up database…** — spójna kopia online z kontrolą integralności.
-- Przy starcie tworzona jest jedna automatyczna kopia dziennie
-  (`backups/automatic-RRRR-MM-DD.sqlite`); przechowywane są kopie z ostatnich
-  30 dni.
+- **File → Automatic backup settings…** pozwala włączyć/wyłączyć automatyczne
+  kopie, ustawić minimalny odstęp (1–365 dni) i liczbę zachowywanych najnowszych
+  plików (1–365). Domyślnie kopia powstaje codziennie i zachowywanych jest 30
+  plików. Kopia jest tworzona przy starcie aplikacji, gdy minął ustawiony odstęp.
+- **Contest → Restore previous YAML definition…** przywraca wybraną poprzednią
+  wersję definicji; bieżąca wersja jest wcześniej zachowywana.
+- **File → Support data → Restore previous downloaded support data…** umożliwia
+  rollback pobranego Master.SCP lub wl_cty.dat. Pliki są walidowane przed zmianą.
+- Poprzednie wersje definicji są w `contests/versions/`, a pobranych danych
+  pomocniczych w `support-data-versions/` w katalogu danych aplikacji.
 - Baza pracuje w trybie WAL z `synchronous=FULL`; przy starcie wykonywany jest
   `quick_check`. Uszkodzona baza nie jest po cichu zastępowana.
 - Odtwarzanie (przy zamkniętym programie):
@@ -582,52 +606,72 @@ wymianę nadaną i odebraną.
 ### Połączenie z centralnym logiem
 
 Tryb Local pozostaje domyślny. **Options → Central network connection...**
-konfiguruje adres i port serwera (domyślnie TCP 7443), token stacji, log
-oraz opcjonalny plik dodatkowego CA. Certyfikat musi pasować do podanej
-nazwy serwera; weryfikacji TLS nie należy wyłączać. Dostępne jest połączenie
-z lokalną kopią logu, dołączenie do logu serwera lub utworzenie centralnego
-logu przez administratora.
+konfiguruje adres IP i port serwera (domyślnie TCP 7443) oraz wybór logu.
+UUID stacji i nazwa komputera są przekazywane automatycznie przy rejestracji;
+nie wpisuje się tokenu ani certyfikatu. Automatyczne łączenie z zapisanym
+logiem jest opcjonalne i domyślnie wyłączone.
 
-Token można opcjonalnie zapisać w Windows Credential Manager lub Linux
-Secret Service. Na Linuxie potrzebne są `secret-tool` i działający Secret
-Service w sesji użytkownika. Automatyczne łączenie wymaga zapisanej
-konfiguracji istniejącego lokalnego logu i tokenu w magazynie systemowym;
-jest domyślnie wyłączone.
+Tryb sieciowy używa trusted TCP: ruch nie jest szyfrowany, a serwer nie
+uwierzytelnia klientów ani nie weryfikuje przekazanej nazwy komputera i znaku
+stacji. Każda stacja, która może połączyć się z serwerem, otrzymuje dostęp do
+odczytu i zapisu. Sieć LAN/VPN i reguły firewall są jedyną granicą dostępu.
+Używaj go wyłącznie w zaufanej, zamkniętej sieci; nie wystawiaj portu do
+Internetu. Operacje administracyjne, w tym import historycznego logu, wykonuj
+lokalnie na stacji Host.
 
 **Options → Host central server on this station...** uruchamia serwer
-w procesie GUI z osobną bazą, certyfikatem/kluczem PEM i plikiem poświadczeń
-JSON. Host może mieć włączony autostart, ale zatrzymuje się przy zamknięciu
-aplikacji. Do stałej usługi służy oddzielny `contest_logger_server`;
-konfigurację opisuje [runbook](./NETWORKING_OPERATIONS.md). Nie współdziel
-aktywnego pliku SQLite między komputerami.
+w procesie GUI z osobną bazą i ustawieniami adresu nasłuchu, portu oraz
+maksymalnej liczby klientów (1–256, domyślnie 16).
+Serwer nie używa TLS ani pliku poświadczeń; rejestruje każdą stację osiągalną
+w wybranej sieci, bez sprawdzenia jej tożsamości. Host może mieć włączony
+autostart, ale zatrzymuje się przy zamknięciu aplikacji. Do stałej usługi
+służy oddzielny `contest_logger_server`; konfigurację opisuje
+[runbook](./NETWORKING_OPERATIONS.md). Nie współdziel aktywnego pliku SQLite
+między komputerami.
 
 **Disconnect central network** rozłącza Clienta bez kasowania lokalnych
-logów i kolejki. Klient z uprawnieniem tylko `read` pobiera dane, ale nie
-może modyfikować QSO ani rezerwować numerów. Nowy numer seryjny wymaga
-potwierdzenia serwera; wcześniej potwierdzoną rezerwację można wykorzystać
-offline. Synchronizacja pozostaje przed pilotażem — nie traktuj jej jeszcze
-jako zatwierdzonej do pracy w zawodach.
+logów i kolejki. W bieżącym trybie trusted TCP nie ma ról ani ograniczeń
+`read`/`write`: każda połączona stacja ma prawo odczytu i zapisu. Nowy numer
+seryjny wymaga potwierdzenia serwera; wcześniej potwierdzoną rezerwację można
+wykorzystać offline. Synchronizacja pozostaje przed pilotażem — nie traktuj
+jej jeszcze jako zatwierdzonej do pracy w zawodach.
 
 ### Status sieci i podłączone stacje
 
 Otwórz **Options → Network status and queue...**. Oprócz lokalnego stanu
 połączenia, rewizji, kolejki i rezerwacji numerów okno pokazuje podłączone
 stacje wybranego logu: nazwę komputera (**Computer**), znak stacji
-(**Station callsign**), operatora (**Operator**) i stan **Connected**.
+(**Station callsign**), operatora (**Operator**), zgłaszane pasmo (**Band**),
+emisję (**Mode**) i stan **Connected**.
 Własna stacja ma oznaczenie **Connected (this station)**. Nazwa komputera
 jest pobierana z systemu, a znak i operator z konfiguracji **Operator and
 station...** (znak aktywnego logu ma pierwszeństwo). Zmiana tych ustawień
 jest przekazywana bez ponownego łączenia.
 
-Są to aktywne, uwierzytelnione sesje, a nie historyczna lista stacji.
-UUID nadal służą do identyfikacji w protokole, ale nie są wyświetlane
-w tabeli. Dla pustego opisu lub starszego klienta/serwera bez obsługi
-opisów wyświetlane jest **Not provided**, nie UUID. Opisy są deklarowane
-przez klientów i nie służą do uwierzytelniania.
+**Sync now** uruchamia opróżnianie outboxa i pobranie brakujących rewizji.
+Wynik pokazuje liczbę wysłanych operacji, pobranych zdarzeń, czas oraz
+informację o błędach/konfliktach. **Check consistency** jest oddzielnym,
+tylko do odczytu audytem skrótów QSO dla tej samej rewizji. Wymaga pustej
+kolejki; rozbieżność jest zgłaszana, ale nie powoduje automatycznej podmiany
+danych ani outboxa.
+
+Opcjonalny dok **Window → Network stations** pokazuje tę samą bieżącą listę
+w głównym oknie. Pasmo i emisja pochodzą z aktywnego panelu QSO stacji;
+wartości są wysyłane przy zmianie oraz w heartbeat. **Stale** oznacza brak
+aktualizacji przez ponad 45 sekund, a **No radio data** — brak odebranego
+stanu pracy. Lista zawiera aktywne sesje wybranego logu, nie historię
+połączeń.
+
+Są to aktywne, zarejestrowane sesje, a nie historyczna lista stacji.
+UUID identyfikuje stację w protokole, ale nie potwierdza jej tożsamości i nie
+jest wyświetlany w tabeli. Dla pustego opisu lub starszego klienta/serwera bez
+obsługi opisów wyświetlane jest **Not provided**, nie UUID. Nazwa, znak i
+operator są deklarowane przez klienta, niezweryfikowane przez serwer i służą
+wyłącznie do opisu sesji.
 
 Lista jest odświeżana po otwarciu, co 5 sekund, po zmianie stanu połączenia
-oraz przyciskiem **Refresh**. Dostęp mają także klienci tylko do odczytu;
-uprawnienie administratora nie jest wymagane. GUI Host korzysta z lokalnego
+oraz przyciskiem **Refresh**. W bieżącym trybie każda połączona stacja ma
+odczyt i zapis. GUI Host korzysta z lokalnego
 serwera, jeśli Client nie jest połączony z wybranym logiem. Po rozłączeniu
 bez aktywnego Hosta tabela jest czyszczona z komunikatem o niedostępności,
 a błąd pobrania jest pokazywany nad tabelą. Dla logu bez aktywnych sesji
@@ -918,13 +962,17 @@ END-OF-LOG:
 
 ### Log i edycja
 
-- **Brak usuwania QSO** z poziomu programu (ani menu, ani klawisza `Delete`).
-- Brak cofania (undo), wydruku i statystyk graficznych.
-- Brak popupu z uzupełnianiem znaku w polu Call — podpowiedzi są tylko w
-  oknie *Check partial*.
-- Tabela logu nie ma sortowania (poza chronologicznym), filtrowania ani
-  wyszukiwania. Okno *DX Cluster announcements* przechowuje maks. 500 ostatnich
-  ogłoszeń.
+- Pole wyszukiwania logu dopasowuje fragment znaku lub wymiany. Filtry pasma,
+  emisji i ważności można łączyć z wyszukiwaniem; domyślny widok pozostaje
+  chronologiczny. Wyniki są liczone dla całego aktywnego logu, ale tabela
+  renderuje maksymalnie 1000 najnowszych dopasowań.
+- Podpowiedzi w polu Call dopasowują prefiks znaku z Master.SCP/MASTER.CPY,
+  call history i bieżącego logu; wybrana sugestia jest wstawiana jawnie,
+  bez automatycznego zastępowania wpisanego tekstu.
+- Usunięcie QSO z potwierdzeniem i cofnięcie lokalnej zmiany są dostępne;
+  ograniczenia undo opisano w sekcji audytu QSO.
+- Brak wydruku i statystyk graficznych. Okno *DX Cluster announcements*
+  przechowuje maks. 500 ostatnich ogłoszeń.
 - Synchronizacja centralnego logu jest wdrożona, ale niezatwierdzona do
   pracy w zawodach: pozostają pełne testy awaryjne, próba odzyskiwania
   w środowisku docelowym i pilotaż 2–3 stacji. Szczegóły w

@@ -1,4 +1,5 @@
 #include "logger/data/sqlite_repository.h"
+#include "logger/network/sync_consistency.h"
 
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/data/log_exporter.h"
@@ -22,7 +23,7 @@
 namespace logger {
 namespace {
 
-constexpr int CurrentSchemaVersion = 17;
+constexpr int CurrentSchemaVersion = 19;
 constexpr int SpotPruneInterval = 200;
 constexpr int SpotRetentionHours = 24;
 constexpr int MaximumRetainedSpots = 5000;
@@ -170,7 +171,8 @@ QByteArray syncQsoPayload(const Qso &qso, const QString &operationUuid,
         {QStringLiteral("sent_exchange_fields"), exchangeObject(qso.sentExchangeFields)},
         {QStringLiteral("received_exchange_fields"),
          exchangeObject(qso.receivedExchangeFields)},
-        {QStringLiteral("points"), qso.points}
+        {QStringLiteral("points"), qso.points},
+        {QStringLiteral("is_invalid"), qso.invalid}
     };
     QJsonObject payload{
         {QStringLiteral("operation_uuid"), operationUuid},
@@ -185,6 +187,65 @@ QByteArray syncQsoPayload(const Qso &qso, const QString &operationUuid,
         payload.insert(QStringLiteral("reservation_uuid"), qso.reservationUuid);
     }
     return QJsonDocument(payload).toJson(QJsonDocument::Compact);
+}
+
+QJsonObject qsoAuditSnapshot(const Qso &qso, bool deleted)
+{
+    return {
+        {QStringLiteral("qso_uuid"), qso.qsoUuid},
+        {QStringLiteral("log_uuid"), qso.logUuid},
+        {QStringLiteral("station_uuid"), qso.stationUuid},
+        {QStringLiteral("reservation_uuid"), qso.reservationUuid},
+        {QStringLiteral("qso_version"), qso.qsoVersion},
+        {QStringLiteral("callsign"), qso.callsign.trimmed().toUpper()},
+        {QStringLiteral("station_callsign"), qso.stationCallsign.trimmed().toUpper()},
+        {QStringLiteral("band"), qso.band.trimmed().toLower()},
+        {QStringLiteral("timestamp_utc"), utcString(qso.timestampUtc)},
+        {QStringLiteral("frequency_hz"), qso.frequencyHz},
+        {QStringLiteral("mode"), qso.mode},
+        {QStringLiteral("sent_exchange"), qso.sentExchange},
+        {QStringLiteral("received_exchange"), qso.receivedExchange},
+        {QStringLiteral("sent_exchange_fields"), exchangeObject(qso.sentExchangeFields)},
+        {QStringLiteral("received_exchange_fields"),
+         exchangeObject(qso.receivedExchangeFields)},
+        {QStringLiteral("points"), qso.points},
+        {QStringLiteral("is_invalid"), qso.invalid},
+        {QStringLiteral("is_deleted"), deleted}
+    };
+}
+
+bool recordQsoAudit(QSqlDatabase &database, const QString &logUuid,
+                    const Qso &qso, const QString &action,
+                    const QJsonObject &before, const QJsonObject &after,
+                    qint64 undoOfId, qint64 *auditId, QString *error)
+{
+    QSqlQuery query(database);
+    query.prepare(QStringLiteral(
+        "INSERT INTO qso_change_audit(log_uuid, qso_uuid, qso_version, action, "
+        "before_json, after_json, undo_of_id, created_at_utc) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)"));
+    query.addBindValue(logUuid);
+    query.addBindValue(qso.qsoUuid);
+    query.addBindValue(qso.qsoVersion);
+    query.addBindValue(action);
+    query.addBindValue(QString::fromUtf8(QJsonDocument(before)
+                                             .toJson(QJsonDocument::Compact)));
+    query.addBindValue(QString::fromUtf8(QJsonDocument(after)
+                                             .toJson(QJsonDocument::Compact)));
+    if (undoOfId > 0) {
+        query.addBindValue(undoOfId);
+    } else {
+        query.addBindValue(QVariant());
+    }
+    query.addBindValue(utcString(QDateTime::currentDateTimeUtc()));
+    if (!query.exec()) {
+        setError(error, queryError(query));
+        return false;
+    }
+    if (auditId != nullptr) {
+        *auditId = query.lastInsertId().toLongLong();
+    }
+    return true;
 }
 
 bool enqueueQsoOperation(QSqlDatabase &database, const Qso &qso,
@@ -303,6 +364,7 @@ Qso readQso(const QSqlQuery &query)
             qso.receivedExchange, definition.receivedExchange);
     }
     qso.points = query.value(QStringLiteral("points")).toInt();
+    qso.invalid = query.value(QStringLiteral("is_invalid")).toBool();
     return qso;
 }
 
@@ -662,6 +724,33 @@ const QStringList MigrationSeventeen{
         "ON sync_transaction_metrics(log_uuid, completed_at_utc DESC)")
 };
 
+const QStringList MigrationEighteen{
+    QStringLiteral(
+        "ALTER TABLE qsos ADD COLUMN is_invalid INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(is_invalid IN (0, 1))")
+};
+
+const QStringList MigrationNineteen{
+    QStringLiteral(
+        "CREATE TABLE qso_change_audit ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "log_uuid TEXT NOT NULL REFERENCES contests(log_uuid),"
+        "qso_uuid TEXT NOT NULL,"
+        "qso_version INTEGER NOT NULL CHECK(qso_version > 0),"
+        "action TEXT NOT NULL CHECK(action IN "
+        "('create', 'update', 'delete', 'undo')),"
+        "before_json TEXT NOT NULL,"
+        "after_json TEXT NOT NULL,"
+        "undo_of_id INTEGER REFERENCES qso_change_audit(id),"
+        "created_at_utc TEXT NOT NULL)"),
+    QStringLiteral(
+        "CREATE INDEX idx_qso_change_audit_log_created "
+        "ON qso_change_audit(log_uuid, id DESC)"),
+    QStringLiteral(
+        "CREATE INDEX idx_qso_change_audit_undo_of "
+        "ON qso_change_audit(undo_of_id)")
+};
+
 QString newUuid()
 {
     return QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
@@ -956,6 +1045,10 @@ bool SqliteRepository::initialize(QString *error)
             migration = &MigrationSixteen;
         } else if (version == 17) {
             migration = &MigrationSeventeen;
+        } else if (version == 18) {
+            migration = &MigrationEighteen;
+        } else if (version == 19) {
+            migration = &MigrationNineteen;
         }
         if (migration == nullptr) {
             setError(error, QStringLiteral("No migration is available for schema version %1.")
@@ -1423,7 +1516,7 @@ bool SqliteRepository::setSyncCursor(
 }
 
 QVector<SyncOutboxOperation> SqliteRepository::syncOutbox(
-    const QString &logUuid, bool includeTerminal, QString *error) const
+    const QString &logUuid, bool includeTerminal, QString *error, int limit) const
 {
     clearError(error);
     QVector<SyncOutboxOperation> result;
@@ -1436,11 +1529,19 @@ QVector<SyncOutboxOperation> SqliteRepository::syncOutbox(
         "SELECT operation_uuid, log_uuid, entity_uuid, operation, payload_json, "
         "created_at_utc, status, attempts, last_error FROM sync_outbox "
         "WHERE log_uuid = ? ");
+    if (limit < 0) {
+        setError(error, QStringLiteral("Sync outbox limit cannot be negative."));
+        return result;
+    }
     query.prepare(select + (includeTerminal
         ? QStringLiteral("ORDER BY rowid")
         : QStringLiteral("AND status <> 'accepted' "
-                         "ORDER BY rowid")));
+                         "ORDER BY rowid"))
+        + (limit > 0 ? QStringLiteral(" LIMIT ?") : QString()));
     query.addBindValue(logUuid);
+    if (limit > 0) {
+        query.addBindValue(limit);
+    }
     if (!query.exec()) {
         setError(error, queryError(query));
         return result;
@@ -1452,6 +1553,18 @@ QVector<SyncOutboxOperation> SqliteRepository::syncOutbox(
         operation.entityUuid = query.value(2).toString();
         operation.operation = query.value(3).toString();
         operation.payloadJson = query.value(4).toString();
+        const QJsonDocument payload = QJsonDocument::fromJson(
+            operation.payloadJson.toUtf8());
+        if (payload.isObject()) {
+            QJsonObject operationJson = payload.object();
+            QJsonObject qso = operationJson.value(QStringLiteral("qso")).toObject();
+            if (!qso.isEmpty() && !qso.contains(QStringLiteral("is_invalid"))) {
+                qso.insert(QStringLiteral("is_invalid"), false);
+                operationJson.insert(QStringLiteral("qso"), qso);
+                operation.payloadJson = QString::fromUtf8(
+                    QJsonDocument(operationJson).toJson(QJsonDocument::Compact));
+            }
+        }
         operation.createdAtUtc = QDateTime::fromString(
             query.value(5).toString(), Qt::ISODateWithMs).toUTC();
         operation.status = query.value(6).toString();
@@ -2261,6 +2374,7 @@ bool SqliteRepository::resolveSyncConflictAcceptServer(
                 || remoteLogUuid != logUuid || !isSyncUuid(remoteStationUuid)
                 || !timestamp.isValid()
                 || !remote.value(QStringLiteral("is_deleted")).isBool()
+                || !remote.value(QStringLiteral("is_invalid")).isBool()
                 || !frequencyValue.isDouble() || !std::isfinite(frequency)
                 || frequency <= 0
                 || frequency > static_cast<double>(
@@ -2303,7 +2417,7 @@ bool SqliteRepository::resolveSyncConflictAcceptServer(
                 "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
                 "received_exchange = ?, sent_exchange_json = ?, "
                 "received_exchange_json = ?, points = ?, station_uuid = ?, "
-                "qso_version = ?, is_deleted = ? WHERE id = ?"));
+                "qso_version = ?, is_deleted = ?, is_invalid = ? WHERE id = ?"));
             updateQso.addBindValue(
                 remote.value(QStringLiteral("callsign")).toString().trimmed().toUpper());
             updateQso.addBindValue(remote.value(
@@ -2329,6 +2443,8 @@ bool SqliteRepository::resolveSyncConflictAcceptServer(
             updateQso.addBindValue(version);
             updateQso.addBindValue(
                 remote.value(QStringLiteral("is_deleted")).toBool() ? 1 : 0);
+            updateQso.addBindValue(
+                remote.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
             updateQso.addBindValue(localId);
             if (!updateQso.exec() || updateQso.numRowsAffected() != 1) {
                 setError(operationError, updateQso.lastError().isValid()
@@ -2797,6 +2913,7 @@ bool SqliteRepository::applySyncChanges(
             const QStringList requiredQsoKeys{
                 QStringLiteral("band"), QStringLiteral("callsign"),
                 QStringLiteral("frequency_hz"), QStringLiteral("is_deleted"),
+                QStringLiteral("is_invalid"),
                 QStringLiteral("log_uuid"), QStringLiteral("mode"),
                 QStringLiteral("points"), QStringLiteral("qso_uuid"),
                 QStringLiteral("qso_version"),
@@ -2817,6 +2934,7 @@ bool SqliteRepository::applySyncChanges(
                     && kind != QStringLiteral("qso.delete"))
                 || qso.keys() != requiredQsoKeys
                 || !qso.value(QStringLiteral("is_deleted")).isBool()
+                || !qso.value(QStringLiteral("is_invalid")).isBool()
                 || qso.value(QStringLiteral("qso_uuid")).toString() != qsoUuid
                 || qso.value(QStringLiteral("log_uuid")).toString() != logUuid
                 || !isSyncUuid(qso.value(QStringLiteral("station_uuid")).toString())
@@ -2952,8 +3070,8 @@ bool SqliteRepository::applySyncChanges(
                     "INSERT INTO qsos(contest_id, callsign, station_callsign, band, "
                     "timestamp_utc, frequency_hz, mode, sent_exchange, received_exchange, "
                     "sent_exchange_json, received_exchange_json, points, qso_uuid, "
-                    "station_uuid, qso_version, is_deleted) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+                    "station_uuid, qso_version, is_deleted, is_invalid) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
                 persist.addBindValue(contestId);
                 persist.addBindValue(callsign);
                 persist.addBindValue(stationCallsign);
@@ -2971,12 +3089,15 @@ bool SqliteRepository::applySyncChanges(
                 persist.addBindValue(qso.value(QStringLiteral("station_uuid")).toString());
                 persist.addBindValue(version);
                 persist.addBindValue(deleted ? 1 : 0);
+                persist.addBindValue(
+                    qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
             } else {
                 persist.prepare(QStringLiteral(
                     "UPDATE qsos SET callsign = ?, station_callsign = ?, band = ?, "
                     "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
                     "received_exchange = ?, sent_exchange_json = ?, received_exchange_json = ?, "
-                    "points = ?, station_uuid = ?, qso_version = ?, is_deleted = ? "
+                    "points = ?, station_uuid = ?, qso_version = ?, is_deleted = ?, "
+                    "is_invalid = ? "
                     "WHERE id = ?"));
                 persist.addBindValue(callsign);
                 persist.addBindValue(stationCallsign);
@@ -2993,6 +3114,8 @@ bool SqliteRepository::applySyncChanges(
                 persist.addBindValue(qso.value(QStringLiteral("station_uuid")).toString());
                 persist.addBindValue(version);
                 persist.addBindValue(deleted ? 1 : 0);
+                persist.addBindValue(
+                    qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
                 persist.addBindValue(localId);
             }
             if (!persist.exec() || (exists && persist.numRowsAffected() != 1)) {
@@ -3089,6 +3212,7 @@ bool SqliteRepository::applySyncSnapshot(
         const QStringList requiredKeys{
             QStringLiteral("band"), QStringLiteral("callsign"),
             QStringLiteral("frequency_hz"), QStringLiteral("is_deleted"),
+            QStringLiteral("is_invalid"),
             QStringLiteral("log_uuid"), QStringLiteral("mode"),
             QStringLiteral("points"), QStringLiteral("qso_uuid"),
             QStringLiteral("qso_version"),
@@ -3115,6 +3239,7 @@ bool SqliteRepository::applySyncSnapshot(
                 || !isSyncUuid(qso.value(QStringLiteral("station_uuid")).toString())
                 || qso.value(QStringLiteral("is_deleted")).toBool()
                 || !qso.value(QStringLiteral("is_deleted")).isBool()
+                || !qso.value(QStringLiteral("is_invalid")).isBool()
                 || qso.value(QStringLiteral("qso_version")).toInt(-1) < 1
                 || !qso.value(QStringLiteral("frequency_hz")).isDouble()
                 || !qso.value(QStringLiteral("points")).isDouble()
@@ -3187,7 +3312,8 @@ bool SqliteRepository::applySyncSnapshot(
                     "UPDATE qsos SET callsign = ?, station_callsign = ?, band = ?, "
                     "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
                     "received_exchange = ?, sent_exchange_json = ?, received_exchange_json = ?, "
-                    "points = ?, station_uuid = ?, qso_version = ?, is_deleted = 0 "
+                    "points = ?, station_uuid = ?, qso_version = ?, is_deleted = 0, "
+                    "is_invalid = ? "
                     "WHERE id = ?"));
                 persist.addBindValue(qso.value(QStringLiteral("callsign")).toString()
                                          .trimmed().toUpper());
@@ -3206,14 +3332,16 @@ bool SqliteRepository::applySyncSnapshot(
                 persist.addBindValue(qso.value(QStringLiteral("points")).toInt());
                 persist.addBindValue(qso.value(QStringLiteral("station_uuid")).toString());
                 persist.addBindValue(qso.value(QStringLiteral("qso_version")).toInt());
+                persist.addBindValue(
+                    qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
                 persist.addBindValue(localId);
             } else {
                 persist.prepare(QStringLiteral(
                     "INSERT INTO qsos(contest_id, callsign, station_callsign, band, "
                     "timestamp_utc, frequency_hz, mode, sent_exchange, received_exchange, "
                     "sent_exchange_json, received_exchange_json, points, qso_uuid, "
-                    "station_uuid, qso_version, is_deleted) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)"));
+                    "station_uuid, qso_version, is_deleted, is_invalid) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)"));
                 persist.addBindValue(contestId);
                 persist.addBindValue(qso.value(QStringLiteral("callsign")).toString()
                                          .trimmed().toUpper());
@@ -3233,6 +3361,8 @@ bool SqliteRepository::applySyncSnapshot(
                 persist.addBindValue(qsoUuid);
                 persist.addBindValue(qso.value(QStringLiteral("station_uuid")).toString());
                 persist.addBindValue(qso.value(QStringLiteral("qso_version")).toInt());
+                persist.addBindValue(
+                    qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
             }
             if (!persist.exec()) {
                 setError(operationError, queryError(persist));
@@ -3256,6 +3386,62 @@ bool SqliteRepository::applySyncSnapshot(
         }
         return true;
     }, error);
+}
+
+QJsonObject SqliteRepository::syncConsistencyDigest(
+    const QString &logUuid, QString *error) const
+{
+    clearError(error);
+    if (logUuid.trimmed().isEmpty()) {
+        setError(error, QStringLiteral("Log UUID is required for consistency audit."));
+        return {};
+    }
+    QJsonArray snapshots;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT q.qso_uuid, c.log_uuid, q.station_uuid, q.callsign, "
+        "q.station_callsign, q.band, q.timestamp_utc, q.frequency_hz, q.mode, "
+        "q.sent_exchange, q.received_exchange, q.sent_exchange_json, "
+        "q.received_exchange_json, q.points, q.qso_version, q.is_deleted, "
+        "q.is_invalid "
+        "FROM qsos q JOIN contests c ON c.id = q.contest_id "
+        "WHERE c.log_uuid = ? ORDER BY q.qso_uuid"));
+    query.addBindValue(logUuid);
+    if (!query.exec()) {
+        setError(error, queryError(query));
+        return {};
+    }
+    while (query.next()) {
+        const QJsonDocument sentFields = QJsonDocument::fromJson(
+            query.value(11).toByteArray());
+        const QJsonDocument receivedFields = QJsonDocument::fromJson(
+            query.value(12).toByteArray());
+        if (!sentFields.isObject() || !receivedFields.isObject()) {
+            setError(error, QStringLiteral("Stored QSO exchange fields are invalid."));
+            return {};
+        }
+        snapshots.append(QJsonObject{
+            {QStringLiteral("qso_uuid"), query.value(0).toString()},
+            {QStringLiteral("log_uuid"), query.value(1).toString()},
+            {QStringLiteral("station_uuid"), query.value(2).toString()},
+            {QStringLiteral("callsign"), query.value(3).toString()},
+            {QStringLiteral("station_callsign"), query.value(4).toString()},
+            {QStringLiteral("band"), query.value(5).toString()},
+            {QStringLiteral("timestamp_utc"), query.value(6).toString()},
+            {QStringLiteral("frequency_hz"),
+             QJsonValue::fromVariant(query.value(7))},
+            {QStringLiteral("mode"), query.value(8).toString()},
+            {QStringLiteral("sent_exchange"), query.value(9).toString()},
+            {QStringLiteral("received_exchange"), query.value(10).toString()},
+            {QStringLiteral("sent_exchange_fields"), sentFields.object()},
+            {QStringLiteral("received_exchange_fields"), receivedFields.object()},
+            {QStringLiteral("points"), query.value(13).toInt()},
+            {QStringLiteral("qso_version"), query.value(14).toInt()},
+            {QStringLiteral("is_deleted"), query.value(15).toBool()},
+            {QStringLiteral("is_invalid"), query.value(16).toBool()}
+        });
+    }
+    return logger::syncConsistencyDigest(snapshots);
 }
 
 QStringList SqliteRepository::contestDefinitionCodes(QString *error) const
@@ -3460,8 +3646,8 @@ bool SqliteRepository::saveQso(Qso &qso, QString *error)
             "INSERT INTO qsos(contest_id, callsign, station_callsign, band, timestamp_utc, "
             "frequency_hz, mode, sent_exchange, received_exchange, "
             "sent_exchange_json, received_exchange_json, points, qso_uuid, station_uuid, "
-            "qso_version, reservation_uuid) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+            "qso_version, reservation_uuid, is_invalid) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
         query.addBindValue(qso.contestId);
         query.addBindValue(qso.callsign.trimmed().toUpper());
         query.addBindValue(qso.stationCallsign.trimmed().toUpper());
@@ -3473,17 +3659,24 @@ bool SqliteRepository::saveQso(Qso &qso, QString *error)
         query.addBindValue(qso.receivedExchange);
         query.addBindValue(exchangeJson(qso.sentExchangeFields));
         query.addBindValue(exchangeJson(qso.receivedExchangeFields));
-        query.addBindValue(qso.points);
+        query.addBindValue(qso.invalid ? 0 : qso.points);
         query.addBindValue(qso.qsoUuid);
         query.addBindValue(qso.stationUuid);
         query.addBindValue(qso.qsoVersion);
         query.addBindValue(qso.reservationUuid.isNull()
             ? QStringLiteral("") : qso.reservationUuid);
+        query.addBindValue(qso.invalid ? 1 : 0);
         if (!query.exec()) {
             setError(operationError, queryError(query));
             return false;
         }
         savedId = query.lastInsertId().toLongLong();
+        qso.id = savedId;
+        if (!recordQsoAudit(m_database, logUuid, qso, QStringLiteral("create"),
+                            {}, qsoAuditSnapshot(qso, false), 0, nullptr,
+                            operationError)) {
+            return false;
+        }
         if (!qso.reservationUuid.isEmpty()) {
             QSqlQuery consumeReservation(m_database);
             consumeReservation.prepare(QStringLiteral(
@@ -3528,6 +3721,14 @@ bool SqliteRepository::updateQso(const Qso &qso, QString *error)
     }
 
     return withSavepoint(m_database, [this, &qso](QString *operationError) {
+        const std::optional<Qso> previous = qsoById(qso.id, operationError);
+        if (!previous.has_value()) {
+            if (operationError->isEmpty()) {
+                setError(operationError,
+                         QStringLiteral("QSO %1 does not exist.").arg(qso.id));
+            }
+            return false;
+        }
         QSqlQuery current(m_database);
         current.prepare(QStringLiteral(
             "SELECT q.qso_uuid, q.station_uuid, q.qso_version, c.log_uuid "
@@ -3570,7 +3771,7 @@ bool SqliteRepository::updateQso(const Qso &qso, QString *error)
             "band = ?, timestamp_utc = ?, frequency_hz = ?, mode = ?, "
             "sent_exchange = ?, received_exchange = ?, sent_exchange_json = ?, "
             "received_exchange_json = ?, points = ?, qso_version = ?, "
-            "reservation_uuid = ? "
+            "reservation_uuid = ?, is_invalid = ? "
             "WHERE id = ? AND qso_version = ? AND is_deleted = 0"));
         query.addBindValue(updated.contestId);
         query.addBindValue(updated.callsign.trimmed().toUpper());
@@ -3583,10 +3784,11 @@ bool SqliteRepository::updateQso(const Qso &qso, QString *error)
         query.addBindValue(updated.receivedExchange);
         query.addBindValue(exchangeJson(updated.sentExchangeFields));
         query.addBindValue(exchangeJson(updated.receivedExchangeFields));
-        query.addBindValue(updated.points);
+        query.addBindValue(updated.invalid ? 0 : updated.points);
         query.addBindValue(updated.qsoVersion);
         query.addBindValue(updated.reservationUuid.isNull()
             ? QStringLiteral("") : updated.reservationUuid);
+        query.addBindValue(updated.invalid ? 1 : 0);
         query.addBindValue(updated.id);
         query.addBindValue(currentVersion);
         if (!query.exec()) {
@@ -3596,6 +3798,12 @@ bool SqliteRepository::updateQso(const Qso &qso, QString *error)
         if (query.numRowsAffected() != 1) {
             setError(operationError, QStringLiteral(
                 "QSO %1 changed during update.").arg(qso.id));
+            return false;
+        }
+        if (!recordQsoAudit(
+                m_database, logUuid, updated, QStringLiteral("update"),
+                qsoAuditSnapshot(*previous, false),
+                qsoAuditSnapshot(updated, false), 0, nullptr, operationError)) {
             return false;
         }
         return enqueueQsoOperation(m_database, updated, QStringLiteral("qso.update"),
@@ -3616,7 +3824,8 @@ bool SqliteRepository::deleteQso(qint64 id, QString *error)
             "SELECT q.contest_id, q.qso_uuid, q.station_uuid, q.qso_version, "
             "q.callsign, q.station_callsign, q.band, q.timestamp_utc, q.frequency_hz, "
             "q.mode, q.sent_exchange, q.received_exchange, q.sent_exchange_json, "
-            "q.received_exchange_json, q.points, c.log_uuid, q.reservation_uuid "
+            "q.received_exchange_json, q.points, c.log_uuid, q.reservation_uuid, "
+            "q.is_invalid "
             "FROM qsos q JOIN contests c ON c.id = q.contest_id "
             "WHERE q.id = ? AND q.is_deleted = 0"));
         current.addBindValue(id);
@@ -3663,9 +3872,11 @@ bool SqliteRepository::deleteQso(qint64 id, QString *error)
         deleted.points = current.value(14).toInt();
         deleted.logUuid = current.value(15).toString();
         deleted.reservationUuid = current.value(16).toString();
+        deleted.invalid = current.value(17).toBool();
         current.finish();
 
         const int expectedVersion = deleted.qsoVersion;
+        const QJsonObject before = qsoAuditSnapshot(deleted, false);
         ++deleted.qsoVersion;
         QSqlQuery update(m_database);
         update.prepare(QStringLiteral(
@@ -3680,8 +3891,225 @@ bool SqliteRepository::deleteQso(qint64 id, QString *error)
                 : QStringLiteral("QSO changed while it was being deleted."));
             return false;
         }
+        if (!recordQsoAudit(
+                m_database, deleted.logUuid, deleted, QStringLiteral("delete"),
+                before, qsoAuditSnapshot(deleted, true), 0, nullptr,
+                operationError)) {
+            return false;
+        }
         return enqueueQsoOperation(m_database, deleted, QStringLiteral("qso.delete"),
                                    expectedVersion, operationError);
+    }, error);
+}
+
+bool SqliteRepository::undoLastQsoChange(qint64 contestId, QString *error)
+{
+    clearError(error);
+    if (contestId <= 0) {
+        setError(error, QStringLiteral("Contest id must be positive."));
+        return false;
+    }
+    return withSavepoint(m_database, [this, contestId](QString *operationError) {
+        QSqlQuery latest(m_database);
+        latest.prepare(QStringLiteral(
+            "SELECT a.id, a.qso_uuid, a.qso_version, a.action, a.before_json, "
+            "a.after_json, c.log_uuid FROM qso_change_audit a "
+            "JOIN contests c ON c.log_uuid = a.log_uuid "
+            "WHERE c.id = ? AND a.action <> 'undo' AND NOT EXISTS("
+            "SELECT 1 FROM qso_change_audit undo WHERE undo.undo_of_id = a.id) "
+            "ORDER BY a.id DESC LIMIT 1"));
+        latest.addBindValue(contestId);
+        if (!latest.exec()) {
+            setError(operationError, queryError(latest));
+            return false;
+        }
+        if (!latest.next()) {
+            setError(operationError, QStringLiteral("There is no QSO change to undo."));
+            return false;
+        }
+        const qint64 auditId = latest.value(0).toLongLong();
+        const QString qsoUuid = latest.value(1).toString();
+        const int auditedVersion = latest.value(2).toInt();
+        const QString action = latest.value(3).toString();
+        const QJsonObject before = QJsonDocument::fromJson(
+            latest.value(4).toString().toUtf8()).object();
+        const QJsonObject after = QJsonDocument::fromJson(
+            latest.value(5).toString().toUtf8()).object();
+        const QString logUuid = latest.value(6).toString();
+        latest.finish();
+        if (action != QStringLiteral("create")
+            && action != QStringLiteral("update")
+            && action != QStringLiteral("delete")) {
+            setError(operationError, QStringLiteral("The latest QSO change cannot be undone."));
+            return false;
+        }
+
+        QSqlQuery current(m_database);
+        current.prepare(QStringLiteral(
+            "SELECT q.id, q.contest_id, q.callsign, q.station_callsign, q.band, "
+            "q.timestamp_utc, q.frequency_hz, q.mode, q.sent_exchange, "
+            "q.received_exchange, q.sent_exchange_json, q.received_exchange_json, "
+            "q.points, q.qso_uuid, q.station_uuid, q.qso_version, c.log_uuid, "
+            "q.reservation_uuid, q.is_invalid, 'local' AS sync_status, "
+            "c.definition_yaml, q.is_deleted FROM qsos q "
+            "JOIN contests c ON c.id = q.contest_id "
+            "WHERE q.qso_uuid = ? AND q.contest_id = ?"));
+        current.addBindValue(qsoUuid);
+        current.addBindValue(contestId);
+        if (!current.exec()) {
+            setError(operationError, queryError(current));
+            return false;
+        }
+        if (!current.next()) {
+            setError(operationError, QStringLiteral("The QSO to undo no longer exists."));
+            return false;
+        }
+        Qso currentQso = readQso(current);
+        const qint64 qsoId = currentQso.id;
+        const int currentVersion = currentQso.qsoVersion;
+        const bool currentDeleted = current.value(21).toBool();
+        QJsonObject currentSnapshot = qsoAuditSnapshot(currentQso, currentDeleted);
+        current.finish();
+        QSqlQuery currentAudit(m_database);
+        currentAudit.prepare(QStringLiteral(
+            "SELECT 1 FROM qso_change_audit WHERE log_uuid = ? AND qso_uuid = ? "
+            "AND qso_version = ? LIMIT 1"));
+        currentAudit.addBindValue(logUuid);
+        currentAudit.addBindValue(qsoUuid);
+        currentAudit.addBindValue(currentVersion);
+        if (!currentAudit.exec()) {
+            setError(operationError, queryError(currentAudit));
+            return false;
+        }
+        if (!currentAudit.next()) {
+            setError(operationError, QStringLiteral(
+                "The current QSO version is not in the local audit; undo was refused."));
+            return false;
+        }
+        currentAudit.finish();
+        QJsonObject expectedSnapshot = after;
+        currentSnapshot.remove(QStringLiteral("qso_version"));
+        expectedSnapshot.remove(QStringLiteral("qso_version"));
+        for (const QString &exchange : {QStringLiteral("sent_exchange"),
+                                        QStringLiteral("received_exchange")}) {
+            if (currentSnapshot.value(exchange) == expectedSnapshot.value(exchange)) {
+                const QString fields = exchange + QStringLiteral("_fields");
+                currentSnapshot.remove(fields);
+                expectedSnapshot.remove(fields);
+            }
+        }
+        if (after.value(QStringLiteral("qso_version")).toInt(-1) != auditedVersion
+            || currentSnapshot != expectedSnapshot) {
+            QStringList differences;
+            for (auto it = expectedSnapshot.begin();
+                 it != expectedSnapshot.end(); ++it) {
+                if (currentSnapshot.value(it.key()) != it.value()) {
+                    differences.append(it.key());
+                }
+            }
+            setError(operationError, QStringLiteral(
+                "The QSO changed after the audited operation; undo was not applied "
+                "(audit version %1, current version %2; differences: %3).")
+                    .arg(auditedVersion)
+                    .arg(currentVersion)
+                    .arg(differences.join(QStringLiteral(", "))));
+            return false;
+        }
+
+        Qso restored;
+        const QJsonObject target = action == QStringLiteral("create")
+            ? after : before;
+        restored.id = qsoId;
+        restored.contestId = contestId;
+        restored.qsoUuid = qsoUuid;
+        restored.logUuid = logUuid;
+        restored.stationUuid =
+            target.value(QStringLiteral("station_uuid")).toString();
+        restored.reservationUuid =
+            target.value(QStringLiteral("reservation_uuid")).toString();
+        restored.callsign = target.value(QStringLiteral("callsign")).toString();
+        restored.stationCallsign =
+            target.value(QStringLiteral("station_callsign")).toString();
+        restored.band = target.value(QStringLiteral("band")).toString();
+        restored.timestampUtc = QDateTime::fromString(
+            target.value(QStringLiteral("timestamp_utc")).toString(),
+            Qt::ISODateWithMs);
+        restored.frequencyHz =
+            target.value(QStringLiteral("frequency_hz")).toInteger();
+        restored.mode = target.value(QStringLiteral("mode")).toString();
+        restored.sentExchange =
+            target.value(QStringLiteral("sent_exchange")).toString();
+        restored.receivedExchange =
+            target.value(QStringLiteral("received_exchange")).toString();
+        const auto fields = [](const QJsonValue &value) {
+            QMap<QString, QString> result;
+            const QJsonObject object = value.toObject();
+            for (auto it = object.begin(); it != object.end(); ++it) {
+                if (it.value().isString()) {
+                    result.insert(it.key(), it.value().toString());
+                }
+            }
+            return result;
+        };
+        restored.sentExchangeFields =
+            fields(target.value(QStringLiteral("sent_exchange_fields")));
+        restored.receivedExchangeFields =
+            fields(target.value(QStringLiteral("received_exchange_fields")));
+        restored.points = target.value(QStringLiteral("points")).toInt();
+        restored.invalid =
+            target.value(QStringLiteral("is_invalid")).toBool();
+        if (!operationError->isEmpty()) {
+            return false;
+        }
+        restored.id = qsoId;
+        restored.contestId = contestId;
+        restored.qsoUuid = qsoUuid;
+        restored.logUuid = logUuid;
+        restored.qsoVersion = currentVersion + 1;
+        const bool deleted = action == QStringLiteral("create");
+
+        QSqlQuery update(m_database);
+        update.prepare(QStringLiteral(
+            "UPDATE qsos SET callsign = ?, station_callsign = ?, band = ?, "
+            "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
+            "received_exchange = ?, sent_exchange_json = ?, received_exchange_json = ?, "
+            "points = ?, qso_version = ?, reservation_uuid = ?, is_invalid = ?, "
+            "is_deleted = ? WHERE id = ? AND qso_version = ?"));
+        update.addBindValue(restored.callsign.trimmed().toUpper());
+        update.addBindValue(restored.stationCallsign.trimmed().toUpper());
+        update.addBindValue(restored.band.trimmed().toLower());
+        update.addBindValue(utcString(restored.timestampUtc));
+        update.addBindValue(restored.frequencyHz);
+        update.addBindValue(restored.mode);
+        update.addBindValue(restored.sentExchange);
+        update.addBindValue(restored.receivedExchange);
+        update.addBindValue(exchangeJson(restored.sentExchangeFields));
+        update.addBindValue(exchangeJson(restored.receivedExchangeFields));
+        update.addBindValue(restored.invalid ? 0 : restored.points);
+        update.addBindValue(restored.qsoVersion);
+        update.addBindValue(restored.reservationUuid);
+        update.addBindValue(restored.invalid ? 1 : 0);
+        update.addBindValue(deleted ? 1 : 0);
+        update.addBindValue(qsoId);
+        update.addBindValue(currentVersion);
+        if (!update.exec() || update.numRowsAffected() != 1) {
+            setError(operationError, update.lastError().isValid()
+                ? queryError(update)
+                : QStringLiteral("The QSO changed while undo was being applied."));
+            return false;
+        }
+
+        currentSnapshot = qsoAuditSnapshot(restored, currentDeleted);
+        const QJsonObject restoredSnapshot = qsoAuditSnapshot(restored, deleted);
+        if (!recordQsoAudit(m_database, logUuid, restored, QStringLiteral("undo"),
+                            currentSnapshot, restoredSnapshot, auditId,
+                            nullptr, operationError)) {
+            return false;
+        }
+        return enqueueQsoOperation(
+            m_database, restored,
+            deleted ? QStringLiteral("qso.delete") : QStringLiteral("qso.update"),
+            currentVersion, operationError);
     }, error);
 }
 
@@ -3694,6 +4122,7 @@ std::optional<Qso> SqliteRepository::qsoById(qint64 id, QString *error) const
         "q.frequency_hz, q.mode, q.sent_exchange, q.received_exchange, "
         "q.sent_exchange_json, q.received_exchange_json, q.points, q.qso_uuid, "
         "q.station_uuid, q.qso_version, c.log_uuid, q.reservation_uuid, "
+        "q.is_invalid, "
         "CASE WHEN EXISTS(SELECT 1 FROM sync_outbox so "
         "WHERE so.entity_uuid = q.qso_uuid AND so.status = 'conflict') "
         "THEN 'conflict' WHEN EXISTS(SELECT 1 FROM sync_outbox so "
@@ -3800,6 +4229,7 @@ std::optional<qint64> SqliteRepository::findDuplicate(
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT id FROM qsos WHERE contest_id = ? AND is_deleted = 0 "
+        "AND is_invalid = 0 "
         "AND callsign = ? COLLATE NOCASE AND band = ? COLLATE NOCASE "
         "AND mode = ? COLLATE NOCASE AND (? <= 0 OR id <> ?) "
         "ORDER BY id LIMIT 1"));
@@ -3865,6 +4295,7 @@ QVector<Qso> SqliteRepository::qsosForContest(qint64 contestId, int limit,
         "q.frequency_hz, q.mode, q.sent_exchange, q.received_exchange, "
         "q.sent_exchange_json, q.received_exchange_json, q.points, q.qso_uuid, "
         "q.station_uuid, q.qso_version, c.log_uuid, q.reservation_uuid, "
+        "q.is_invalid, "
         "CASE WHEN EXISTS(SELECT 1 FROM sync_outbox so "
         "WHERE so.entity_uuid = q.qso_uuid AND so.status = 'conflict') "
         "THEN 'conflict' WHEN EXISTS(SELECT 1 FROM sync_outbox so "

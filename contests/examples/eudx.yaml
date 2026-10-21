@@ -2,13 +2,15 @@ schema_version: 1
 id: eudx
 name: European Union DX Contest
 description: >-
-  Rules: https://www.eudx-contest.com/rules/. EU stations send RST plus a
-  two-letter/two-digit region code; other stations send RST plus ITU zone. Enter
-  the applicable sent and received field manually. Each country is counted as
-  a multiplier per band; EU-region multipliers are not automatically scored.
-  QSO points depend on EU membership, which this schema and CTY data cannot
-  identify reliably, so the configured one point is a placeholder. The profile
-  is not a certified score calculator for any entrant category.
+  Rules: https://www.eudx-contest.com/rules/ (accessed 2026-10-18). EU
+  stations send RST plus their EU region; other stations send RST plus ITU
+  zone. Enter the applicable sent and received fields manually. A contact in
+  the same country is worth 2 points, a contact with an EU station in a
+  different country is worth 10, a non-EU station on the same continent is
+  worth 3, and a station on another continent is worth 5. The received region
+  field identifies an EU station; countries and regions are multipliers per
+  band. Correct score totals also depend on the CTY country resolution and
+  the official list of EU regions, so validate those inputs before submission.
 bands: [160m, 80m, 40m, 20m, 15m, 10m]
 modes: [CW, SSB]
 cabrillo: {contest: EUDXC}
@@ -22,7 +24,13 @@ exchange:
     - {name: region, label: EU region, type: text, required: false, pattern: "^[A-Z]{2}[0-9]{2}$", width: 4}
     - {name: itu_zone, label: ITU Zone, type: integer, required: false, min: 1, max: 90}
 scoring:
-  qso_points: 1
+  qso_points: 0
+  qso_point_rules:
+    - {points: 2, when: {same_country: true}}
+    - {points: 10, when: {has_received.region: true}}
+    - {points: 3, when: {same_continent: true}}
+    - {points: 5, when: {same_continent: false}}
   multipliers:
+    - {type: exchange, field: region, per_band: true}
     - {type: dxcc, per_band: true}
 dupe_key: [callsign, band, mode]

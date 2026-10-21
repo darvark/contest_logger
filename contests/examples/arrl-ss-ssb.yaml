@@ -1,0 +1,48 @@
+schema_version: 1
+id: arrl-ss-ssb
+name: ARRL November Sweepstakes — Phone
+description: >-
+  2026 rules: https://contests.arrl.org/ContestRules/SS-Rules.pdf and
+  https://www.arrl.org/sweepstakes. Exchange is serial, precedence, check, and
+  ARRL/RAC section. Each valid QSO is worth 2 points; each of the 85 sections
+  is a multiplier once per contest, and a callsign is a dupe across all bands.
+  This profile does not enforce the US/Canada participant restriction, operating
+  time limit, or consistency between precedence and the station category.
+bands: [160m, 80m, 40m, 20m, 15m, 10m]
+modes: [SSB]
+cabrillo: {contest: ARRL-SS-SSB}
+exchange:
+  sent:
+    - {name: serial, label: Serial number, type: serial, generated: true, width: 3}
+    - {name: precedence, label: Precedence, type: enum, values: [Q, A, B, U, M, S]}
+    - {name: check, label: Check (last two license-year digits), type: text, pattern: "^[0-9]{2}$", width: 2}
+    - name: section
+      label: ARRL/RAC section
+      type: enum
+      values:
+        [CO, IA, KS, MN, MO, ND, NE, SD, CT, EMA, ME, NH, RI, VT, WMA,
+         ENY, NLI, NNJ, NNY, SNJ, WNY, DE, EPA, MDC, WPA, AL, GA, KY, NC,
+         NFL, PR, SC, SFL, TN, VA, VI, WCF, AR, LA, MS, NM, NTX, OK, STX,
+         WTX, EB, LAX, ORG, PAC, SB, SCV, SDG, SF, SJV, SV, AK, AZ, EWA,
+         ID, MT, NV, OR, UT, WWA, WY, MI, OH, WV, IL, IN, WI, AB, BC, MB,
+         NB, NL, NS, ONE, ONN, ONS, GH, PE, QC, SK, TER]
+  received:
+    - {name: serial, label: Serial number, type: integer, min: 1, max: 999999}
+    - {name: precedence, label: Precedence, type: enum, values: [Q, A, B, U, M, S]}
+    - {name: check, label: Check (last two license-year digits), type: text, pattern: "^[0-9]{2}$", width: 2}
+    - name: section
+      label: ARRL/RAC section
+      type: enum
+      values:
+        [CO, IA, KS, MN, MO, ND, NE, SD, CT, EMA, ME, NH, RI, VT, WMA,
+         ENY, NLI, NNJ, NNY, SNJ, WNY, DE, EPA, MDC, WPA, AL, GA, KY, NC,
+         NFL, PR, SC, SFL, TN, VA, VI, WCF, AR, LA, MS, NM, NTX, OK, STX,
+         WTX, EB, LAX, ORG, PAC, SB, SCV, SDG, SF, SJV, SV, AK, AZ, EWA,
+         ID, MT, NV, OR, UT, WWA, WY, MI, OH, WV, IL, IN, WI, AB, BC, MB,
+         NB, NL, NS, ONE, ONN, ONS, GH, PE, QC, SK, TER]
+scoring:
+  qso_points: 2
+  serial_start: 1
+  multipliers:
+    - {type: exchange, field: section}
+dupe_key: [callsign]

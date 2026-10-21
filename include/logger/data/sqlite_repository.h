@@ -45,7 +45,7 @@ public:
                        QString *error = nullptr);
     QVector<SyncOutboxOperation> syncOutbox(
         const QString &logUuid, bool includeTerminal = false,
-        QString *error = nullptr) const;
+        QString *error = nullptr, int limit = 0) const;
     QVector<SyncConflict> syncConflicts(const QString &logUuid,
                                         QString *error = nullptr) const;
     bool setSyncOperationState(const QString &operationUuid, const QString &state,
@@ -94,9 +94,12 @@ public:
     bool applySyncSnapshot(const QString &logUuid, const QJsonArray &qsos,
                            qint64 revision, const QString &sha256,
                            QString *error = nullptr);
+    QJsonObject syncConsistencyDigest(const QString &logUuid,
+                                     QString *error = nullptr) const;
     bool saveQso(Qso &qso, QString *error = nullptr);
     bool updateQso(const Qso &qso, QString *error = nullptr);
     bool deleteQso(qint64 id, QString *error = nullptr);
+    bool undoLastQsoChange(qint64 contestId, QString *error = nullptr);
     std::optional<Qso> qsoById(qint64 id, QString *error = nullptr) const;
     QVector<Qso> qsosForContest(qint64 contestId, int limit = 0,
                                 QString *error = nullptr) const;

@@ -289,7 +289,8 @@ bool validateConditionKeys(
                                 QStringLiteral("station.itu_zone"),
                                 QStringLiteral("same_dxcc"),
                                 QStringLiteral("same_country"),
-                                QStringLiteral("same_continent")};
+                                QStringLiteral("same_continent"),
+                                QStringLiteral("same_itu_zone")};
     for (auto it = conditions.cbegin(); it != conditions.cend(); ++it) {
         if (builtIn.contains(it.key())) {
             continue;
@@ -299,6 +300,8 @@ bool validateConditionKeys(
             fieldName = it.key().mid(QStringLiteral("exchange.").size());
         } else if (it.key().startsWith(QStringLiteral("received."))) {
             fieldName = it.key().mid(QStringLiteral("received.").size());
+        } else if (it.key().startsWith(QStringLiteral("has_received."))) {
+            fieldName = it.key().mid(QStringLiteral("has_received.").size());
         } else {
             setError(error, QStringLiteral("%1 has unsupported condition '%2'.")
                                 .arg(path, it.key()));
@@ -690,7 +693,8 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
             if (!checkKeys(item,
                            {QStringLiteral("type"), QStringLiteral("field"),
                             QStringLiteral("per_band"),
-                            QStringLiteral("per_mode")},
+                            QStringLiteral("per_mode"),
+                            QStringLiteral("exclude")},
                            itemPath, error)) {
                 return false;
             }
@@ -700,7 +704,8 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                 return false;
             }
             multiplier.type = multiplier.type.toLower();
-            if (multiplier.type == QStringLiteral("exchange")) {
+            if (multiplier.type == QStringLiteral("exchange")
+                || multiplier.type == QStringLiteral("exchange_prefix")) {
                 if (!requiredString(item, QStringLiteral("field"), itemPath,
                                     multiplier.field, error)) {
                     return false;
@@ -724,7 +729,7 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                        && multiplier.type != QStringLiteral("country")) {
                 setError(error,
                          QStringLiteral("%1.type must be 'exchange', 'prefix', "
-                                        "'dxcc', or 'country'.")
+                                        "'exchange_prefix', 'dxcc', or 'country'.")
                              .arg(itemPath));
                 return false;
             } else if (item["field"]) {
@@ -739,6 +744,26 @@ bool parseDefinition(const YAML::Node &root, ContestDefinition &definition,
                 || !optionalBool(item, QStringLiteral("per_mode"), itemPath,
                                  false, multiplier.perMode, error)) {
                 return false;
+            }
+            if (item["exclude"]) {
+                if (multiplier.type != QStringLiteral("dxcc")
+                    && multiplier.type != QStringLiteral("country")) {
+                    setError(error,
+                             QStringLiteral("%1.exclude is only supported for "
+                                            "DXCC or country multipliers.")
+                                 .arg(itemPath));
+                    return false;
+                }
+                if (!stringList(item["exclude"],
+                                itemPath + QStringLiteral(".exclude"),
+                                multiplier.excludedValues, error)
+                    || multiplier.excludedValues.isEmpty()) {
+                    if (error != nullptr && error->isEmpty()) {
+                        setError(error, QStringLiteral("%1.exclude must not be empty.")
+                                            .arg(itemPath));
+                    }
+                    return false;
+                }
             }
             const QString key
                 = multiplier.type + QLatin1Char(':') + multiplier.field;

@@ -31,6 +31,8 @@ public:
                 const QString &certificatePath, const QString &privateKeyPath,
                 const QString &tokenFilePath, int maximumConnections,
                 QString *error = nullptr);
+    bool listenTrustedNetwork(const QString &address, quint16 port,
+                              int maximumConnections, QString *error = nullptr);
     void close();
     quint16 serverPort() const;
     int activeConnections() const;
@@ -64,6 +66,7 @@ private:
     QSslCertificate m_certificate;
     QSslKey m_privateKey;
     int m_maximumConnections = 0;
+    bool m_trustedNetworkMode = false;
 };
 
 } // namespace logger

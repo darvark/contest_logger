@@ -22,6 +22,7 @@
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QSet>
+#include <QTcpServer>
 #include <QThread>
 #include <QUuid>
 #include <QtTest>
@@ -105,7 +106,7 @@ bool readFrame(QSslSocket &socket, QJsonObject *message, int timeoutMs = 5000)
 }
 
 QJsonObject request(QSslSocket &socket, const QString &type,
-                    const QJsonObject &payload, int version = 1,
+                    const QJsonObject &payload, int version = 2,
                     bool splitFrame = false)
 {
     const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces)
@@ -164,7 +165,11 @@ private slots:
     void servesTlsProtocolWithFragmentedFrames();
     void rejectsUnsupportedProtocolVersion();
     void enforcesConcurrentConnectionLimit();
+    void trustedServerEnforcesConfiguredConnectionLimit();
     void connectsWithVerifiedTlsClient();
+    void registersTrustedNetworkStationWithoutCredentials();
+    void trustedClientReconnectsAfterNetworkLoss();
+    void trustedNetworkThreeStationPilotRecoversAfterHostRestart();
     void reportsConnectedStationsForSelectedLog();
     void discoversAndSelectsRemoteLogForJoining();
     void rejectsUntrustedServerCertificate();
@@ -277,11 +282,11 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
 
     QJsonObject response = request(socket, QStringLiteral("hello"), QJsonObject{
         {QStringLiteral("client_version"), QStringLiteral("test")},
-        {QStringLiteral("min_protocol_version"), 1},
-        {QStringLiteral("max_protocol_version"), 1},
+        {QStringLiteral("min_protocol_version"), 2},
+        {QStringLiteral("max_protocol_version"), 2},
         {QStringLiteral("capabilities"),
          QJsonArray{QStringLiteral("event_notifications")}}
-    }, 1, true);
+    }, 2, true);
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
              QStringLiteral("hello_ack"));
     const QJsonArray capabilities = response.value(QStringLiteral("payload"))
@@ -373,8 +378,8 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QVERIFY(connectTls(legacySocket, m_server->serverPort(), m_certificate));
     response = request(legacySocket, QStringLiteral("hello"), QJsonObject{
         {QStringLiteral("client_version"), QStringLiteral("test")},
-        {QStringLiteral("min_protocol_version"), 1},
-        {QStringLiteral("max_protocol_version"), 1},
+        {QStringLiteral("min_protocol_version"), 2},
+        {QStringLiteral("max_protocol_version"), 2},
         {QStringLiteral("capabilities"), QJsonArray{}}
     });
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
@@ -415,7 +420,8 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
             {QStringLiteral("report"), QStringLiteral("599")}}},
         {QStringLiteral("sent_exchange"), QStringLiteral("599")},
         {QStringLiteral("received_exchange"), QStringLiteral("599")},
-        {QStringLiteral("points"), 1}
+        {QStringLiteral("points"), 1},
+        {QStringLiteral("is_invalid"), false}
     };
     const QJsonObject operation{
         {QStringLiteral("operation_uuid"), operationUuid},
@@ -611,6 +617,365 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
                  .value(QStringLiteral("qso_uuid")).toString(), qsoUuid);
 }
 
+void SyncServerTest::registersTrustedNetworkStationWithoutCredentials()
+{
+    QString error;
+    const QVector<logger::Contest> logs = m_repository->repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!logs.isEmpty());
+
+    logger::SyncServer trustedServer(*m_repository);
+    QVERIFY2(trustedServer.listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), 0, 4, &error), qPrintable(error));
+    QCOMPARE(error, QString());
+    logger::SyncServer occupiedPortServer(*m_repository);
+    QVERIFY(!occupiedPortServer.listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), trustedServer.serverPort(), 4, &error));
+    QVERIFY(!error.isEmpty());
+    logger::SyncServer invalidAddressServer(*m_repository);
+    QVERIFY(!invalidAddressServer.listenTrustedNetwork(
+        QStringLiteral("localhost"), 0, 4, &error));
+    QVERIFY(error.contains(QStringLiteral("numeric IP")));
+
+    logger::SyncClientConfiguration configuration;
+    configuration.host = QStringLiteral("127.0.0.1");
+    configuration.port = trustedServer.serverPort();
+    configuration.trustedNetworkMode = true;
+    configuration.stationUuid =
+        QStringLiteral("68a7e24a-4c0d-48ca-9d52-35be764a91c0");
+    configuration.computerName = QStringLiteral("RADIO-TRUSTED");
+    configuration.stationCallsign = QStringLiteral("SP9TEST");
+    configuration.operatorName = QStringLiteral("Operator One");
+    configuration.logUuid = logs.first().logUuid;
+
+    logger::SyncClient client;
+    client.connectToServer(configuration);
+    QTRY_COMPARE_WITH_TIMEOUT(client.state(), logger::SyncClient::State::Ready, 5000);
+    QCOMPARE(trustedServer.activeConnections(), 1);
+
+    logger::SyncClient duplicateClient;
+    QSignalSpy duplicateFailures(
+        &duplicateClient, &logger::SyncClient::requestFailed);
+    duplicateClient.connectToServer(configuration);
+    QTRY_COMPARE_WITH_TIMEOUT(duplicateClient.state(),
+                              logger::SyncClient::State::Error, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!duplicateFailures.isEmpty(), 5000);
+    QCOMPARE(duplicateFailures.first().at(1).toString(),
+             QStringLiteral("STATION_ALREADY_CONNECTED"));
+    QCOMPARE(trustedServer.activeConnections(), 1);
+
+    client.setOperatingState(QStringLiteral("20m"), QStringLiteral("CW"));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        trustedServer.connectedStations(configuration.logUuid).size(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(([&trustedServer, &configuration] {
+        const QJsonArray stations =
+            trustedServer.connectedStations(configuration.logUuid);
+        return !stations.isEmpty()
+            && stations.first().toObject()
+                   .value(QStringLiteral("operating_band")).toString()
+                == QStringLiteral("20m");
+    }()), 5000);
+    const QJsonObject station = trustedServer
+        .connectedStations(configuration.logUuid).first().toObject();
+    QCOMPARE(station.value(QStringLiteral("computer_name")).toString(),
+             QStringLiteral("RADIO-TRUSTED"));
+    QCOMPARE(station.value(QStringLiteral("station_callsign")).toString(),
+             QStringLiteral("SP9TEST"));
+    QCOMPARE(station.value(QStringLiteral("operator_name")).toString(),
+             QStringLiteral("Operator One"));
+    QCOMPARE(station.value(QStringLiteral("operating_mode")).toString(),
+             QStringLiteral("CW"));
+
+    QSignalSpy responses(&client, &logger::SyncClient::responseReceived);
+    const QString requestId = client.getStatus();
+    QVERIFY(!requestId.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!responses.isEmpty(), 5000);
+    QCOMPARE(responses.first().at(0).toString(), requestId);
+    QCOMPARE(responses.first().at(1).toString(), QStringLiteral("status"));
+
+    QSignalSpy failures(&client, &logger::SyncClient::requestFailed);
+    const QString forgedRequestId = client.submitBatch(QJsonArray{
+        QJsonObject{{QStringLiteral("station_uuid"),
+                     QStringLiteral("c87d4108-1f9e-49ed-90a2-8e276af2d1a7")}}
+    });
+    QVERIFY(!forgedRequestId.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!failures.isEmpty(), 5000);
+    QCOMPARE(failures.first().at(0).toString(), forgedRequestId);
+    QCOMPARE(failures.first().at(1).toString(), QStringLiteral("FORBIDDEN"));
+
+    client.disconnectFromServer();
+    QTRY_COMPARE_WITH_TIMEOUT(client.state(), logger::SyncClient::State::Disconnected,
+                              5000);
+}
+
+void SyncServerTest::trustedClientReconnectsAfterNetworkLoss()
+{
+    QString error;
+    const QVector<logger::Contest> logs = m_repository->repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!logs.isEmpty());
+    const QString stationUuid =
+        QStringLiteral("68a7e24a-4c0d-48ca-9d52-35be764a91c0");
+
+    QTcpServer unavailablePortProbe;
+    QVERIFY(unavailablePortProbe.listen(QHostAddress::LocalHost, 0));
+    const quint16 unavailablePort = unavailablePortProbe.serverPort();
+    unavailablePortProbe.close();
+    logger::SyncClientConfiguration unavailableConfiguration;
+    unavailableConfiguration.host = QStringLiteral("127.0.0.1");
+    unavailableConfiguration.port = unavailablePort;
+    unavailableConfiguration.trustedNetworkMode = true;
+    unavailableConfiguration.stationUuid = stationUuid;
+    unavailableConfiguration.logUuid = logs.first().logUuid;
+    logger::SyncClient unavailableClient;
+    unavailableClient.connectToServer(unavailableConfiguration);
+    QTRY_COMPARE_WITH_TIMEOUT(unavailableClient.state(),
+                              logger::SyncClient::State::Backoff, 5000);
+    unavailableClient.disconnectFromServer();
+
+    logger::SyncServer server(*m_repository);
+    QVERIFY2(server.listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), 0, 4, &error), qPrintable(error));
+    const quint16 serverPort = server.serverPort();
+    logger::SyncClientConfiguration configuration;
+    configuration.host = QStringLiteral("127.0.0.1");
+    configuration.port = serverPort;
+    configuration.trustedNetworkMode = true;
+    configuration.stationUuid = stationUuid;
+    configuration.computerName = QStringLiteral("RADIO-RECONNECT");
+    configuration.logUuid = logs.first().logUuid;
+
+    logger::SyncClient client;
+    client.connectToServer(configuration);
+    QTRY_COMPARE_WITH_TIMEOUT(client.state(), logger::SyncClient::State::Ready, 5000);
+    QCOMPARE(server.connectedStations(configuration.logUuid).size(), 1);
+
+    server.close();
+    QTRY_COMPARE_WITH_TIMEOUT(client.state(), logger::SyncClient::State::Backoff,
+                              5000);
+    QVERIFY2(server.listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), serverPort, 4, &error), qPrintable(error));
+    QTRY_COMPARE_WITH_TIMEOUT(client.state(), logger::SyncClient::State::Ready, 5000);
+    QCOMPARE(server.connectedStations(configuration.logUuid).size(), 1);
+    client.disconnectFromServer();
+}
+
+void SyncServerTest::trustedNetworkThreeStationPilotRecoversAfterHostRestart()
+{
+    QString error;
+    const QVector<logger::Contest> sourceLogs =
+        m_repository->repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(sourceLogs.size(), 1);
+    const logger::Contest sourceLog = sourceLogs.first();
+    const QString definitionYaml = QStringLiteral(R"yaml(
+schema_version: 1
+id: trusted-network-pilot
+name: Trusted Network Pilot
+bands: [20m, 40m]
+modes: [CW, SSB]
+exchange:
+  sent:
+    - {name: report, type: rst, default: "599"}
+  received:
+    - {name: report, type: rst}
+scoring:
+  serial_start: 1
+  serial_scope: global
+dupe_key: [callsign, band, mode]
+)yaml");
+    logger::ContestDefinition definition;
+    QVERIFY2(logger::ContestDefinitionLoader().loadText(
+        definitionYaml, QStringLiteral("Trusted-network pilot"), definition, &error),
+        qPrintable(error));
+
+    const QString centralDirectory =
+        m_directory->filePath(QStringLiteral("trusted-pilot-central"));
+    auto centralRepository = std::make_unique<logger::CentralRepository>();
+    QVERIFY2(centralRepository->initialize(centralDirectory, &error), qPrintable(error));
+    QVERIFY2(centralRepository->createLog(
+        definition, definitionYaml, sourceLog, &error) > 0, qPrintable(error));
+    auto server = std::make_unique<logger::SyncServer>(*centralRepository);
+    QVERIFY2(server->listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), 0, 8, &error), qPrintable(error));
+    const quint16 port = server->serverPort();
+    const QString logUuid = sourceLog.logUuid;
+
+    const std::array<QString, 3> stationUuids{
+        QStringLiteral("68000000-0000-4000-8000-000000000001"),
+        QStringLiteral("68000000-0000-4000-8000-000000000002"),
+        QStringLiteral("68000000-0000-4000-8000-000000000003")
+    };
+    struct PilotStation {
+        QSqlDatabase database;
+        std::unique_ptr<logger::SqliteRepository> repository;
+        std::unique_ptr<logger::SyncClient> client;
+        QString connectionName;
+    };
+    std::array<std::unique_ptr<PilotStation>, 3> stations;
+
+    for (std::size_t index = 0; index < stations.size(); ++index) {
+        auto station = std::make_unique<PilotStation>();
+        station->connectionName = QStringLiteral("trusted-pilot-%1-%2")
+            .arg(index)
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        station->database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), station->connectionName);
+        station->database.setDatabaseName(m_directory->filePath(
+            QStringLiteral("trusted-pilot-client-%1.sqlite").arg(index)));
+        QVERIFY(station->database.open());
+        station->repository =
+            std::make_unique<logger::SqliteRepository>(station->database);
+        QVERIFY2(station->repository->initialize(&error), qPrintable(error));
+        QVERIFY2(station->repository->ensureGeneralLog(&error), qPrintable(error));
+
+        QSqlQuery setLog(station->database);
+        setLog.prepare(QStringLiteral(
+            "UPDATE contests SET log_uuid = ? WHERE id = 1"));
+        setLog.addBindValue(logUuid);
+        QVERIFY2(setLog.exec(), qPrintable(setLog.lastError().text()));
+        QSqlQuery setStation(station->database);
+        setStation.prepare(QStringLiteral(
+            "UPDATE sync_metadata SET value = ? "
+            "WHERE key = 'local_station_uuid'"));
+        setStation.addBindValue(stationUuids.at(index));
+        QVERIFY2(setStation.exec(), qPrintable(setStation.lastError().text()));
+        QVERIFY2(station->repository->setSynchronizationEnabled(
+            logUuid, true, &error), qPrintable(error));
+
+        logger::Qso qso;
+        qso.contestId = 1;
+        qso.callsign = QStringLiteral("PILOT%1").arg(index + 1);
+        qso.stationCallsign = QStringLiteral("N%1TEST").arg(index + 1);
+        qso.band = QStringLiteral("20m");
+        qso.timestampUtc = QDateTime::currentDateTimeUtc();
+        qso.frequencyHz = 14025000 + static_cast<qint64>(index);
+        qso.mode = QStringLiteral("CW");
+        qso.sentExchange = QStringLiteral("599");
+        qso.receivedExchange = QStringLiteral("599");
+        qso.sentExchangeFields.insert(
+            QStringLiteral("report"), QStringLiteral("599"));
+        qso.receivedExchangeFields.insert(
+            QStringLiteral("report"), QStringLiteral("599"));
+        qso.points = 1;
+        QVERIFY2(station->repository->saveQso(qso, &error), qPrintable(error));
+
+        station->client = std::make_unique<logger::SyncClient>();
+        stations.at(index) = std::move(station);
+    }
+
+    const auto connectStation = [&stations, &stationUuids, port, &logUuid](
+                                    std::size_t index) {
+        logger::SyncClientConfiguration configuration;
+        configuration.host = QStringLiteral("127.0.0.1");
+        configuration.port = port;
+        configuration.trustedNetworkMode = true;
+        configuration.stationUuid = stationUuids.at(index);
+        configuration.computerName = QStringLiteral("PILOT-%1").arg(index + 1);
+        configuration.stationCallsign = QStringLiteral("N%1TEST").arg(index + 1);
+        configuration.logUuid = logUuid;
+        stations.at(index)->client->connectToServer(configuration);
+        QString startError;
+        return stations.at(index)->client->startSynchronization(
+            *stations.at(index)->repository, &startError)
+            ? QString() : startError;
+    };
+    QVERIFY2(connectStation(0).isEmpty(), "Could not start first station synchronization.");
+    QVERIFY2(connectStation(1).isEmpty(), "Could not start second station synchronization.");
+
+    const auto clientsAtRevision = [&stations, &logUuid](qint64 revision,
+                                                         std::size_t count) {
+        for (std::size_t index = 0; index < count; ++index) {
+            QString cursorError;
+            if (stations.at(index)->repository->syncCursor(logUuid, &cursorError)
+                    != revision
+                || !cursorError.isEmpty()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(clientsAtRevision(2, 2), 10000);
+
+    QVERIFY2(connectStation(2).isEmpty(), "Could not start third station synchronization.");
+    QTRY_VERIFY_WITH_TIMEOUT(clientsAtRevision(3, 3), 10000);
+    QCOMPARE(centralRepository->currentRevision(logUuid, &error), qint64(3));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    server->close();
+    for (const auto &station : stations) {
+        QTRY_COMPARE_WITH_TIMEOUT(station->client->state(),
+                                  logger::SyncClient::State::Backoff, 5000);
+    }
+
+    logger::Qso queuedQso;
+    queuedQso.contestId = 1;
+    queuedQso.callsign = QStringLiteral("N1OFFL");
+    queuedQso.stationCallsign = QStringLiteral("N1TEST");
+    queuedQso.band = QStringLiteral("20m");
+    queuedQso.timestampUtc = QDateTime::currentDateTimeUtc();
+    queuedQso.frequencyHz = 14026000;
+    queuedQso.mode = QStringLiteral("CW");
+    queuedQso.sentExchange = QStringLiteral("599");
+    queuedQso.receivedExchange = QStringLiteral("599");
+    queuedQso.sentExchangeFields.insert(
+        QStringLiteral("report"), QStringLiteral("599"));
+    queuedQso.receivedExchangeFields.insert(
+        QStringLiteral("report"), QStringLiteral("599"));
+    queuedQso.points = 1;
+    QVERIFY2(stations.front()->repository->saveQso(queuedQso, &error),
+             qPrintable(error));
+    const QString queuedQsoUuid = queuedQso.qsoUuid;
+    const QVector<logger::SyncOutboxOperation> pendingOperations =
+        stations.front()->repository->syncOutbox(logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(std::any_of(
+        pendingOperations.cbegin(), pendingOperations.cend(),
+        [&queuedQsoUuid](const logger::SyncOutboxOperation &operation) {
+            return operation.entityUuid == queuedQsoUuid
+                && operation.status == QStringLiteral("pending");
+        }));
+
+    server.reset();
+    centralRepository.reset();
+    centralRepository = std::make_unique<logger::CentralRepository>();
+    QVERIFY2(centralRepository->initialize(centralDirectory, &error), qPrintable(error));
+    server = std::make_unique<logger::SyncServer>(*centralRepository);
+    QVERIFY2(server->listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), port, 8, &error), qPrintable(error));
+
+    QTRY_VERIFY_WITH_TIMEOUT(clientsAtRevision(4, 3), 20000);
+    QCOMPARE(centralRepository->currentRevision(logUuid, &error), qint64(4));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QSet<QString> expectedQsoUuids;
+    for (const auto &station : stations) {
+        const QVector<logger::Qso> qsos =
+            station->repository->qsosForContest(1, 0, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(qsos.size(), 4);
+        QSet<QString> observedQsoUuids;
+        for (const logger::Qso &qso : qsos) {
+            observedQsoUuids.insert(qso.qsoUuid);
+            QCOMPARE(qso.syncStatus, logger::QsoSyncStatus::Synced);
+        }
+        QVERIFY(observedQsoUuids.contains(queuedQsoUuid));
+        if (expectedQsoUuids.isEmpty()) {
+            expectedQsoUuids = observedQsoUuids;
+        } else {
+            QCOMPARE(observedQsoUuids, expectedQsoUuids);
+        }
+    }
+    QCOMPARE(expectedQsoUuids.size(), 4);
+
+    for (auto &station : stations) {
+        station->client->disconnectFromServer();
+        station->repository.reset();
+        station->database.close();
+        station->database = QSqlDatabase();
+        QSqlDatabase::removeDatabase(station->connectionName);
+    }
+}
+
 void SyncServerTest::reportsConnectedStationsForSelectedLog()
 {
     QString error;
@@ -660,16 +1025,35 @@ void SyncServerTest::reportsConnectedStationsForSelectedLog()
         const QJsonObject station = value.toObject();
         uuids.insert(station.value(QStringLiteral("station_uuid")).toString());
         QVERIFY(!QUuid(station.value(QStringLiteral("session_uuid")).toString()).isNull());
-        QCOMPARE(station.size(), 5);
+        QCOMPARE(station.size(), 8);
         QCOMPARE(station.value(QStringLiteral("computer_name")).toString(),
                  QStringLiteral("RADIO-A"));
         QCOMPARE(station.value(QStringLiteral("station_callsign")).toString(),
                  QStringLiteral("SP9CLUB"));
         QCOMPARE(station.value(QStringLiteral("operator_name")).toString(),
                  QStringLiteral("Jan SP9ABC"));
+        QVERIFY(station.value(QStringLiteral("operating_band")).toString().isEmpty());
+        QVERIFY(station.value(QStringLiteral("operating_mode")).toString().isEmpty());
     }
     QCOMPARE(uuids, (QSet<QString>{QString::fromLatin1(StationUuid),
                                  QString::fromLatin1(ReadOnlyStationUuid)}));
+    reader.setOperatingState(QStringLiteral("20m"), QStringLiteral("CW"));
+    QTRY_VERIFY([&] {
+        for (const QJsonValue &value : m_server->connectedStations(logUuid)) {
+            const QJsonObject station = value.toObject();
+            if (station.value(QStringLiteral("station_uuid")).toString()
+                == QString::fromLatin1(ReadOnlyStationUuid)) {
+                return station.value(QStringLiteral("operating_band")).toString()
+                           == QStringLiteral("20m")
+                    && station.value(QStringLiteral("operating_mode")).toString()
+                           == QStringLiteral("CW")
+                    && !station.value(
+                            QStringLiteral("operating_state_updated_utc"))
+                            .toString().isEmpty();
+            }
+        }
+        return false;
+    }());
     reader.setStationIdentity(QStringLiteral("SP9NEW"), QStringLiteral("Anna SP9XYZ"));
     QTRY_VERIFY([&] {
         for (const QJsonValue &value : m_server->connectedStations(logUuid)) {
@@ -712,10 +1096,10 @@ void SyncServerTest::rejectsUnsupportedProtocolVersion()
     QVERIFY(connectTls(socket, m_server->serverPort(), m_certificate));
     const QJsonObject response = request(socket, QStringLiteral("hello"), QJsonObject{
         {QStringLiteral("client_version"), QStringLiteral("test")},
-        {QStringLiteral("min_protocol_version"), 2},
-        {QStringLiteral("max_protocol_version"), 2},
+        {QStringLiteral("min_protocol_version"), 1},
+        {QStringLiteral("max_protocol_version"), 1},
         {QStringLiteral("capabilities"), QJsonArray{}}
-    }, 2);
+    }, 1);
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
              QStringLiteral("error"));
     QCOMPARE(response.value(QStringLiteral("payload")).toObject()
@@ -738,6 +1122,31 @@ void SyncServerTest::enforcesConcurrentConnectionLimit()
 
     QVERIFY(!connectTls(excess, m_server->serverPort(), m_certificate));
     QCOMPARE(m_server->activeConnections(), 4);
+}
+
+void SyncServerTest::trustedServerEnforcesConfiguredConnectionLimit()
+{
+    logger::SyncServer server(*m_repository);
+    QString error;
+    QVERIFY2(server.listenTrustedNetwork(
+                 QStringLiteral("127.0.0.1"), 0, 2, &error), qPrintable(error));
+
+    QTcpSocket first;
+    QTcpSocket second;
+    QTcpSocket excess;
+    first.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort());
+    second.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort());
+    QTRY_COMPARE_WITH_TIMEOUT(server.activeConnections(), 2, 5000);
+    excess.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort());
+    QTRY_VERIFY_WITH_TIMEOUT(excess.state() == QAbstractSocket::UnconnectedState, 5000);
+    QCOMPARE(server.activeConnections(), 2);
+
+    first.disconnectFromHost();
+    QTRY_COMPARE_WITH_TIMEOUT(server.activeConnections(), 1, 5000);
+    QTcpSocket replacement;
+    replacement.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort());
+    QTRY_COMPARE_WITH_TIMEOUT(server.activeConnections(), 2, 5000);
+    server.close();
 }
 
 void SyncServerTest::connectsWithVerifiedTlsClient()
@@ -898,7 +1307,10 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
 
         logger::SyncClient client;
         QSignalSpy responseSpy(&client, &logger::SyncClient::responseReceived);
+        QSignalSpy syncFinishedSpy(
+            &client, &logger::SyncClient::synchronizationFinished);
         QVERIFY(responseSpy.isValid());
+        QVERIFY(syncFinishedSpy.isValid());
         logger::SyncClientConfiguration configuration;
         configuration.host = QStringLiteral("127.0.0.1");
         configuration.port = m_server->serverPort();
@@ -908,12 +1320,26 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
         configuration.logUuid = logUuid;
         configuration.caCertificates = {m_certificate};
         client.connectToServer(configuration);
+        QElapsedTimer queueTimer;
+        queueTimer.start();
         QVERIFY2(client.startSynchronization(localRepository, &error),
                  qPrintable(error));
 
         QTRY_COMPARE_WITH_TIMEOUT(
             localRepository.syncCursor(logUuid, &error), qint64(2), 5000);
         QVERIFY2(error.isEmpty(), qPrintable(error));
+        bool sawTwoOperationBatch = false;
+        for (const QList<QVariant> &response : responseSpy) {
+            if (response.value(1).toString() == QStringLiteral("batch_result")
+                && response.value(2).toJsonObject()
+                       .value(QStringLiteral("results")).toArray().size() == 2) {
+                sawTwoOperationBatch = true;
+                break;
+            }
+        }
+        QVERIFY(sawTwoOperationBatch);
+        qInfo().noquote() << "sync_queue_measurement operations=2"
+                          << "requests=1 elapsed_ms=" << queueTimer.elapsed();
         const QVector<logger::Qso> localQsos =
             localRepository.qsosForContest(1, 0, &error);
         QCOMPARE(localQsos.size(), 1);
@@ -921,6 +1347,32 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
         QCOMPARE(localQsos.first().callsign, QStringLiteral("W1AW/P"));
         QCOMPARE(localQsos.first().qsoVersion, 2);
         QCOMPARE(localQsos.first().syncStatus, logger::QsoSyncStatus::Synced);
+        QVERIFY(client.synchronizeNow());
+        QTRY_COMPARE_WITH_TIMEOUT(syncFinishedSpy.count(), 1, 5000);
+        QCOMPARE(syncFinishedSpy.first().at(0).toInt(), 0);
+        QCOMPARE(syncFinishedSpy.first().at(1).toInt(), 0);
+        QVERIFY(syncFinishedSpy.first().at(2).toLongLong() >= 0);
+        QVERIFY(syncFinishedSpy.first().at(3).toBool());
+        const QString consistencyRequest = client.checkConsistency();
+        QVERIFY(!consistencyRequest.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&consistencyRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == consistencyRequest
+                    && response.value(1).toString()
+                        == QStringLiteral("consistency_digest");
+            }), 5000);
+        const auto digestResponse = std::find_if(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&consistencyRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == consistencyRequest;
+            });
+        QVERIFY(digestResponse != responseSpy.cend());
+        QJsonObject serverDigest = digestResponse->at(2).toJsonObject();
+        QCOMPARE(serverDigest.take(QStringLiteral("revision")).toInteger(), qint64(2));
+        QCOMPARE(serverDigest,
+                 localRepository.syncConsistencyDigest(logUuid, &error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
 
         const QString remoteStation = QUuid::createUuid()
             .toString(QUuid::WithoutBraces).toLower();
@@ -946,7 +1398,8 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
                 {QStringLiteral("report"), QStringLiteral("599")}}},
             {QStringLiteral("sent_exchange"), QStringLiteral("599")},
             {QStringLiteral("received_exchange"), QStringLiteral("599")},
-            {QStringLiteral("points"), 1}
+            {QStringLiteral("points"), 1},
+            {QStringLiteral("is_invalid"), false}
         };
         const QJsonObject remoteOperation{
             {QStringLiteral("operation_uuid"), remoteOperationUuid},
@@ -1006,6 +1459,144 @@ void SyncServerTest::synchronizesOutboxAndChangesAtomically()
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(localRepository.qsosForContest(1, 0, &error).size(), 1);
         QCOMPARE(m_repository->currentRevision(logUuid, &error), qint64(4));
+
+        const auto savePilotQso = [&localRepository, &error](const QString &call) {
+            logger::Qso added;
+            added.contestId = 1;
+            added.callsign = call;
+            added.stationCallsign = QStringLiteral("K1TEST");
+            added.band = QStringLiteral("20m");
+            added.timestampUtc = QDateTime::currentDateTimeUtc();
+            added.frequencyHz = 14027000;
+            added.mode = QStringLiteral("CW");
+            added.sentExchange = QStringLiteral("599");
+            added.receivedExchange = QStringLiteral("599");
+            added.sentExchangeFields.insert(
+                QStringLiteral("report"), QStringLiteral("599"));
+            added.receivedExchangeFields.insert(
+                QStringLiteral("report"), QStringLiteral("599"));
+            added.points = 1;
+            if (!localRepository.saveQso(added, &error)) {
+                return QString();
+            }
+            return added.qsoUuid;
+        };
+        const QString transientQsoUuid = savePilotQso(QStringLiteral("N1TEMP"));
+        QVERIFY(!transientQsoUuid.isEmpty());
+        const QVector<logger::Qso> beforeTransientEdit =
+            localRepository.qsosForContest(1, 0, &error);
+        const auto transientQso = std::find_if(
+            beforeTransientEdit.cbegin(), beforeTransientEdit.cend(),
+            [&transientQsoUuid](const logger::Qso &item) {
+                return item.qsoUuid == transientQsoUuid;
+            });
+        QVERIFY(transientQso != beforeTransientEdit.cend());
+        logger::Qso editedTransient = *transientQso;
+        editedTransient.callsign = QStringLiteral("N1TEM2");
+        QVERIFY2(localRepository.updateQso(editedTransient, &error), qPrintable(error));
+        QVERIFY2(localRepository.deleteQso(editedTransient.id, &error), qPrintable(error));
+        QVERIFY(client.synchronizeNow());
+        QTRY_COMPARE_WITH_TIMEOUT(syncFinishedSpy.count(), 2, 10000);
+        QVERIFY(syncFinishedSpy.constLast().at(3).toBool());
+        QCOMPARE(localRepository.syncCursor(logUuid, &error), qint64(7));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(m_repository->currentRevision(logUuid, &error), qint64(7));
+        const QString tombstoneDigestRequest = client.checkConsistency();
+        QVERIFY(!tombstoneDigestRequest.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&tombstoneDigestRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == tombstoneDigestRequest;
+            }), 5000);
+        const auto tombstoneDigestResponse = std::find_if(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&tombstoneDigestRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == tombstoneDigestRequest;
+            });
+        QVERIFY(tombstoneDigestResponse != responseSpy.cend());
+        QJsonObject tombstoneServerDigest =
+            tombstoneDigestResponse->at(2).toJsonObject();
+        QCOMPARE(tombstoneServerDigest.take(
+                     QStringLiteral("revision")).toInteger(), qint64(7));
+        QCOMPARE(tombstoneServerDigest,
+                 localRepository.syncConsistencyDigest(logUuid, &error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        QVERIFY(!savePilotQso(QStringLiteral("N1GOOD")).isEmpty());
+        const QString invalidQsoUuid = savePilotQso(QStringLiteral("N1BAD"));
+        QVERIFY(!invalidQsoUuid.isEmpty());
+        QVector<logger::SyncOutboxOperation> queued =
+            localRepository.syncOutbox(logUuid, false, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        const auto invalidOperation = std::find_if(
+            queued.cbegin(), queued.cend(),
+            [&invalidQsoUuid](const logger::SyncOutboxOperation &operation) {
+                return operation.entityUuid == invalidQsoUuid;
+            });
+        QVERIFY(invalidOperation != queued.cend());
+        const QString validPayload = invalidOperation->payloadJson;
+        QJsonObject invalidPayload = QJsonDocument::fromJson(
+            validPayload.toUtf8()).object();
+        invalidPayload.insert(QStringLiteral(
+            "station_uuid"), QStringLiteral("68000000-0000-4000-8000-000000000099"));
+        QSqlQuery corruptQueuedOperation(database);
+        corruptQueuedOperation.prepare(QStringLiteral(
+            "UPDATE sync_outbox SET payload_json = ? WHERE operation_uuid = ?"));
+        corruptQueuedOperation.addBindValue(QString::fromUtf8(
+            QJsonDocument(invalidPayload).toJson(QJsonDocument::Compact)));
+        corruptQueuedOperation.addBindValue(invalidOperation->operationUuid);
+        QVERIFY2(corruptQueuedOperation.exec(),
+                 qPrintable(corruptQueuedOperation.lastError().text()));
+        QVERIFY(client.synchronizeNow());
+        QTRY_COMPARE_WITH_TIMEOUT(syncFinishedSpy.count(), 3, 10000);
+        QVERIFY(!syncFinishedSpy.constLast().at(3).toBool());
+        QCOMPARE(localRepository.syncCursor(logUuid, &error), qint64(8));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        queued = localRepository.syncOutbox(logUuid, false, &error);
+        const auto failedOperation = std::find_if(
+            queued.cbegin(), queued.cend(),
+            [&invalidQsoUuid](const logger::SyncOutboxOperation &operation) {
+                return operation.entityUuid == invalidQsoUuid
+                    && operation.status == QStringLiteral("failed");
+            });
+        QVERIFY(failedOperation != queued.cend());
+        QSqlQuery restoreQueuedOperation(database);
+        restoreQueuedOperation.prepare(QStringLiteral(
+            "UPDATE sync_outbox SET payload_json = ? WHERE operation_uuid = ?"));
+        restoreQueuedOperation.addBindValue(validPayload);
+        restoreQueuedOperation.addBindValue(failedOperation->operationUuid);
+        QVERIFY2(restoreQueuedOperation.exec(),
+                 qPrintable(restoreQueuedOperation.lastError().text()));
+        QVERIFY2(localRepository.retrySyncOperation(
+                     failedOperation->operationUuid, &error), qPrintable(error));
+        QVERIFY(client.synchronizeNow());
+        QTRY_COMPARE_WITH_TIMEOUT(syncFinishedSpy.count(), 4, 10000);
+        QVERIFY(syncFinishedSpy.constLast().at(3).toBool());
+        QCOMPARE(localRepository.syncCursor(logUuid, &error), qint64(9));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        QSqlQuery corruptReplica(database);
+        QVERIFY2(corruptReplica.exec(QStringLiteral(
+            "UPDATE qsos SET points = points + 1 WHERE callsign = 'N1GOOD'")),
+            qPrintable(corruptReplica.lastError().text()));
+        const QString mismatchRequest = client.checkConsistency();
+        QVERIFY(!mismatchRequest.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&mismatchRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == mismatchRequest;
+            }), 5000);
+        const auto mismatchResponse = std::find_if(
+            responseSpy.cbegin(), responseSpy.cend(),
+            [&mismatchRequest](const QList<QVariant> &response) {
+                return response.value(0).toString() == mismatchRequest;
+            });
+        QVERIFY(mismatchResponse != responseSpy.cend());
+        QJsonObject expectedDigest = mismatchResponse->at(2).toJsonObject();
+        expectedDigest.remove(QStringLiteral("revision"));
+        QVERIFY(expectedDigest !=
+                localRepository.syncConsistencyDigest(logUuid, &error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
         client.disconnectFromServer();
     }
     database.close();
@@ -1259,7 +1850,8 @@ void SyncServerTest::rejectsConcurrentQsoEditsWithoutOverwriting()
             {QStringLiteral("report"), QStringLiteral("599")}}},
         {QStringLiteral("sent_exchange"), QStringLiteral("599")},
         {QStringLiteral("received_exchange"), QStringLiteral("599")},
-        {QStringLiteral("points"), 1}
+        {QStringLiteral("points"), 1},
+        {QStringLiteral("is_invalid"), false}
     };
     const QJsonObject create{
         {QStringLiteral("operation_uuid"),
@@ -1282,8 +1874,8 @@ void SyncServerTest::rejectsConcurrentQsoEditsWithoutOverwriting()
         }
         QJsonObject response = request(socket, QStringLiteral("hello"), QJsonObject{
             {QStringLiteral("client_version"), QStringLiteral("test")},
-            {QStringLiteral("min_protocol_version"), 1},
-            {QStringLiteral("max_protocol_version"), 1},
+            {QStringLiteral("min_protocol_version"), 2},
+            {QStringLiteral("max_protocol_version"), 2},
             {QStringLiteral("capabilities"), QJsonArray{}}
         });
         if (response.value(QStringLiteral("type")).toString()
@@ -1335,7 +1927,7 @@ void SyncServerTest::rejectsConcurrentQsoEditsWithoutOverwriting()
             {QStringLiteral("qso"), qso}
         };
         return qMakePair(requestId, framed(QJsonObject{
-            {QStringLiteral("protocol_version"), 1},
+            {QStringLiteral("protocol_version"), 2},
             {QStringLiteral("request_id"), requestId},
             {QStringLiteral("type"), QStringLiteral("submit_batch")},
             {QStringLiteral("payload"), QJsonObject{
@@ -1410,7 +2002,8 @@ void SyncServerTest::retriesCommittedQsoAfterLostResponse()
             {QStringLiteral("report"), QStringLiteral("599")}}},
         {QStringLiteral("sent_exchange"), QStringLiteral("599")},
         {QStringLiteral("received_exchange"), QStringLiteral("599")},
-        {QStringLiteral("points"), 1}
+        {QStringLiteral("points"), 1},
+        {QStringLiteral("is_invalid"), false}
     };
     const QJsonObject operation{
         {QStringLiteral("operation_uuid"),
@@ -1428,8 +2021,8 @@ void SyncServerTest::retriesCommittedQsoAfterLostResponse()
         }
         QJsonObject response = request(socket, QStringLiteral("hello"), QJsonObject{
             {QStringLiteral("client_version"), QStringLiteral("test")},
-            {QStringLiteral("min_protocol_version"), 1},
-            {QStringLiteral("max_protocol_version"), 1},
+            {QStringLiteral("min_protocol_version"), 2},
+            {QStringLiteral("max_protocol_version"), 2},
             {QStringLiteral("capabilities"), QJsonArray{}}
         });
         if (response.value(QStringLiteral("type")).toString()
@@ -1453,7 +2046,7 @@ void SyncServerTest::retriesCommittedQsoAfterLostResponse()
     };
     const auto submitFrame = [&logUuid, &operation](const QString &requestId) {
         return framed(QJsonObject{
-            {QStringLiteral("protocol_version"), 1},
+            {QStringLiteral("protocol_version"), 2},
             {QStringLiteral("request_id"), requestId},
             {QStringLiteral("type"), QStringLiteral("submit_batch")},
             {QStringLiteral("payload"), QJsonObject{
@@ -1507,6 +2100,9 @@ void SyncServerTest::resumesPendingClientOutboxAfterClientAndServerRestart()
     QCOMPARE(logs.size(), 1);
     const QString logUuid = logs.first().logUuid;
     const quint16 port = m_server->serverPort();
+    m_server->close();
+    QVERIFY2(m_server->listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), port, 4, &error), qPrintable(error));
     const QString clientDatabasePath =
         m_directory->filePath(QStringLiteral("restart-client.sqlite"));
     const QString firstConnectionName = QStringLiteral("restart-client-first-%1")
@@ -1552,11 +2148,10 @@ void SyncServerTest::resumesPendingClientOutboxAfterClientAndServerRestart()
             logger::SyncClientConfiguration configuration;
             configuration.host = QStringLiteral("127.0.0.1");
             configuration.port = port;
-            configuration.peerName = QStringLiteral("localhost");
             configuration.stationUuid = QString::fromLatin1(StationUuid);
-            configuration.token = QString::fromLatin1(StationToken);
+            configuration.computerName = QStringLiteral("RESTART-STATION");
+            configuration.trustedNetworkMode = true;
             configuration.logUuid = logUuid;
-            configuration.caCertificates = {m_certificate};
             client.connectToServer(configuration);
             QVERIFY2(client.startSynchronization(repository, &error),
                      qPrintable(error));
@@ -1599,15 +2194,6 @@ void SyncServerTest::resumesPendingClientOutboxAfterClientAndServerRestart()
              qPrintable(error));
     QCOMPARE(m_repository->currentRevision(logUuid, &error), qint64(1));
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    const QString fixturesDirectory =
-        QStringLiteral(SYNC_SERVER_TEST_SOURCE_DIR) + QStringLiteral("/tests/data");
-    const QString certificatePath =
-        QDir(fixturesDirectory).filePath(QStringLiteral("sync_server_test_cert.pem"));
-    const QString keyPath =
-        QDir(fixturesDirectory).filePath(QStringLiteral("sync_server_test_key.pem"));
-    const QString tokenPath =
-        m_directory->filePath(QStringLiteral("tokens.json"));
-
     const QString secondConnectionName = QStringLiteral("restart-client-second-%1")
         .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     QSqlDatabase restartedDatabase = QSqlDatabase::addDatabase(
@@ -1621,11 +2207,10 @@ void SyncServerTest::resumesPendingClientOutboxAfterClientAndServerRestart()
         logger::SyncClientConfiguration configuration;
         configuration.host = QStringLiteral("127.0.0.1");
         configuration.port = port;
-        configuration.peerName = QStringLiteral("localhost");
         configuration.stationUuid = QString::fromLatin1(StationUuid);
-        configuration.token = QString::fromLatin1(StationToken);
+        configuration.computerName = QStringLiteral("RESTART-STATION");
+        configuration.trustedNetworkMode = true;
         configuration.logUuid = logUuid;
-        configuration.caCertificates = {m_certificate};
         restartedClient.connectToServer(configuration);
         QVERIFY2(restartedClient.startSynchronization(repository, &error),
                  qPrintable(error));
@@ -1633,8 +2218,8 @@ void SyncServerTest::resumesPendingClientOutboxAfterClientAndServerRestart()
             restartedClient.state(), logger::SyncClient::State::Backoff, 5000);
 
         m_server = std::make_unique<logger::SyncServer>(*m_repository);
-        QVERIFY2(m_server->listen(QStringLiteral("127.0.0.1"), port,
-                                  certificatePath, keyPath, tokenPath, 4, &error),
+        QVERIFY2(m_server->listenTrustedNetwork(
+                     QStringLiteral("127.0.0.1"), port, 4, &error),
                  qPrintable(error));
         QTRY_COMPARE_WITH_TIMEOUT(
             restartedClient.state(), logger::SyncClient::State::Ready, 15000);
@@ -1707,8 +2292,8 @@ dupe_key: [callsign, band, mode]
         }
         QJsonObject response = request(socket, QStringLiteral("hello"), QJsonObject{
             {QStringLiteral("client_version"), QStringLiteral("test")},
-            {QStringLiteral("min_protocol_version"), 1},
-            {QStringLiteral("max_protocol_version"), 1},
+            {QStringLiteral("min_protocol_version"), 2},
+            {QStringLiteral("max_protocol_version"), 2},
             {QStringLiteral("capabilities"), QJsonArray{}}
         });
         if (response.value(QStringLiteral("type")).toString()
@@ -1797,7 +2382,7 @@ dupe_key: [callsign, band, mode]
                                            const QString &requestId,
                                            const QJsonObject &payload) {
         const QByteArray bytes = framed(QJsonObject{
-            {QStringLiteral("protocol_version"), 1},
+            {QStringLiteral("protocol_version"), 2},
             {QStringLiteral("request_id"), requestId},
             {QStringLiteral("type"), QStringLiteral("reserve_serial")},
             {QStringLiteral("payload"), payload}
@@ -1931,7 +2516,8 @@ dupe_key: [callsign, band, mode]
             {QStringLiteral("report"), QStringLiteral("599")}}},
         {QStringLiteral("sent_exchange"), QStringLiteral("599 008")},
         {QStringLiteral("received_exchange"), QStringLiteral("599")},
-        {QStringLiteral("points"), 1}
+        {QStringLiteral("points"), 1},
+        {QStringLiteral("is_invalid"), false}
     };
     const QJsonObject operation{
         {QStringLiteral("operation_uuid"),
@@ -2277,8 +2863,8 @@ dupe_key: [callsign, band, mode]
     QVERIFY(connectTls(readWriteSocket, m_server->serverPort(), m_certificate));
     QJsonObject response = request(readWriteSocket, QStringLiteral("hello"), QJsonObject{
         {QStringLiteral("client_version"), QStringLiteral("test")},
-        {QStringLiteral("min_protocol_version"), 1},
-        {QStringLiteral("max_protocol_version"), 1},
+        {QStringLiteral("min_protocol_version"), 2},
+        {QStringLiteral("max_protocol_version"), 2},
         {QStringLiteral("capabilities"), QJsonArray{}}
     });
     QCOMPARE(response.value(QStringLiteral("type")).toString(),
@@ -2334,8 +2920,8 @@ dupe_key: [callsign, band, mode]
     QVERIFY(connectTls(adminSocket, m_server->serverPort(), m_certificate));
     response = request(adminSocket, QStringLiteral("hello"), QJsonObject{
         {QStringLiteral("client_version"), QStringLiteral("test")},
-        {QStringLiteral("min_protocol_version"), 1},
-        {QStringLiteral("max_protocol_version"), 1},
+        {QStringLiteral("min_protocol_version"), 2},
+        {QStringLiteral("max_protocol_version"), 2},
         {QStringLiteral("capabilities"), QJsonArray{}}
     });
     QCOMPARE(response.value(QStringLiteral("type")).toString(),

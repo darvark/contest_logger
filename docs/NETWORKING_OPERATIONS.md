@@ -1,6 +1,15 @@
 # Operacje serwera synchronizacji
 
-Procedura dotyczy centralnego serwera TCP/TLS. Serwer przechowuje dane w
+**Tryb sieciowy:** aktualne GUI Client/Host i `contest_logger_server --listen`
+korzystają z trusted TCP. Połączenie jest nieszyfrowane i nie uwierzytelnia
+klientów; każda osiągalna stacja może się zarejestrować i uzyskuje odczyt oraz
+zapis. Nazwa komputera, znak stacji i operator są deklarowane przez klienta,
+więc nie potwierdzają jego tożsamości. Używaj serwera wyłącznie w zaufanej,
+zamkniętej sieci LAN/VPN z ograniczonym firewallem. Nie wystawiaj portu
+bezpośrednio do Internetu. TLS, tokeny i role opisane w starszych sekcjach
+specyfikacji protokołu nie są konfigurowane ani używane przez bieżące GUI/CLI.
+
+Procedura dotyczy centralnego serwera TCP. Serwer przechowuje dane w
 `central-log.sqlite` w katalogu podanym przez `--data-dir`; pliki pomocnicze i
 backupy migracyjne znajdują się obok w `backups/`. Nie udostępniaj katalogu
 SQLite przez udział sieciowy. To runbook headless serwera CLI; GUI Host może
@@ -13,71 +22,19 @@ katalogu.
 1. Zainstaluj pakiet Contest Logger dla docelowego systemu zgodnie z
    [instrukcją budowania i pakowania](./BUILD_AND_RELEASE.md). Pakiet nie
    tworzy usługi ani użytkownika systemowego.
-2. Na hoście Linux utwórz dedykowane konto usługi, katalog danych i katalog
-   konfiguracji z dostępem tylko dla administratora i konta usługi. Na Windows
-   użyj dedykowanego konta usługi/Task Scheduler oraz ogranicz ACL tych samych
-   katalogów. Nie uruchamiaj serwera jako konto o szerszych uprawnieniach niż
-   wymagane.
-3. Przygotuj certyfikat TLS z poprawnym SAN dla nazwy, której użyją klienci,
-   oraz niezaszyfrowany klucz RSA w PEM. Niezaszyfrowany klucz jest wymagany,
-   aby serwer mógł wystartować bez interaktywnego hasła; chroń go ACL/trybem
-   pliku i nie umieszczaj w repozytorium. W środowisku produkcyjnym użyj
-   certyfikatu podpisanego przez zarządzane CA. Dla kontrolowanego testu można
-   utworzyć własny certyfikat:
-
-   ```sh
-   openssl req -x509 -newkey rsa:3072 -nodes \
-     -keyout server.key -out server.crt -days 365 \
-     -subj "/CN=logger.example.net" \
-     -addext "subjectAltName=DNS:logger.example.net" \
-     -addext "basicConstraints=critical,CA:TRUE"
-   chmod 600 server.key
-   ```
-
-   Dla tego testowego certyfikatu dodaj `server.crt` jako dodatkowe CA
-   w konfiguracji każdego Clienta; nazwa hosta w polu serwera musi pasować do
-   SAN. Nie wyłączaj weryfikacji TLS.
-4. Wygeneruj oddzielny losowy token dla każdej stacji (co najmniej 32 znaki):
-
-   ```sh
-   openssl rand -hex 32
-   ```
-
-   Umieść tokeny w pliku JSON dostępnym tylko administratorowi/usłudze:
-
-   ```json
-   {
-     "stations": [
-       {
-         "station_uuid": "232a099c-6fa4-4fc5-9742-232ba25a8558",
-         "token": "REPLACE_WITH_A_UNIQUE_RANDOM_TOKEN",
-         "permissions": ["read", "write", "admin"],
-         "log_uuids": []
-       }
-     ]
-   }
-   ```
-
-   UUID stacji musi odpowiadać instalacji loggera. Dla operatorów niebędących
-   administratorami pomiń `admin`; dodaj tylko UUID logów, do których stacja
-   ma mieć dostęp. Pusta lista `log_uuids` nie przyznaje dostępu do żadnego
-   logu stacji niebędącej administratorem. Tokenu nie wpisuj w argumenty
-   procesu, logi ani ustawienia jawne.
-5. Sprawdź bazę i utwórz strukturę katalogów:
+2. Zainicjuj centralną bazę i sprawdź, czy katalog danych jest dostępny dla
+   konta serwera:
 
    ```sh
    contest_logger_server --check --data-dir /var/lib/contest-logger
    ```
 
-6. Uruchom serwer (port domyślny 7443/TCP):
+3. Uruchom serwer (port domyślny 7443/TCP, limit 16 klientów):
 
    ```sh
    contest_logger_server --listen \
      --data-dir /var/lib/contest-logger \
-     --address 0.0.0.0 --port 7443 \
-     --tls-cert /etc/contest-logger/server.crt \
-     --tls-key /etc/contest-logger/server.key \
-     --tokens /etc/contest-logger/stations.json
+     --address 0.0.0.0 --port 7443 --max-connections 16
    ```
 
    Dla stałej eksploatacji uruchamiaj tę komendę pod supervisorem systemowym
@@ -85,13 +42,17 @@ katalogu.
    restartem po błędzie. Repozytorium nie dostarcza gotowej jednostki usługi.
    `--check` otwiera/aktualizuje bazę i kończy pracę; `--listen` utrzymuje
    proces serwera. Obie opcje są wzajemnie wykluczające.
+   Limit klientów można ustawić w zakresie 1–256; domyślna wartość 16 nie
+   została zwiększona bez pomiarów obciążeniowych.
 
-## Firewall, port i TLS
+## Firewall i port
 
 - Otwórz wyłącznie przychodzące TCP na skonfigurowanym porcie (domyślnie
-  7443), tylko z zaufanych podsieci stacji operatorskich. Nie otwieraj portu
-  UDP i nie wystawiaj usługi bezpośrednio do publicznego Internetu.
-- Na Windows dodaj regułę ograniczoną do firmowej podsieci (uruchom PowerShell
+  7443), tylko z zaufanych podsieci stacji operatorskich. Ruch nie jest
+  szyfrowany, a serwer nie uwierzytelnia klientów. Każda osiągalna stacja ma
+  odczyt i zapis. Nigdy nie wystawiaj usługi bezpośrednio do publicznego
+  Internetu.
+- Na Windows dodaj regułę ograniczoną do podsieci LAN/VPN (uruchom PowerShell
   jako administrator i zastąp przykładowy zakres własnym):
 
   ```powershell
@@ -102,31 +63,14 @@ katalogu.
 
 - Ustaw bind address na interfejs LAN/VPN, jeśli serwer nie ma nasłuchiwać na
   wszystkich interfejsach (`0.0.0.0`).
-- Sprawdź poprawność certyfikatu, jego SAN i termin ważności przed startem.
-  Przy odnowieniu certyfikatu zachowaj tę samą nazwę SAN; jeśli zmieni się CA,
-  najpierw zaktualizuj dodatkowe CA na klientach, następnie wdrażaj nowy
-  certyfikat i restartuj serwer.
-- Klient wymaga zweryfikowanego TLS. Jeśli własne CA nie może być jeszcze
-  skonfigurowane na wszystkich stacjach, nie przełączaj ich na nowy certyfikat.
-
-## Rotacja tokenów stacji
-
-Serwer wczytuje plik poświadczeń podczas startu. Protokół utrzymuje jeden
-aktywny token na UUID stacji; nie ma okresu równoległej akceptacji starego i
-nowego tokenu.
-
-1. Zaplanuj krótką przerwę i poinformuj daną stację o rozłączeniu.
-2. Wygeneruj nowy unikalny token. Zmień Clienta na nowy token; zapisuj go
-   opcjonalnie w systemowym magazynie sekretów. Jeśli zostanie zapisany przed
-   zmianą po stronie serwera, klient może chwilowo nie uwierzytelnić się.
-3. Atomowo podmień token dla UUID stacji w `stations.json`, zachowując
-   permissions i `log_uuids`; ogranicz plik do administratora/usługi.
-4. Zrestartuj serwer, co zamknie istniejące sesje i wczyta nowy token.
-5. Połącz stację ponownie i sprawdź stan Clienta, kursor oraz kolejkę. Stary
-   token nie może być dalej używany.
-
-Po utracie lub podejrzeniu ujawnienia tokenu usuń go z pliku poświadczeń,
-wygeneruj nowy i powtórz rotację przed dopuszczeniem stacji do sieci.
+- Klienci przekazują automatycznie UUID instalacji, nazwę komputera, znak
+  stacji i operatora. UUID wiąże QSO z sesją protokołu, ale nie jest
+  uwierzytelniony. Złośliwy lub niepożądany klient w dostępnej sieci może
+  podać cudzy UUID lub opis; nie traktuj tych pól jako wiarygodnego
+  potwierdzenia źródła.
+- Wszystkie połączone stacje mają odczyt i zapis. Tworzenie oraz import
+  historycznych logów wykonuj lokalnie z GUI Host; nie udostępniaj pliku
+  SQLite bezpośrednio innym komputerom.
 
 ## Backup i kontrola kopii
 
@@ -146,10 +90,11 @@ Zastąp nazwę jednostki i ścieżki wartościami z lokalnej instalacji. Poczeka
 na pełne zatrzymanie procesu przed kopiowaniem; nie kopiuj aktywnego pliku
 SQLite bez jego WAL/SHM. W razie potrzeby osobno skopiuj katalog
 `/var/lib/contest-logger/backups/`, który zawiera automatyczne kopie sprzed
-migracji. Backup i cały katalog `backups/` zawierają dane
-zawodów, identyfikatory i historię rezerwacji — chroń je jak dane logowania.
-Osobno i bezpiecznie zabezpieczaj TLS key, `stations.json` i ewentualny
-`wl_cty.dat`; baza ich nie zawiera.
+migracji. Backup i cały katalog `backups/` zawierają dane zawodów, identyfikatory i
+historię rezerwacji — chroń je jako dane operacyjne.
+Jeśli używasz dodatkowego `wl_cty.dat`, zabezpiecz go osobno; baza go nie
+zawiera. Bieżący serwer trusted TCP nie wymaga certyfikatów TLS ani pliku
+poświadczeń.
 
 ## Odtwarzanie backupu centralnego
 
@@ -170,14 +115,14 @@ sudo systemctl start contest-logger-server
 
 Jeśli serwer nie jest usługą systemd, zatrzymaj proces ręcznie i wykonaj
 polecenia pod kontem, które ma prawo zapisu do katalogu danych. Po starcie
-sprawdź logi usługi, połącz klienta administracyjnego i zweryfikuj logi,
-rewizję, online station count oraz lag w **Options > Network status and
+sprawdź logi usługi, połącz klienta i zweryfikuj logi,
+rewizję oraz synchronizację w **Options > Network status and
 queue... > Server metrics...**. W tabeli stacji potwierdź nazwy komputerów,
 znaki i operatorów, oznaczenie własnej stacji oraz usuwanie rozłączonej
 stacji po odświeżeniu (automatycznie co 5 sekund lub przez **Refresh**).
-UUID nadal identyfikują stacje w protokole; opisy są deklarowane przez
-klientów i nie potwierdzają tożsamości. Dla starszych klientów/serwerów bez
-capability `station_identity` lub pustych opisów tabela pokazuje **Not provided**.
+UUID identyfikuje stację w protokole, ale ponieważ sieć nie wymaga
+uwierzytelniania, klient może podszyć się pod inną stację. Nazwa i znak
+przekazane przez klienta są opisowe, a nie potwierdzeniem tożsamości.
 Wykonaj testowy zapis na uzgodnionym logu i potwierdź jego odbiór na kliencie.
 Nie kasuj automatycznie pliku `.before-restore` ani źródłowego backupu:
 zachowaj je do czasu zatwierdzenia odtworzenia.
@@ -194,13 +139,11 @@ klienta z serwerem.
 
 W razie utraty hosta:
 
-1. Zablokuj jego port/firewall i unieważnij wszystkie tokeny, do których
-   nie masz pewności, że są bezpieczne.
+1. Zablokuj jego port/firewall i sprawdź, czy jego kopie zapasowe są dostępne.
 2. Na odtworzonym hoście przywróć `central-log.sqlite` z ostatniej sprawdzonej
-   kopii, skonfiguruj ponownie certyfikat, tokeny, uprawnienia i `wl_cty.dat`.
+   kopii i skonfiguruj adres nasłuchu, port oraz ewentualny `wl_cty.dat`.
    Zachowaj UUID logów i serwera z backupu.
-3. Jeśli nazwa hosta/certyfikat uległy zmianie, najpierw zaktualizuj endpoint
-   i zaufane CA na klientach, a potem zezwól na reconnect. Trwałe outboxy
+3. Zaktualizuj adres IP/port na klientach, jeśli uległy zmianie. Trwałe outboxy
    klientów należy zachować; klient pobierze zmiany od kursora lub wykona
    snapshot, jeśli jego kursor jest starszy od retencji.
 4. Jeśli żadnego backupu nie da się zweryfikować, nie twórz nowego pustego

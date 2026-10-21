@@ -55,7 +55,8 @@ QJsonObject sampleOperation(const QString &logUuid, const QString &stationUuid,
                 {QStringLiteral("report"), QStringLiteral("599")}}},
             {QStringLiteral("sent_exchange"), QStringLiteral("599")},
             {QStringLiteral("received_exchange"), QStringLiteral("599")},
-            {QStringLiteral("points"), 2}
+            {QStringLiteral("points"), 2},
+            {QStringLiteral("is_invalid"), false}
         }}
     };
 }
@@ -181,7 +182,8 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
         QSqlQuery query(database);
         QVERIFY(query.exec(QStringLiteral(
             "DELETE FROM schema_migrations WHERE version IN "
-            "(9, 10, 11, 12, 13, 14, 15, 16, 17)")));
+            "(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)")));
+        QVERIFY(query.exec(QStringLiteral("DROP TABLE qso_change_audit")));
         QVERIFY(query.exec(QStringLiteral(
             "DROP TABLE sync_transaction_metrics")));
         QVERIFY(query.exec(QStringLiteral(
@@ -197,6 +199,7 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_clients")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_log_state")));
         QVERIFY(query.exec(QStringLiteral("ALTER TABLE qsos DROP COLUMN is_deleted")));
+        QVERIFY(query.exec(QStringLiteral("ALTER TABLE qsos DROP COLUMN is_invalid")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_conflicts")));
         QVERIFY(query.exec(QStringLiteral("DROP INDEX idx_sync_outbox_log_status_created")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE sync_outbox")));
@@ -1062,6 +1065,41 @@ dupe_key: [callsign]
                  .value(QStringLiteral("points")).toInt(), 3);
     QCOMPARE(central.currentRevision(log.logUuid, &error), qint64(2));
     QVERIFY(error.isEmpty());
+
+    QJsonObject invalidate = sampleOperation(
+        log.logUuid, stationUuid, newUuid(), qsoUuid,
+        QStringLiteral("qso.update"), 2, QStringLiteral("W1AW"));
+    QJsonObject invalidQso = invalidate.value(QStringLiteral("qso")).toObject();
+    invalidQso.insert(QStringLiteral("is_invalid"), true);
+    invalidate.insert(QStringLiteral("qso"), invalidQso);
+    QVERIFY2(central.submitBatch(log.logUuid, {invalidate}, &results, &error),
+             qPrintable(error));
+    QCOMPARE(results.first().toObject().value(QStringLiteral("qso"))
+                 .toObject().value(QStringLiteral("points")).toInt(), 0);
+    QVERIFY(results.first().toObject().value(QStringLiteral("qso"))
+                .toObject().value(QStringLiteral("is_invalid")).toBool());
+    QCOMPARE(central.currentQso(log.logUuid, qsoUuid, &error)
+                 .value(QStringLiteral("points")).toInt(), 0);
+    QVERIFY(central.currentQso(log.logUuid, qsoUuid, &error)
+                .value(QStringLiteral("is_invalid")).toBool());
+    const QJsonArray invalidEvents = central.eventsSince(
+        log.logUuid, 2, 10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(invalidEvents.size(), 1);
+    QVERIFY(invalidEvents.first().toObject()
+                .value(QStringLiteral("payload")).toObject()
+                .value(QStringLiteral("is_invalid")).toBool());
+
+    QJsonObject restore = sampleOperation(
+        log.logUuid, stationUuid, newUuid(), qsoUuid,
+        QStringLiteral("qso.update"), 3, QStringLiteral("W1AW"));
+    QVERIFY2(central.submitBatch(log.logUuid, {restore}, &results, &error),
+             qPrintable(error));
+    QCOMPARE(results.first().toObject().value(QStringLiteral("qso"))
+                 .toObject().value(QStringLiteral("points")).toInt(), 7);
+    QVERIFY(!results.first().toObject().value(QStringLiteral("qso"))
+                 .toObject().value(QStringLiteral("is_invalid")).toBool());
+    QCOMPARE(central.currentRevision(log.logUuid, &error), qint64(4));
 
     QString ctyYaml = yaml;
     ctyYaml.replace(QStringLiteral("id: server-scoring-test"),

@@ -38,6 +38,9 @@ class QListWidget;
 class QEvent;
 class QDockWidget;
 class QCloseEvent;
+class QCompleter;
+class QStringListModel;
+class QWidget;
 
 namespace logger {
 
@@ -62,6 +65,7 @@ private slots:
     void exportAdif();
     void importLog();
     void backupDatabase();
+    void configureAutomaticBackups();
     void configureDxCluster();
     void configureNetworkConnection();
     void completeRemoteLogMerge();
@@ -76,15 +80,20 @@ private slots:
     void createNewLog();
     void editLogProperties();
     void importContestDefinition();
+    void restoreContestDefinitionVersion();
     void importCallHistory();
     void importMasterCpy();
     void importCtyDat();
+    void restoreSupportDataVersion();
     void updateCallLookup(int vfo);
+    void rebuildCallCompleters();
     void updateSentReportForMode(int vfo);
     void resetWindowLayout();
     void logQso();
     void editSelectedQso(int row, int column);
     void deleteSelectedQso(int row);
+    void undoLastQsoChange();
+    void setSelectedQsoInvalid(int row, bool invalid);
     void updateDupeIndicator();
     void updateDxClusterStatus(const logger::DxClusterStatus &status);
     void updateDxClusterStatus(logger::DxClusterController *controller,
@@ -114,6 +123,9 @@ private:
     void recordNetworkContact();
     void autoStartNetworkClient();
     void autoStartHostServer();
+    void updateNetworkOperatingState();
+    void refreshNetworkStations();
+    void showNetworkStations(const QJsonArray &stations);
     void loadBuiltInDefinitions();
     void loadOperator();
     void loadContests();
@@ -128,6 +140,7 @@ private:
     void rebuildQsoForm();
     void rebuildQsoForm(int vfo);
     void refreshRecentQsos();
+    void refreshRecentQsoTable();
     void exportCurrentLog(LogExportFormat format);
     bool newLogOptions(QVector<NewLogContestOption> *options, QString *error) const;
     void configureRadioContext(int radio);
@@ -206,6 +219,8 @@ private:
     QLabel *m_radioLabel = nullptr;
     QLabel *m_dupeLabels[2]{};
     QLineEdit *m_callsignEdits[2]{};
+    QCompleter *m_callCompleters[2]{};
+    QStringListModel *m_callCompleterModels[2]{};
     QLabel *m_callInfoLabels[2]{};
     QLabel *m_workedBandLabels[2]{};
     QLabel *m_entryHeaders[2]{};
@@ -245,6 +260,13 @@ private:
     bool m_autoCqEnabled = false;
     qint64 m_scoreTotal = 0;
     QTableWidget *m_recentQsos = nullptr;
+    QLineEdit *m_logSearchEdit = nullptr;
+    QComboBox *m_logBandFilter = nullptr;
+    QComboBox *m_logModeFilter = nullptr;
+    QComboBox *m_logValidityFilter = nullptr;
+    QLabel *m_logFilterResultLabel = nullptr;
+    QTimer *m_logFilterTimer = nullptr;
+    bool m_logTableNeedsColumnResize = true;
     QVector<Qso> m_logQsos;
     QSet<QString> m_workedMultiplierKeys;
     ContestScore m_score;
@@ -267,6 +289,7 @@ private:
     QTableWidget *m_checkCallGrid = nullptr;
     QLabel *m_checkCallTitle = nullptr;
     QLabel *m_rateLabel = nullptr;
+    QWidget *m_rateChart = nullptr;
     QTableWidget *m_summaryTable = nullptr;
     QLabel *m_finalScoreLabel = nullptr;
     QHash<qint64, Spot> m_spots;
@@ -296,6 +319,11 @@ private:
     QDockWidget *m_summaryDock = nullptr;
     QDockWidget *m_greylineDock = nullptr;
     QWidget *m_greylineWidget = nullptr;
+    QDockWidget *m_networkStationsDock = nullptr;
+    QTableWidget *m_networkStationsTable = nullptr;
+    QLabel *m_networkStationsStatus = nullptr;
+    QTimer *m_networkStationsTimer = nullptr;
+    QString m_networkStationsRequestId;
 };
 
 } // namespace logger
