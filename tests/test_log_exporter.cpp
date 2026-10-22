@@ -77,6 +77,7 @@ private slots:
     void writesCompleteCabrilloV3Header();
     void writesArrlSweepstakesCabrilloWithoutRst();
     void exportsBundledProfileCabrilloExchanges();
+    void exportsWaeQtcImmediatelyAfterPartnerQso();
     void writesAdifWithByteLengths();
     void exportsLegacyExchangeStrings();
     void rejectsInvalidLogWithoutReplacingFile();
@@ -416,9 +417,24 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
           {QStringLiteral("serial"), QStringLiteral("001")}},
          {{QStringLiteral("report"), QStringLiteral("599")},
           {QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")},
+        {QStringLiteral("wae-cw.yaml"), QStringLiteral("20m"),
+         QStringLiteral("CW"),
+         {{QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")},
+        {QStringLiteral("wae-ssb.yaml"), QStringLiteral("20m"),
+         QStringLiteral("SSB"),
+         {{QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("serial"), QStringLiteral("027")}},
+         QStringLiteral("001"), QStringLiteral("027")},
+        {QStringLiteral("wae-rtty.yaml"), QStringLiteral("20m"),
+         QStringLiteral("RTTY"),
+         {{QStringLiteral("serial"), QStringLiteral("001")}},
+         {{QStringLiteral("serial"), QStringLiteral("027")}},
          QStringLiteral("001"), QStringLiteral("027")}
     };
-    QCOMPARE(scenarios.size(), 20);
+    QCOMPARE(scenarios.size(), 23);
 
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -455,6 +471,7 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
                 if (!value.isEmpty()) {
                     parts.append(value);
                 }
+
             }
             return parts.join(QLatin1Char(' '));
         };
@@ -471,7 +488,9 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
         QFile output(outputPath);
         QVERIFY(output.open(QIODevice::ReadOnly));
         const QString mode = scenario.mode == QStringLiteral("SSB")
-            ? QStringLiteral("PH") : scenario.mode;
+            ? QStringLiteral("PH")
+            : scenario.mode == QStringLiteral("RTTY")
+                ? QStringLiteral("RY") : scenario.mode;
         QStringList expectedFields{
             QStringLiteral("QSO:"), expectedFrequency(scenario.band), mode,
             QStringLiteral("2026-10-15"), QStringLiteral("1000"),
@@ -604,6 +623,60 @@ void LogExporterTest::omitsInvalidQsosFromExport()
         logger::LogExportFormat::Cabrillo, contest(), &contestDefinition,
         {invalid}, station, &error));
     QVERIFY(error.contains(QStringLiteral("no QSOs"), Qt::CaseInsensitive));
+}
+
+void LogExporterTest::exportsWaeQtcImmediatelyAfterPartnerQso()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("wae.log"));
+    logger::ContestDefinition contestDefinition = definition();
+    contestDefinition.id = QStringLiteral("wae-cw");
+    contestDefinition.cabrilloContest = QStringLiteral("WAE-DC-CW");
+    logger::Qso contact = qso();
+    contact.qsoUuid = QStringLiteral("11111111-1111-4111-8111-111111111111");
+    logger::QtcTransfer transfer;
+    transfer.qtcUuid = QStringLiteral("22222222-2222-4222-8222-222222222222");
+    transfer.partnerQsoUuid = contact.qsoUuid;
+    transfer.partnerCallsign = contact.callsign;
+    transfer.direction = logger::QtcDirection::Sent;
+    transfer.groupNumber = 1;
+    transfer.messages.append({
+        QDateTime::fromString(QStringLiteral("2026-10-15T09:40:00.000Z"),
+                              Qt::ISODateWithMs),
+        QStringLiteral("DL2XYZ"), 18
+    });
+    contact.qtcTransfers.append(transfer);
+    logger::Station station;
+    station.callsign = QStringLiteral("K1TEST");
+    QString error;
+    QVERIFY2(logger::LogExporter::writeFile(
+                 path, logger::LogExportFormat::Cabrillo, contest(),
+                 &contestDefinition, {contact}, station, &error),
+             qPrintable(error));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray output = file.readAll();
+    const QByteArray qsoLine(
+        "QSO: 14025 CW 2026-10-15 1000 K1TEST 599 001 W1AW 599 027\n");
+    const QByteArray qtcLine("QTC: 1 0940 DL2XYZ 018\n");
+    const qsizetype qsoOffset = output.indexOf(qsoLine);
+    const qsizetype qtcOffset = output.indexOf(qtcLine);
+    QVERIFY(qsoOffset >= 0);
+    QVERIFY(qtcOffset > qsoOffset);
+    QCOMPARE(qtcOffset, qsoOffset + qsoLine.size());
+
+    const QString adifPath = path + QStringLiteral(".adi");
+    QVERIFY2(logger::LogExporter::writeFile(
+                 adifPath, logger::LogExportFormat::Adif, contest(),
+                 &contestDefinition, {contact}, station, &error),
+             qPrintable(error));
+    QFile adifFile(adifPath);
+    QVERIFY(adifFile.open(QIODevice::ReadOnly));
+    const QByteArray adif = adifFile.readAll();
+    QVERIFY(adif.contains("APP_CONTESTLOGGER_QTC"));
+    QVERIFY(adif.contains("\"group_number\":1"));
+    QVERIFY(adif.contains("\"serial_number\":18"));
 }
 
 QTEST_GUILESS_MAIN(LogExporterTest)

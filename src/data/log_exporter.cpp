@@ -1,8 +1,10 @@
 #include "logger/data/log_exporter.h"
 
 #include "logger/contest/contest_engine.h"
+#include "logger/contest/qtc_service.h"
 
 #include <QHash>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -411,6 +413,18 @@ QByteArray cabrillo(const Contest &contest, const ContestDefinition *definition,
             fields.append(receivedExchange);
         }
         lines.append(fields.join(QLatin1Char(' ')));
+        for (const QtcTransfer &transfer : qso.qtcTransfers) {
+            QStringList qtcFields{QStringLiteral("QTC:"),
+                                  QString::number(transfer.groupNumber)};
+            for (const QtcMessage &message : transfer.messages) {
+                qtcFields.append(message.timestampUtc.toUTC().toString(
+                    QStringLiteral("hhmm")));
+                qtcFields.append(message.callsign.trimmed().toUpper());
+                qtcFields.append(QString::number(message.serialNumber)
+                                     .rightJustified(3, QLatin1Char('0')));
+            }
+            lines.append(qtcFields.join(QLatin1Char(' ')));
+        }
     }
     lines.append(QStringLiteral("END-OF-LOG:"));
     return (lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8();
@@ -460,6 +474,13 @@ QByteArray adif(const Contest &contest, const ContestDefinition *definition,
         if (!qso.receivedExchangeFields.isEmpty()) {
             fields.append(adifField(QStringLiteral("SRX"),
                                     adifExchange(qso.receivedExchangeFields)));
+        }
+        if (!qso.qtcTransfers.isEmpty()) {
+            fields.append(adifField(
+                QStringLiteral("APP_CONTESTLOGGER_QTC"),
+                QString::fromUtf8(QJsonDocument(
+                    QtcService::toJson(qso.qtcTransfers))
+                    .toJson(QJsonDocument::Compact))));
         }
         fields.append(adifField(QStringLiteral("APP_CONTESTLOGGER_POINTS"),
                                 QString::number(qso.points)));
@@ -554,6 +575,30 @@ bool LogExporter::validate(LogExportFormat format, const Contest &contest,
             ContestEvaluationContext context;
             for (qsizetype previous = 0; previous < index; ++previous) {
                 context.previousQsos.append(activeQsos.at(previous));
+            }
+            if (!qso.qtcTransfers.isEmpty()) {
+                if (definition == nullptr
+                    || (!definition->id.startsWith(QStringLiteral("wae-"))
+                        && !definition->cabrilloContest.startsWith(
+                            QStringLiteral("WAE-DC"), Qt::CaseInsensitive))) {
+                    setError(error, QStringLiteral(
+                        "%1 contains QTC data but is not a WAE log.").arg(prefix));
+                    return false;
+                }
+                for (qsizetype transferIndex = 0;
+                     transferIndex < qso.qtcTransfers.size(); ++transferIndex) {
+                    QVector<QtcTransfer> otherTransfers =
+                        qso.qtcTransfers.mid(0, transferIndex);
+                    otherTransfers += qso.qtcTransfers.mid(transferIndex + 1);
+                    if (!QtcService::validate(qso, qso.qtcTransfers.at(transferIndex),
+                                              otherTransfers, error)) {
+                        if (error != nullptr) {
+                            *error = QStringLiteral("%1 has invalid QTC data: %2")
+                                         .arg(prefix, *error);
+                        }
+                        return false;
+                    }
+                }
             }
             const QMap<QString, QString> sentValues =
                 exchangeValues(qso, true, &definition->sentExchange);

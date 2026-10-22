@@ -1,0 +1,15 @@
+schema_version: 1
+id: wae-rtty
+name: Worked All Europe DX Contest (RTTY)
+description: WAE DX RTTY contest profile. QTC exchange is managed separately in the log.
+cabrillo: {contest: WAE-DC-RTTY}
+bands: [80m, 40m, 20m, 15m, 10m]
+modes: [RTTY]
+exchange:
+  sent:
+    - {name: serial, label: Serial, type: serial, generated: true, width: 3}
+  received:
+    - {name: serial, label: Serial, type: integer, min: 1, max: 999999}
+scoring:
+  qso_points: 1
+dupe_key: [callsign, band, mode]

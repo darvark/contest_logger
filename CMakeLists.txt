@@ -14,7 +14,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets Sql Network SerialPort)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets Sql Network SerialPort LinguistTools)
 find_package(yaml-cpp CONFIG REQUIRED)
 
 option(LOGGER_ENABLE_HAMLIB "Build Hamlib radio and CW support when available" ON)
@@ -36,6 +36,7 @@ add_library(logger_core
     include/logger/cluster/dx_cluster_service.h
     include/logger/contest/contest_definition_loader.h
     include/logger/contest/contest_engine.h
+    include/logger/contest/qtc_service.h
     include/logger/cw/cw_keyer_service.h
     include/logger/data/log_exporter.h
     include/logger/data/application_data.h
@@ -47,12 +48,14 @@ add_library(logger_core
     include/logger/network/station_presence.h
     include/logger/network/sync_consistency.h
     include/logger/network/secret_store.h
+    include/logger/network/n1mm_udp_broadcaster.h
     include/logger/radio/radio_service.h
     include/logger/radio/band_plan.h
     include/logger/ui/operator_dialog.h
     include/logger/ui/new_log_dialog.h
     src/contest/contest_definition_loader.cpp
     src/contest/contest_engine.cpp
+    src/contest/qtc_service.cpp
     src/cw/cw_keyer_service.cpp
     src/data/log_exporter.cpp
     src/data/application_data.cpp
@@ -62,6 +65,7 @@ add_library(logger_core
     src/network/sync_server.cpp
     src/network/sync_client.cpp
     src/network/secret_store.cpp
+    src/network/n1mm_udp_broadcaster.cpp
     src/cluster/dx_cluster_service.cpp
     src/data/sqlite_repository.cpp
     src/radio/radio_service.cpp
@@ -90,7 +94,9 @@ endif()
 
 add_library(logger_ui STATIC
     include/logger/ui/main_window.h
+    include/logger/ui/qtc_dialog.h
     src/ui/main_window.cpp
+    src/ui/qtc_dialog.cpp
     resources/contests.qrc
 )
 target_link_libraries(logger_ui PUBLIC logger_core)
@@ -101,6 +107,14 @@ add_executable(contest_logger
     src/main.cpp
 )
 target_link_libraries(contest_logger PRIVATE logger_ui)
+qt_add_translations(contest_logger
+    TS_FILES translations/contest_logger_pl.ts
+    RESOURCE_PREFIX "/i18n"
+    SOURCES src/main.cpp src/ui/main_window.cpp src/ui/qtc_dialog.cpp
+            src/ui/new_log_dialog.cpp src/ui/operator_dialog.cpp
+            include/logger/ui/main_window.h include/logger/ui/qtc_dialog.h
+            include/logger/ui/new_log_dialog.h include/logger/ui/operator_dialog.h
+)
 
 add_executable(contest_logger_server
     src/server_main.cpp
@@ -227,6 +241,9 @@ if(BUILD_TESTING)
     add_executable(export_tests
         tests/test_log_exporter.cpp
     )
+    add_executable(qtc_n1mm_tests
+        tests/test_qtc_n1mm.cpp
+    )
     add_executable(import_tests
         tests/test_log_importer.cpp
     )
@@ -245,6 +262,11 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
     target_link_libraries(ui_tests PRIVATE logger_ui Qt6::Test)
+    qt_add_resources(ui_tests ui_test_translations
+        PREFIX "/i18n"
+        BASE "${CMAKE_CURRENT_BINARY_DIR}"
+        FILES "${CMAKE_CURRENT_BINARY_DIR}/contest_logger_pl.qm"
+    )
     target_compile_definitions(ui_tests PRIVATE
         CONTEST_LOGGER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
@@ -275,6 +297,7 @@ if(BUILD_TESTING)
     target_link_libraries(cluster_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(cw_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(export_tests PRIVATE logger_core Qt6::Test)
+    target_link_libraries(qtc_n1mm_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(import_tests PRIVATE logger_core Qt6::Test)
     target_link_libraries(support_data_tests PRIVATE logger_core Qt6::Test)
     add_test(NAME logger_tests COMMAND logger_tests)
@@ -287,6 +310,7 @@ if(BUILD_TESTING)
     add_test(NAME cluster_tests COMMAND cluster_tests)
     add_test(NAME cw_tests COMMAND cw_tests)
     add_test(NAME export_tests COMMAND export_tests)
+    add_test(NAME qtc_n1mm_tests COMMAND qtc_n1mm_tests)
     add_test(NAME import_tests COMMAND import_tests)
     add_test(NAME support_data_tests COMMAND support_data_tests)
     set_tests_properties(logger_tests PROPERTIES

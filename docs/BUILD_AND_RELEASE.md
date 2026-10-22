@@ -5,7 +5,7 @@
 W systemie Ubuntu zainstaluj zależności i zbuduj aplikację:
 
 ```sh
-sudo apt install cmake ninja-build g++ qt6-base-dev qt6-tools-dev \
+sudo apt install cmake ninja-build g++ qt6-base-dev qt6-tools-dev qt6-l10n-tools \
   libqt6sql6-sqlite libyaml-cpp-dev libhamlib-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -22,6 +22,8 @@ cmake -S . -B build-nohamlib -DLOGGER_ENABLE_HAMLIB=OFF
 Cel CMake `package` tworzy archiwum `.tar.gz` zawierające aplikację
 i przykładowe definicje zawodów YAML. Biblioteki wykonawcze Qt, SQLite
 i yaml-cpp należy zainstalować za pomocą menedżera pakietów systemu.
+
+Kompilacja katalogu tłumaczeń używa komponentu Qt LinguistTools (Linguist/lrelease).
 
 Testy integracyjne radia używają Hamlib Dummy (model 1), w tym lokalnego
 procesu `rigctld` do sprawdzania transportu TCP (model NET rigctl 2). Wymagają

@@ -24,6 +24,26 @@ enum class ConnectionState {
     Unsupported
 };
 
+enum class QtcDirection {
+    Sent,
+    Received
+};
+
+struct QtcMessage {
+    QDateTime timestampUtc;
+    QString callsign;
+    int serialNumber = 0;
+};
+
+struct QtcTransfer {
+    QString qtcUuid;
+    QString partnerQsoUuid;
+    QString partnerCallsign;
+    QtcDirection direction = QtcDirection::Sent;
+    int groupNumber = 0;
+    QVector<QtcMessage> messages;
+};
+
 struct Qso {
     qint64 id = 0;
     qint64 contestId = 0;
@@ -43,6 +63,7 @@ struct Qso {
     QString receivedExchange;
     QMap<QString, QString> sentExchangeFields;
     QMap<QString, QString> receivedExchangeFields;
+    QVector<QtcTransfer> qtcTransfers;
     int points = 0;
     bool invalid = false;
 };

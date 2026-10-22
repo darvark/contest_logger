@@ -19,6 +19,9 @@
         <file alias="arrl-ss-ssb.yaml">../contests/examples/arrl-ss-ssb.yaml</file>
         <file alias="eudx.yaml">../contests/examples/eudx.yaml</file>
         <file alias="euhfc.yaml">../contests/examples/euhfc.yaml</file>
+        <file alias="wae-cw.yaml">../contests/examples/wae-cw.yaml</file>
+        <file alias="wae-ssb.yaml">../contests/examples/wae-ssb.yaml</file>
+        <file alias="wae-rtty.yaml">../contests/examples/wae-rtty.yaml</file>
     </qresource>
     <qresource prefix="/map">
         <file alias="world_land.txt">world_land.txt</file>

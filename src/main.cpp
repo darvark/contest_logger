@@ -8,18 +8,21 @@
 #include <QCommandLineParser>
 #include <QDate>
 #include <QDir>
+#include <QDebug>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
 #include <QLockFile>
 #include <QMessageBox>
 #include <QPainter>
+#include <QLocale>
 #include <QPixmap>
 #include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSettings>
 #include <QSplashScreen>
+#include <QTranslator>
 
 int main(int argc, char *argv[])
 {
@@ -35,6 +38,27 @@ int main(int argc, char *argv[])
     QApplication::setStyle(QStringLiteral("Fusion"));
     QCoreApplication::setOrganizationName(QStringLiteral("ContestLogger"));
     QCoreApplication::setApplicationName(QStringLiteral("ContestLogger"));
+    QSettings settings;
+    QString language = settings.value(
+        QStringLiteral("ui/language"), QStringLiteral("en")).toString();
+    if (language != QLatin1String("en") && language != QLatin1String("pl")) {
+        qWarning().noquote() << "Unsupported saved UI language; using English.";
+        language = QStringLiteral("en");
+    }
+    QLocale::setDefault(language == QLatin1String("pl")
+                            ? QLocale(QLocale::Polish, QLocale::Poland)
+                            : QLocale(QLocale::English, QLocale::UnitedStates));
+    auto *translator = new QTranslator(&application);
+    translator->setObjectName(QStringLiteral("uiTranslator"));
+    if (language == QLatin1String("pl")) {
+        if (!translator->load(QStringLiteral(":/i18n/contest_logger_pl.qm"))) {
+            QMessageBox::critical(
+                nullptr, QStringLiteral("Startup error"),
+                QStringLiteral("The Polish translation catalog could not be loaded."));
+            return 1;
+        }
+        application.installTranslator(translator);
+    }
     QCommandLineParser parser;
     parser.setApplicationDescription(
         QStringLiteral("Cross-platform amateur radio contest logger"));

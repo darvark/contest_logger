@@ -158,6 +158,7 @@ private slots:
     void scoresArrlSweepstakesProfiles();
     void scoresArrlDxWveProfiles();
     void scoresAllBundledExamplesAgainstRegressionCases();
+    void scoresWaeQtcMessages();
     void rejectsInvalidReceivedExchange();
     void rejectsUndefinedReceivedExchangeFields();
     void detectsDuplicateCalls();
@@ -246,7 +247,7 @@ void ContestDefinitionTest::loadsBundledExamples()
     const QStringList filenames =
         QDir(examplesDirectory).entryList({QStringLiteral("*.yaml")},
                                          QDir::Files, QDir::Name);
-    QCOMPARE(filenames.size(), 20);
+    QCOMPARE(filenames.size(), 23);
     const QStringList requiredProfiles{
         QStringLiteral("cqww-cw.yaml"), QStringLiteral("cqww-ssb.yaml"),
         QStringLiteral("cqwpx-cw.yaml"), QStringLiteral("cqwpx-ssb.yaml"),
@@ -257,7 +258,9 @@ void ContestDefinitionTest::loadsBundledExamples()
         QStringLiteral("arrl-dx-cw-w-ve.yaml"),
         QStringLiteral("arrl-dx-ssb-w-ve.yaml"),
         QStringLiteral("arrl-ss-cw.yaml"), QStringLiteral("arrl-ss-ssb.yaml"),
-        QStringLiteral("eudx.yaml"), QStringLiteral("euhfc.yaml")
+        QStringLiteral("eudx.yaml"), QStringLiteral("euhfc.yaml"),
+        QStringLiteral("wae-cw.yaml"), QStringLiteral("wae-ssb.yaml"),
+        QStringLiteral("wae-rtty.yaml")
     };
     for (const QString &required : requiredProfiles) {
         QVERIFY2(filenames.contains(required), qPrintable(required));
@@ -859,7 +862,10 @@ void ContestDefinitionTest::scoresAllBundledExamplesAgainstRegressionCases()
          {{QStringLiteral("continent"), QStringLiteral("EU")},
           {QStringLiteral("same_country"), QStringLiteral("false")}}, 1},
         {QStringLiteral("wag.yaml"), QStringLiteral("CW"),
-         {{QStringLiteral("country"), QStringLiteral("Germany")}}, 1}
+         {{QStringLiteral("country"), QStringLiteral("Germany")}}, 1},
+        {QStringLiteral("wae-cw.yaml"), QStringLiteral("CW"), {}, 1},
+        {QStringLiteral("wae-ssb.yaml"), QStringLiteral("SSB"), {}, 1},
+        {QStringLiteral("wae-rtty.yaml"), QStringLiteral("RTTY"), {}, 1}
     };
     QSet<QString> coveredFiles;
     for (const Scenario &scenario : scenarios) {
@@ -908,6 +914,44 @@ void ContestDefinitionTest::scoresAllBundledExamplesAgainstRegressionCases()
     for (const QString &filename : filenames) {
         QVERIFY2(coveredFiles.contains(filename), qPrintable(filename));
     }
+}
+
+void ContestDefinitionTest::scoresWaeQtcMessages()
+{
+    logger::Qso qso;
+    qso.id = 1;
+    qso.callsign = QStringLiteral("DL1ABC");
+    qso.band = QStringLiteral("20m");
+    qso.mode = QStringLiteral("CW");
+    qso.timestampUtc =
+        QDateTime::fromString(QStringLiteral("2026-10-15T10:00:00.000Z"),
+                              Qt::ISODateWithMs);
+    qso.points = 1;
+    logger::QtcTransfer transfer;
+    transfer.messages = {
+        {QDateTime::fromString(QStringLiteral("2026-10-15T09:40:00.000Z"),
+                               Qt::ISODateWithMs),
+         QStringLiteral("DL2XYZ"), 18},
+        {QDateTime::fromString(QStringLiteral("2026-10-15T09:42:00.000Z"),
+                               Qt::ISODateWithMs),
+         QStringLiteral("DL3XYZ"), 19}
+    };
+    qso.qtcTransfers.append(transfer);
+
+    const logger::ContestDefinition definition =
+        loadExample(QStringLiteral("wae-cw.yaml"));
+    const logger::ContestScore score =
+        logger::ContestEngine().score(definition, {qso});
+    QCOMPARE(score.totalPoints, 3);
+    QCOMPARE(score.finalScore, 3);
+    QCOMPARE(score.perBand.value(QStringLiteral("20m")).points, 3);
+    QCOMPARE(score.perMode.value(QStringLiteral("CW")).points, 3);
+
+    const logger::ContestDefinition nonWaeDefinition =
+        loadExample(QStringLiteral("general-logging.yaml"));
+    const logger::ContestScore nonWaeScore =
+        logger::ContestEngine().score(nonWaeDefinition, {qso});
+    QCOMPARE(nonWaeScore.totalPoints, 1);
 }
 
 void ContestDefinitionTest::rejectsInvalidReceivedExchange()

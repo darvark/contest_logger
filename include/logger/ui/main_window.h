@@ -11,6 +11,7 @@
 #include "logger/domain/types.h"
 #include "logger/network/sync_client.h"
 #include "logger/network/sync_server.h"
+#include "logger/network/n1mm_udp_broadcaster.h"
 #include "logger/radio/radio_service.h"
 
 #include <QDateTime>
@@ -21,6 +22,7 @@
 #include <QVector>
 
 #include <memory>
+#include <functional>
 
 class QAction;
 class QComboBox;
@@ -54,6 +56,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void configureOperator();
@@ -70,6 +73,9 @@ private slots:
     void configureNetworkConnection();
     void completeRemoteLogMerge();
     void configureHostMode();
+    void configureN1mmBroadcast();
+    void broadcastFullLogToN1mm();
+    void manageQtc();
     void importLocalLogToHost();
     void disconnectNetworkConnection();
     void showNetworkStatus();
@@ -120,6 +126,7 @@ private slots:
     void updateRadioSnapshotForRadio(int radio, const logger::RadioSnapshot &snapshot);
 
 private:
+    void configureHostModeStart();
     void recordNetworkContact();
     void autoStartNetworkClient();
     void autoStartHostServer();
@@ -130,6 +137,8 @@ private:
     void loadOperator();
     void loadContests();
     void refreshDxClusterStatus();
+    bool connectDxCluster(const DxClusterConfig &config, bool persist = true);
+    bool saveDxClusterConfigs();
     const Contest *activeContest() const;
     void applyActiveLogStation();
     void updateSentExchangeVisibility(int vfo);
@@ -185,6 +194,8 @@ private:
     const ContestDefinition *activeDefinition() const;
 
     SqliteRepository &m_repository;
+    std::function<void()> m_retranslateUi;
+    N1mmUdpBroadcaster m_n1mmBroadcaster;
     RadioController m_radioControllers[2];
     QVector<DxClusterController *> m_dxClusterControllers;
     QVector<DxClusterConfig> m_dxClusterConfigs;
@@ -283,6 +294,7 @@ private:
     QComboBox *m_clusterConnectionSelector = nullptr;
     QLineEdit *m_clusterCommandInput = nullptr;
     QCheckBox *m_hideWorkedSpots = nullptr;
+    QCheckBox *m_onlyNewMultiplierSpots = nullptr;
     QLabel *m_clusterLabel = nullptr;
     QTimer *m_spotExpiryTimer = nullptr;
     QListWidget *m_checkPartial = nullptr;

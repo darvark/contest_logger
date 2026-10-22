@@ -71,7 +71,7 @@ void ApplicationDataTest::firstStartCreatesSettingsDatabaseAndDefinitions()
     QVERIFY2(installBundledContestDefinitions(&error), qPrintable(error));
     QVector<ContestDefinitionFile> files;
     QVERIFY2(loadContestDefinitionFiles(&files, &error), qPrintable(error));
-    QCOMPARE(files.size(), 19);
+    QCOMPARE(files.size(), 22);
     for (const ContestDefinitionFile &file : files) {
         QVERIFY(QFileInfo(file.path).isWritable());
     }
@@ -148,7 +148,7 @@ void ApplicationDataTest::preservesEditedDefinitionsAndDiscoversYamlAndYml()
     }
     QVERIFY2(installBundledContestDefinitions(&error), qPrintable(error));
     QVERIFY2(loadContestDefinitionFiles(&files, &error), qPrintable(error));
-    QCOMPARE(files.size(), 20);
+    QCOMPARE(files.size(), 23);
     bool foundCustom = false;
     bool foundEdited = false;
     for (const ContestDefinitionFile &file : files) {

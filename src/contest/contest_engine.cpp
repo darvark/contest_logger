@@ -435,9 +435,18 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
                                                           : QMap<QString, QString>{};
         const int points = qso.points > 0
             ? qso.points : pointsForQso(definition, qso, resolved);
-        result.totalPoints += points;
-        result.perBand[qso.band.trimmed().toLower()].points += points;
-        result.perMode[qso.mode.trimmed().toUpper()].points += points;
+        int qtcPoints = 0;
+        if (definition.id.startsWith(QStringLiteral("wae-"), Qt::CaseInsensitive)
+            || definition.cabrilloContest.startsWith(
+                QStringLiteral("WAE-DC"), Qt::CaseInsensitive)) {
+            for (const QtcTransfer &transfer : qso.qtcTransfers) {
+                qtcPoints += transfer.messages.size();
+            }
+        }
+        const int contactPoints = points + qtcPoints;
+        result.totalPoints += contactPoints;
+        result.perBand[qso.band.trimmed().toLower()].points += contactPoints;
+        result.perMode[qso.mode.trimmed().toUpper()].points += contactPoints;
         const MultiplierResolver currentResolver = [&resolved](const Qso &) {
             return resolved;
         };

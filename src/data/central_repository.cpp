@@ -3,6 +3,7 @@
 
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/contest/contest_engine.h"
+#include "logger/contest/qtc_service.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -127,6 +128,9 @@ QJsonObject qsoSnapshot(const QJsonObject &input, int version, bool deleted)
     QJsonObject snapshot = input;
     snapshot.insert(QStringLiteral("qso_version"), version);
     snapshot.insert(QStringLiteral("is_deleted"), deleted);
+    if (!snapshot.contains(QStringLiteral("qtc_transfers"))) {
+        snapshot.insert(QStringLiteral("qtc_transfers"), QJsonArray{});
+    }
     if (!snapshot.contains(QStringLiteral("is_invalid"))) {
         snapshot.insert(QStringLiteral("is_invalid"), false);
     }
@@ -162,6 +166,8 @@ Qso qsoFromJson(const QJsonObject &object)
         object.value(QStringLiteral("sent_exchange_fields")));
     qso.receivedExchangeFields = stringMap(
         object.value(QStringLiteral("received_exchange_fields")));
+    qso.qtcTransfers = QtcService::fromJson(
+        object.value(QStringLiteral("qtc_transfers")).toArray());
     qso.points = object.value(QStringLiteral("points")).toInt();
     qso.invalid = object.value(QStringLiteral("is_invalid")).toBool();
     return qso;
@@ -533,12 +539,16 @@ bool CentralRepository::submitBatch(
         const QJsonValue expectedVersionValue =
             operation.value(QStringLiteral("expected_version"));
         QJsonObject qso = operation.value(QStringLiteral("qso")).toObject();
+        if (!qso.contains(QStringLiteral("qtc_transfers"))) {
+            qso.insert(QStringLiteral("qtc_transfers"), QJsonArray{});
+        }
         const QStringList expectedQsoKeys{
             QStringLiteral("band"), QStringLiteral("callsign"),
             QStringLiteral("frequency_hz"), QStringLiteral("is_invalid"),
             QStringLiteral("log_uuid"),
             QStringLiteral("mode"), QStringLiteral("points"),
-            QStringLiteral("qso_uuid"), QStringLiteral("received_exchange"),
+            QStringLiteral("qso_uuid"), QStringLiteral("qtc_transfers"),
+            QStringLiteral("received_exchange"),
             QStringLiteral("received_exchange_fields"),
             QStringLiteral("sent_exchange"), QStringLiteral("sent_exchange_fields"),
             QStringLiteral("station_callsign"), QStringLiteral("station_uuid"),
@@ -579,8 +589,16 @@ bool CentralRepository::submitBatch(
             || !stringValue(qso, QStringLiteral("timestamp_utc"))
                     .endsWith(QLatin1Char('Z'))
             || !isStringObject(qso.value(QStringLiteral("sent_exchange_fields")))
-            || !isStringObject(qso.value(QStringLiteral("received_exchange_fields")))) {
+            || !isStringObject(qso.value(QStringLiteral("received_exchange_fields")))
+            || (qso.contains(QStringLiteral("qtc_transfers"))
+                && !qso.value(QStringLiteral("qtc_transfers")).isArray())) {
             return rollback(QStringLiteral("INVALID_MESSAGE: QSO operation is invalid."));
+        }
+        if (qso.contains(QStringLiteral("qtc_transfers"))
+            && !QtcService::validateJson(qsoFromJson(qso),
+                                         qso.value(QStringLiteral("qtc_transfers")),
+                                         nullptr)) {
+            return rollback(QStringLiteral("INVALID_MESSAGE: QTC data is invalid."));
         }
         const QJsonValue frequencyValue = qso.value(QStringLiteral("frequency_hz"));
         const QJsonValue pointsValue = qso.value(QStringLiteral("points"));
@@ -893,8 +911,8 @@ bool CentralRepository::submitBatch(
                 "INSERT INTO qsos(contest_id, callsign, station_callsign, band, "
                 "timestamp_utc, frequency_hz, mode, sent_exchange, received_exchange, "
                 "sent_exchange_json, received_exchange_json, points, qso_uuid, "
-                "station_uuid, qso_version, reservation_uuid, is_invalid) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"));
+                "station_uuid, qso_version, reservation_uuid, is_invalid, qtc_json) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)"));
             insert.addBindValue(contestId);
             insert.addBindValue(stringValue(qso, QStringLiteral("callsign")).trimmed().toUpper());
             insert.addBindValue(stringValue(qso, QStringLiteral("station_callsign"))
@@ -918,6 +936,9 @@ bool CentralRepository::submitBatch(
                 ? QStringLiteral("") : reservationUuid);
             insert.addBindValue(
                 qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
+            insert.addBindValue(QString::fromUtf8(QJsonDocument(
+                qso.value(QStringLiteral("qtc_transfers")).toArray())
+                .toJson(QJsonDocument::Compact)));
             if (!insert.exec()) {
                 return rollback(sqlError(insert));
             }
@@ -952,7 +973,7 @@ bool CentralRepository::submitBatch(
                     "UPDATE qsos SET callsign = ?, station_callsign = ?, band = ?, "
                     "timestamp_utc = ?, frequency_hz = ?, mode = ?, sent_exchange = ?, "
                     "received_exchange = ?, sent_exchange_json = ?, received_exchange_json = ?, "
-                    "points = ?, qso_version = ?, is_invalid = ? "
+                    "points = ?, qso_version = ?, is_invalid = ?, qtc_json = ? "
                     "WHERE id = ? AND qso_version = ? AND is_deleted = 0"));
                 update.addBindValue(stringValue(qso, QStringLiteral("callsign"))
                                         .trimmed().toUpper());
@@ -976,6 +997,9 @@ bool CentralRepository::submitBatch(
                 update.addBindValue(newVersion);
                 update.addBindValue(
                     qso.value(QStringLiteral("is_invalid")).toBool() ? 1 : 0);
+                update.addBindValue(QString::fromUtf8(QJsonDocument(
+                    qso.value(QStringLiteral("qtc_transfers")).toArray())
+                    .toJson(QJsonDocument::Compact)));
                 update.addBindValue(qsoId);
                 update.addBindValue(currentVersion);
             }

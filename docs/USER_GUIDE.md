@@ -151,7 +151,7 @@ Okna narzędziowe (docki; można je przesuwać, odłączać i ukrywać w menu
 | **Check callsign** | Siatka pasmo × emisja z zaznaczeniem, gdzie wpisany znak był już zrobiony; pod spodem stan („not in log”, dupe). |
 | **Check partial** | Znaki pasujące do fragmentu wpisanego znaku z Master.SCP/MASTER.CPY, call history i logu. Biały — nowy, zielony — zrobiony na innym paśmie/emisji, czerwony — dubel, pogrubiony — dokładne trafienie. Kliknięcie wstawia znak do pola Call. Pole Call pokazuje też podpowiedzi dla wpisanego prefiksu; tekst zmienia się dopiero po wybraniu sugestii. |
 | **Contest info** | Opis aktywnej definicji: pasma, emisje, wymiana, punktacja, mnożniki, klucz dubli. |
-| **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Kolumny `kHz, Call, Age, Spotter, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
+| **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), emisji i kontynentu, **New mult only**, sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Kolumny `kHz, Call, Age, Spotter, Source, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
 | **Rate** | QSO/h z ostatnich 10 i 100 QSO, liczba QSO z ostatnich 60 i 10 minut, suma QSO, prędkość CW oraz wykres liczby QSO w kolejnych 5-minutowych przedziałach ostatniej godziny. Zawiera też podsumowanie QSO/punktów/mnożników per pasmo i emisja. |
 | **Summary** | Tabela per pasmo: QSO, punkty, mnożniki, średnia; wiersz TOTAL i **FINAL SCORE**. |
 | **DX Cluster announcements** | Surowa, chronologiczna lista ogłoszeń clustera; dwuklik — przejście do spotu. |
@@ -331,7 +331,12 @@ Klient obsługuje negocjację Telnet, prompt logowania, parsowanie linii
 ponowne łączenie (odstęp rosnący do 30 s). Aby pracować z kilkoma clusterami,
 wybierz **Radio → DX cluster…** dla każdego serwera; aktywne połączenie dla
 wysyłania wybiera się nad listą ogłoszeń. **Radio → Disconnect DX cluster**
-rozłącza wszystkie połączenia.
+rozłącza wszystkie połączenia. Lista skonfigurowanych hostów jest zapisywana
+i ponownie łączona przy następnym uruchomieniu. Kolumna **Source** wskazuje
+host i port pochodzenia spotu; lokalny skimmer udostępniający zgodny strumień
+Telnet można dodać tak samo jak cluster. Bandmapa scala powtórzenia według
+znaku i pasma, zachowując najnowszy spot (oraz jego źródło); panel ogłoszeń
+zachowuje każde zgłoszenie z każdego połączenia.
 
 Pole nad ogłoszeniami wysyła pojedyncze komendy do wybranego połączenia, np.
 `SH/DX` albo spot `DX W1AW 14025.0 CQ TEST`. Komenda nie może zawierać znaków
@@ -340,7 +345,11 @@ częstotliwość i komentarz.
 
 Bandmapa: `Ctrl+Up`/`Ctrl+Down` (lub `Up`/`Down` w tabeli) wybiera spot,
 `Enter`, **Tune** lub dwuklik wpisuje znak do aktywnego panelu i stroi aktywne
-radio. **Operating → Next bandmap spot with a new multiplier** (`Ctrl+Alt+Down`)
+radio. **New mult only** ogranicza listę do spotów, których rozpoznany mnożnik
+nie został jeszcze zaliczony. Okno **Check callsign** pokazuje również `+M`
+w komórkach pasmo × emisja, gdzie dany znak przyniesie nowy mnożnik; `M`
+oznacza mnożnik już zaliczony. Wynik zależy od danych wymiany i CTY dostępnych
+dla danego typu mnożnika. **Operating → Next bandmap spot with a new multiplier** (`Ctrl+Alt+Down`)
 przechodzi do następnego spotu, który nie jest duplikatem i którego rozpoznany
 mnożnik nie został jeszcze zaliczony; wybór uwzględnia aktywne filtry oraz
 przypisanie bandmapy do VFO/radia. Filtry pasma, emisji i kontynentu są niezależne. Rozpoznanie kontynentu
@@ -503,6 +512,36 @@ UTC, pasmo/częstotliwość, emisję, dublety, pola wymiany) przed zapisem. Przy
 błędzie istniejący plik nie jest nadpisywany; zapis odbywa się atomowo przez
 plik tymczasowy.
 
+### WAE QTC
+
+Profile WAE CW, SSB i RTTY udostępniają **Contest → Manage WAE QTC…**. Najpierw
+zaloguj zwykłe QSO z korespondentem. W oknie QTC wybierz kierunek (nadanie lub
+odbiór), numer grupy i wpisz od 1 do 10 komunikatów: czas UTC `HHMM`, znak oraz
+numer seryjny. Numer grupy jest podpowiadany osobno dla każdego korespondenta
+i kierunku; można zapisać maksymalnie 10 grup danego kierunku dla partnera.
+Zapis aktualizuje partnerskie QSO w lokalnej bazie i trafia do kolejki
+synchronizacji.
+
+Eksport Cabrillo umieszcza wiersz `QTC:` bezpośrednio po partnerskim `QSO:`;
+eksport ADIF przechowuje transfer w polu `APP_CONTESTLOGGER_QTC`. Liczba zapisanych
+wiadomości QTC zwiększa punkty logu. Punktacja WAE nie jest jeszcze pełną
+implementacją regulaminu: mnożniki jednostek WAE/DXCC zależne od regionu stacji
+nie są modelowane, dlatego wynik zgłoszony jako `CLAIMED-SCORE` może być
+niekompletny i wymaga niezależnego sprawdzenia.
+
+### Broadcast N1MM UDP
+
+**Options → N1MM UDP broadcast settings…** konfiguruje adres IP i port odbiorcy
+(domyślnie `12060`). Broadcast jest jawnie wyłączony do momentu zaznaczenia
+opcji włączenia. Gdy jest aktywny, każde nowo zapisane QSO jest wysyłane jako
+XML N1MM `contactinfo`; błąd lokalnego wysłania jest zgłaszany, ale QSO pozostaje
+zapisane. **File → Broadcast full log to N1MM UDP…** uruchamia osobno
+potwierdzaną wysyłkę całego logu, jednym datagramem na QSO.
+
+UDP nie potwierdza obecności odbiorcy ani dostarczenia wiadomości. Sukces
+wysłania z aplikacji nie oznacza odbioru przez zewnętrzne narzędzie; przy
+wysyłaniu dużego logu datagramy są nadawane kolejno bez potwierdzeń.
+
 ### Skąd pochodzą pola nagłówka Cabrillo
 
 | Pole | Źródło |
@@ -574,10 +613,12 @@ wymianę nadaną i odebraną.
 | | Export Cabrillo… | |
 | | Export ADIF… | |
 | | Import ADIF / Cabrillo… | |
+| | Broadcast full log to N1MM UDP… | |
 | | Back up database… | |
 | | Support data → Call history file… / Master callsign list from file… / Download/update Master.SCP… / wl_cty.dat from file… / Download/update wl_cty.dat… | |
 | | Exit | `Ctrl+Q` |
 | **Contest** | Import YAML definition… | |
+| | Manage WAE QTC… (profile WAE) | |
 | **Operating** | Wipe QSO entry | `Ctrl+W` |
 | | Switch entry A/B | `Ctrl+Tab` |
 | | Live CW input | `Ctrl+K` |
@@ -595,6 +636,7 @@ wymianę nadaną i odebraną.
 | | CW keyer… / Reconnect CW keyer / Disconnect CW keyer | |
 | | Abort CW transmission | `Ctrl+Esc` (także `Esc` podczas nadawania) |
 | **Options** | Operator and station… | |
+| | N1MM UDP broadcast settings… | |
 | | Central network connection… | |
 | | Host central server on this station… / Stop central server on this station | |
 | | Create central log / import local log… (aktywny Host) | |
@@ -767,7 +809,23 @@ Starsze ustawienia bez grupy `A` (`radio/backend` itd.) są czytane dla Radio A.
 
 ### DX cluster — `dxCluster/*`
 
-`host`, `port` (`7300`), `callsign` (znak stacji).
+`host`, `port` (`7300`), `callsign` (znak stacji), `spotLifetimeMinutes`;
+`connections` przechowuje listę hostów i jest ponownie łączona przy starcie.
+
+### Interfejs — `ui/*`
+
+| Klucz | Domyślnie | Znaczenie |
+|---|---|---|
+| `ui/language` | `en` | `en` = English, `pl` = Polski. Zmiana w **Options → Language** jest stosowana od razu do napisów objętych katalogiem tłumaczeń. |
+| `ui/colorPalette` | `current` | `current` = obecna paleta, `monokai` = Monokai. Zmiana w **Options → Color palette** jest stosowana od razu. |
+
+### N1MM UDP — `n1mmUdp/*`
+
+| Klucz | Domyślnie | Znaczenie |
+|---|---|---|
+| `n1mmUdp/enabled` | `false` | Jawne włączenie automatycznego broadcastu nowych QSO |
+| `n1mmUdp/address` | `127.0.0.1` | Docelowy adres IP |
+| `n1mmUdp/port` | `12060` | Docelowy port UDP |
 
 ### Nowy log — `newLog/*`
 
@@ -996,6 +1054,41 @@ END-OF-LOG:
 - SO2R: brak przełączania audio, PTT i anten (brak obsługi sterowników SO2R
   typu OTRSP, SO2R Box itp.); CAT to nie przełączanie audio.
 - Brak sterowania PTT, DVK (komunikaty głosowe) oraz komunikatów RTTY/FT8.
+- Profile zawodów mogą dopuszczać RTTY, ale logger nie dekoduje ani nie nadaje RTTY
+  i nie komunikuje się obecnie z MMTTY.
+
+#### RTTY i MMTTY
+
+Integracja z MMTTY nie jest obecnie dostępna. Oficjalne materiały
+[MMTTY Engine](https://hamsoft.ca/pages/programmers/mmtty-engine.php) opisują
+tryb zdalny sterowany komunikatami okien Windows. Programista może rejestrować
+komunikat `MMTTY`, wysyłać polecenia do okna MMTTY, a znaki odbioru i nadawania
+otrzymywać jako zdarzenia `TXM_CHAR`. Interfejs umożliwia również sterowanie
+TX/RX. To podejście wiąże integrację z Windows i cyklem życia procesu MMTTY;
+udokumentowany tryb zdalny wymaga okresowej komunikacji z aplikacją
+nadrzędną, w przeciwnym razie MMTTY może zakończyć działanie. Dokumentacja
+Engine na stronie jest datowana na 2003 r., dlatego zgodność z bieżącymi
+wersjami Windows/Engine wymaga praktycznej weryfikacji.
+
+Materiały programistyczne udostępniają [MMTTY Engine 1.68a](https://hamsoft.ca/pages/programmers/programmer-downloads.php)
+z dokumentacją, przykładami i kodem, a osobno także kontrolkę ActiveX oraz
+emulację TNC. Przed użyciem lub redystrybucją składników należy zapoznać się
+z warunkami użycia SDK. Samo udostępnienie programu/SDK nie potwierdza, że
+można dołączyć je do instalatora Contest Loggera.
+
+Rozsądny pierwszy etap to proof of concept na Windows: uruchomić MMTTY,
+zestawić kanał zdalny, wyświetlić odbierane znaki, odróżnić RX od TX oraz
+pozwolić operatorowi jawnie wstawić tekst do pól QSO. Odbierany ciąg nie
+powinien automatycznie tworzyć ani zatwierdzać QSO. Dopiero po weryfikacji
+kierunku znaków, PTT/TX, zamykania procesu i współdzielenia karty dźwiękowej
+oraz portów COM można rozważyć sterowanie nadawaniem tekstu. MMTTY i
+Contest Logger mogą konkurować o te same zasoby audio/COM; nie należy
+zakładać ich bezpiecznego współdzielenia bez testu z konkretnym radiem i
+konfiguracją.
+
+Do czasu takiej integracji użyj MMTTY osobno i przenieś odebrany callsign oraz
+wymianę ręcznie do formularza loggera; walidacja, dupe-check i zapis QSO
+pozostają w Contest Loggerze.
 
 ### Keyer CW
 
@@ -1015,7 +1108,11 @@ END-OF-LOG:
 
 ### Inne
 
-- Interfejs tylko w języku angielskim (brak tłumaczeń).
+- Język można wybrać jako English lub Polski w **Options → Language**; napisy
+  objęte katalogiem zmieniają się od razu, bez restartu. Formularz QSO i połączenia
+  pozostają aktywne. Nieprzetłumaczone komunikaty pozostają po angielsku.
+- Paletę kolorów można przełączyć między obecną a Monokai w **Options → Color
+  palette**; wybór jest zapamiętywany i stosowany natychmiast.
 - Brak okna ustawień ogólnych — konfiguracja rozproszona jest po oknach
   w menu *Radio* i *Options*.
 - Obsługa sprzętu (porty szeregowe, uśpienie/wybudzenie systemu) wymaga walidacji

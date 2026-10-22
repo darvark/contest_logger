@@ -14,8 +14,8 @@ zaimplementowanych funkcji znajduje się w [FUNKCJONALNOSCI.md](FUNKCJONALNOSCI.
 ## Wymagania
 
 - CMake 3.21 lub nowszy i kompilator C++20.
-- Qt 6.2 lub nowszy: Core, Widgets, Sql, Network, SerialPort oraz Test
-  (moduł Test jest potrzebny do budowania testów).
+- Qt 6.2 lub nowszy: Core, Widgets, Sql, Network, SerialPort, LinguistTools
+  oraz Test (moduł Test jest potrzebny do budowania testów).
 - Wtyczka sterownika SQLite dla Qt (`QSQLITE`).
 - yaml-cpp 0.7 lub nowszy.
 - Biblioteka deweloperska Hamlib do sprzętowej obsługi CAT i CW (opcjonalna

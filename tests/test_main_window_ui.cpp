@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QAction>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QCompleter>
 #include <QCheckBox>
@@ -32,6 +33,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPalette>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -45,6 +47,7 @@
 #include <QTcpServer>
 #include <QTest>
 #include <QTimer>
+#include <QTranslator>
 #include <QUuid>
 
 #include <functional>
@@ -72,6 +75,7 @@ private slots:
     void networkStatusShowsQueueAndOfflineState();
     void networkStatusListsConnectedStations();
     void dxClusterDialogSelectsDirectoryOrCustomServer();
+    void dxClusterConnectionsPersistAndRestore();
     void radioConfigDialogPersistsHamlibAndCatTimingOptions();
     void cwKeyerDialogPersistsSerialDeviceAndOutputLine();
     void functionKeyMessagesAreManuallyConfigurable();
@@ -88,6 +92,10 @@ private slots:
     void liveCwInputFollowsActiveRadioAndVfo();
     void bandmapSortAndKeyboardNavigation();
     void bandmapFiltersSpotsByMode();
+    void bandmapNewMultiplierFilterAndMatrixUpdate();
+    void languagePreferenceIsPersisted();
+    void polishCatalogTranslatesWindowAfterRestart();
+    void colorPalettePreferenceIsPersistedAndApplied();
     void bandmapSpotLifetimeIsConfigurable();
     void clusterAnnouncementsShowOnlyLiveSpots();
     void ctrlWipeClearsCallAndReceivedExchange();
@@ -290,6 +298,12 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QVERIFY(disconnectCw != nullptr);
     QVERIFY(m_window->findChild<QAction *>(
                 QStringLiteral("configureNetworkConnectionAction")) != nullptr);
+    QVERIFY(m_window->findChild<QAction *>(
+                QStringLiteral("configureN1mmUdpAction")) != nullptr);
+    QVERIFY(m_window->findChild<QAction *>(
+                QStringLiteral("broadcastFullLogN1mmAction")) != nullptr);
+    QVERIFY(m_window->findChild<QAction *>(
+                QStringLiteral("manageQtcAction")) != nullptr);
     auto *networkStationsDock =
         m_window->findChild<QDockWidget *>(QStringLiteral("networkStationsDock"));
     QVERIFY(networkStationsDock != nullptr);
@@ -826,6 +840,57 @@ void MainWindowUiTest::dxClusterDialogSelectsDirectoryOrCustomServer()
     });
     configureCluster->trigger();
     QVERIFY(dialogSeen);
+}
+
+void MainWindowUiTest::dxClusterConnectionsPersistAndRestore()
+{
+    QAction *configureCluster = nullptr;
+    for (QAction *action : m_window->findChildren<QAction *>()) {
+        if (action->objectName() == QLatin1String("configureDxClusterAction")) {
+            configureCluster = action;
+            break;
+        }
+    }
+    if (configureCluster == nullptr) {
+        for (QAction *action : m_window->findChildren<QAction *>()) {
+            if (action->text() == QStringLiteral("&DX cluster...")) {
+                configureCluster = action;
+                break;
+            }
+        }
+    }
+    QVERIFY(configureCluster != nullptr);
+
+    const auto addConnection = [this, configureCluster](const QString &host, int port) {
+        runWhenModalAppears([&host, port](QDialog *dialog) {
+            auto *hostEdit = dialog->findChild<QLineEdit *>(
+                QStringLiteral("dxClusterHost"));
+            auto *portEdit = dialog->findChild<QSpinBox *>(
+                QStringLiteral("dxClusterPort"));
+            QVERIFY(hostEdit != nullptr);
+            QVERIFY(portEdit != nullptr);
+            hostEdit->setText(host);
+            portEdit->setValue(port);
+            dialog->accept();
+        });
+        configureCluster->trigger();
+    };
+    addConnection(QStringLiteral("127.0.0.1"), 1);
+    addConnection(QStringLiteral("127.0.0.1"), 2);
+    const QVariantList stored =
+        QSettings().value(QStringLiteral("dxCluster/connections")).toList();
+    QCOMPARE(stored.size(), 2);
+
+    m_window.reset();
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    QCoreApplication::processEvents();
+    auto *selector = m_window->findChild<QComboBox *>(
+        QStringLiteral("dxClusterConnectionSelector"));
+    QVERIFY(selector != nullptr);
+    QCOMPARE(selector->count(), 3);
+    QCOMPARE(selector->itemText(1), QStringLiteral("127.0.0.1:1"));
+    QCOMPARE(selector->itemText(2), QStringLiteral("127.0.0.1:2"));
 }
 
 void MainWindowUiTest::radioConfigDialogPersistsHamlibAndCatTimingOptions()
@@ -1523,6 +1588,151 @@ void MainWindowUiTest::bandmapFiltersSpotsByMode()
     QCOMPARE(bandmap->rowCount(), 0);
     continentFilter->setCurrentIndex(continentFilter->findData(QString()));
     QCOMPARE(bandmap->rowCount(), 3);
+}
+
+void MainWindowUiTest::bandmapNewMultiplierFilterAndMatrixUpdate()
+{
+    const auto addSpot = [this](const QString &callsign) {
+        Spot spot;
+        spot.callsign = callsign;
+        spot.frequencyHz = 7'040'000;
+        spot.band = QStringLiteral("40m");
+        spot.mode = QStringLiteral("CW");
+        spot.spotter = QStringLiteral("K1ABC");
+        spot.comment = QStringLiteral("CQ TEST");
+        spot.timestampUtc = QDateTime::currentDateTimeUtc();
+        spot.source = QStringLiteral("local-skimmer:7300");
+        return QMetaObject::invokeMethod(
+            m_window.get(), "receiveSpot", Qt::DirectConnection,
+            Q_ARG(logger::Spot, spot));
+    };
+    QVERIFY(addSpot(QStringLiteral("W1AAA")));
+    QVERIFY(addSpot(QStringLiteral("W1BBB")));
+    QVERIFY(addSpot(QStringLiteral("K1AAA")));
+
+    auto *bandmap =
+        m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    auto *newMultiplierFilter = m_window->findChild<QCheckBox *>(
+        QStringLiteral("bandmapNewMultiplierFilter"));
+    auto *checkCallGrid =
+        m_window->findChild<QTableWidget *>(QStringLiteral("checkCallGrid"));
+    QVERIFY(bandmap != nullptr);
+    QVERIFY(newMultiplierFilter != nullptr);
+    QVERIFY(checkCallGrid != nullptr);
+    QVERIFY(bandmap->columnCount() >= 6);
+    QCOMPARE(bandmap->item(0, 4)->text(),
+             QStringLiteral("local-skimmer:7300"));
+
+    callEdit()->setText(QStringLiteral("W1BBB"));
+    QCoreApplication::processEvents();
+    QCOMPARE(checkCallGrid->item(1, 1)->text(), QStringLiteral("+M"));
+
+    newMultiplierFilter->setChecked(true);
+    QCOMPARE(bandmap->rowCount(), 3);
+    enterQso(QStringLiteral("W1AAA"), QString(), QStringLiteral("1"));
+    callEdit()->setText(QStringLiteral("W1BBB"));
+    QCoreApplication::processEvents();
+    QCOMPARE(checkCallGrid->item(1, 1)->text(), QStringLiteral("M"));
+    QCOMPARE(checkCallGrid->item(1, 1)->toolTip(),
+             QStringLiteral("Multiplier already worked."));
+    QCOMPARE(bandmap->rowCount(), 1);
+    QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("K1AAA"));
+}
+
+void MainWindowUiTest::languagePreferenceIsPersisted()
+{
+    QTranslator catalog;
+    QVERIFY(catalog.load(QStringLiteral(":/i18n/contest_logger_pl.qm")));
+    auto *newLog = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
+    QVERIFY(newLog != nullptr);
+    auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    QVERIFY(bandmap != nullptr);
+    callEdit()->setText(QStringLiteral("SP9DRAFT"));
+    const auto *originalWindow = m_window.get();
+    auto *polish = m_window->findChild<QAction *>(
+        QStringLiteral("languagePolishAction"));
+    auto *english = m_window->findChild<QAction *>(
+        QStringLiteral("languageEnglishAction"));
+    QVERIFY(polish != nullptr);
+    QVERIFY(english != nullptr);
+    QVERIFY(english->isChecked());
+    polish->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("ui/language")).toString(),
+             QStringLiteral("pl"));
+    QVERIFY(polish->isChecked());
+    QCOMPARE(newLog->text(), QString::fromUtf8("&Nowy log..."));
+    QCOMPARE(english->text(), QString::fromUtf8("Angielski"));
+    QCOMPARE(bandmap->horizontalHeaderItem(1)->text(), QStringLiteral("Znak"));
+    QCOMPARE(callEdit()->text(), QStringLiteral("SP9DRAFT"));
+    QCOMPARE(m_window.get(), originalWindow);
+    english->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("ui/language")).toString(),
+             QStringLiteral("en"));
+    QVERIFY(english->isChecked());
+    QCOMPARE(newLog->text(), QStringLiteral("&New log..."));
+    QCOMPARE(english->text(), QStringLiteral("English"));
+    QCOMPARE(bandmap->horizontalHeaderItem(1)->text(), QStringLiteral("Call"));
+    QCOMPARE(callEdit()->text(), QStringLiteral("SP9DRAFT"));
+}
+
+void MainWindowUiTest::polishCatalogTranslatesWindowAfterRestart()
+{
+    auto *polish = m_window->findChild<QAction *>(
+        QStringLiteral("languagePolishAction"));
+    QVERIFY(polish != nullptr);
+    polish->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("ui/language")).toString(),
+             QStringLiteral("pl"));
+    m_window.reset();
+
+    QTranslator translator;
+    QVERIFY(translator.load(QStringLiteral(":/i18n/contest_logger_pl.qm")));
+    QVERIFY(QCoreApplication::installTranslator(&translator));
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    auto *newLog = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
+    QVERIFY(newLog != nullptr);
+    QCOMPARE(newLog->text(), QString::fromUtf8("&Nowy log..."));
+    auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
+    QVERIFY(bandmap != nullptr);
+    QCOMPARE(bandmap->horizontalHeaderItem(1)->text(), QString::fromUtf8("Znak"));
+    auto *english = m_window->findChild<QAction *>(
+        QStringLiteral("languageEnglishAction"));
+    QVERIFY(english != nullptr);
+    QCOMPARE(english->text(), QString::fromUtf8("Angielski"));
+    english->trigger();
+    m_window.reset();
+    QVERIFY(QCoreApplication::removeTranslator(&translator));
+
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    newLog = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
+    QVERIFY(newLog != nullptr);
+    QCOMPARE(newLog->text(), QStringLiteral("&New log..."));
+}
+
+void MainWindowUiTest::colorPalettePreferenceIsPersistedAndApplied()
+{
+    auto *current = m_window->findChild<QAction *>(
+        QStringLiteral("colorPaletteCurrentAction"));
+    auto *monokai = m_window->findChild<QAction *>(
+        QStringLiteral("colorPaletteMonokaiAction"));
+    QVERIFY(current != nullptr);
+    QVERIFY(monokai != nullptr);
+    QVERIFY(current->isChecked());
+    QVERIFY(m_window->styleSheet().contains(QStringLiteral("#20B2AA")));
+
+    monokai->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("ui/colorPalette")).toString(),
+             QStringLiteral("monokai"));
+    QVERIFY(monokai->isChecked());
+    QCOMPARE(QApplication::palette().color(QPalette::Window),
+             QColor(QStringLiteral("#272822")));
+    QVERIFY(m_window->styleSheet().contains(QStringLiteral("#272822")));
+
+    current->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("ui/colorPalette")).toString(),
+             QStringLiteral("current"));
+    QVERIFY(current->isChecked());
+    QVERIFY(m_window->styleSheet().contains(QStringLiteral("#20B2AA")));
 }
 
 void MainWindowUiTest::clusterAnnouncementsShowOnlyLiveSpots()

@@ -9,7 +9,8 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 - Oznaczanie QSO jako nieważnego i przywracanie go z menu kontekstowego. Rekord pozostaje w historii i synchronizacji; nieważne QSO nie wpływa na punktację, mnożniki ani eksport.
 - Podpowiedzi callsign z listy Super Check Partial, call history i zalogowanych QSO. Wyboru można dokonać klawiaturą; wpisywanie nie podmienia automatycznie tekstu pola.
 - Podsumowanie tempa w paśmie i emisji oraz wykres liczby QSO w przedziałach pięciominutowych za ostatnią godzinę.
-- Bandmapa udostępnia filtry pasma/emisji/kontynentu, ukrywanie zaliczonych stacji, nawigację skrótami klawiaturowymi i przejście do następnego niezaliczonego mnożnika, jeśli da się go rozpoznać z danych spotu.
+- Bandmapa udostępnia filtry pasma/emisji/kontynentu i nowych mnożników, ukrywanie zaliczonych stacji, nawigację skrótami klawiaturowymi, źródło spotu oraz przejście do następnego niezaliczonego mnożnika.
+- Okno Check callsign pokazuje macierz pasmo × emisja dla wpisanego znaku; `+M` oznacza rozpoznany nowy mnożnik, `M` już zaliczony. Wartości zależne od nieznanej wymiany lub brakujących danych pomocniczych pozostają nierozpoznane.
 - Automatyczne kopie bazy z konfigurowalnym odstępem i retencją oraz jawny rollback wersji definicji YAML i pobranych danych pomocniczych.
 - Ustawienie **Operating → Allow logging duplicate QSOs** jest domyślnie wyłączone; po włączeniu pozwala zapisywać i edytować dupe bez naliczania punktów ani nowych mnożników.
 - Edycja czasu UTC, callsign, częstotliwości, pasma, trybu i wysłanej/odebranej wymiany; po edycji ponownie sprawdzane są reguły i przeliczane wartości.
@@ -22,6 +23,7 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 ## Radio i formularze
 
 - CAT przez Hamlib (radio szeregowe lub rigctld/TCP) oraz backend Mock do pracy i testów bez sprzętu.
+- Profile contestów mogą definiować emisję RTTY, ale aplikacja nie zawiera dekodera/modulatora RTTY ani integracji z MMTTY.
 - Walidacja konfiguracji Hamlib, jednorazowy test połączenia, zapis/połączenie/rozłączenie, automatyczne łączenie przy starcie oraz monitoring stanu CAT.
 - Synchronizacja częstotliwości z pasmem formularza; zmiana trybu z radia nie nadpisuje ręcznego wyboru bez zmiany trybu po stronie radia. Nieaktualny odczyt CAT jest sygnalizowany.
 - SO2V: dwa konteksty QSO dla VFO A/B, niezależne częstotliwości i wybór RX focus. Dostępność dual-RX jest sygnalizowana osobno od samego dual-VFO.
@@ -31,6 +33,7 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 ## CW i obsługa operatorska
 
 - Keyer Hamlib, cwdaemon/UDP i Mock; kolejka wiadomości, ustawianie WPM oraz przerwanie/anulowanie kolejki.
+- Integracja modemów RTTY, w tym MMTTY Engine, nie jest zaimplementowana. Ocena dostępnych interfejsów i proponowany prototyp są opisane w [instrukcji użytkownika](docs/USER_GUIDE.md).
 - Koniec nadawania potwierdzają cwdaemon, Mock i Hamlib przez nieblokujące odczyty PTT dla backendów z ogólnym `wait_morse`. Niestandardowe callbacki Hamlib korzystają z estymowanego czasu.
 - Run i Search & Pounce, zapamiętywanie trybu i przełączenie na S&P po zmianie częstotliwości w Run.
 - ESM w CW: osobne, edytowalne sekwencje wiadomości dla Enter w polu Call i poprawnego zapisu QSO; konfiguracja jest zapamiętywana per contest. Domyślne treści odpowiadają F5 i F3.
@@ -40,8 +43,8 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 
 ## DX Cluster i dane pomocnicze
 
-- Pojedyncze połączenie TCP/Telnet z obsługą spotów, ponownym łączeniem i parserem czasu uwzględniającym przejście przez północ.
-- Bandmapa z filtrem pasma, sortowaniem, ukrywaniem zrobionych łączności, wyborem spotu i strojeniem wybranego radia.
+- Wiele równoległych połączeń TCP/Telnet do clusterów i zgodnych lokalnych skimmerów, z ponownym łączeniem i parserem czasu uwzględniającym przejście przez północ. Konfiguracje są zapamiętywane, a źródło każdego spotu widoczne w bandmapie i ogłoszeniach.
+- Bandmapa z filtrem pasma, emisji, kontynentu i nowych mnożników, sortowaniem, ukrywaniem zrobionych łączności, wyborem spotu i strojeniem wybranego radia. Powtórzenia znaku/pasma zwijane są w bandmapie do najnowszego spotu; panel ogłoszeń zachowuje wpisy z każdego źródła.
 - Spoty są przechowywane w SQLite i usuwane według retencji oraz limitu liczby rekordów.
 - Import call history CSV/TXT, `master.cpy` i `wl_cty.dat`; walidacja danych, zapamiętanie ścieżek, sprawdzanie częściowych znaków, podpowiedzi wymiany i lookup CTY.
 
@@ -52,6 +55,8 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 - Lokalny audyt utworzenia, edycji, unieważnienia i usunięcia QSO. **Operating → Undo last QSO change** przywraca poprzedni stan jako nową wersję i wpis outboxa; ograniczenia opisuje [instrukcja użytkownika](docs/USER_GUIDE.md).
 - Układ operatorski z formularzami QSO, tabelą logu i panelami bandmapy, CW oraz informacji contestu; panele można zarządzać z menu, a ich układ jest zapamiętywany.
 - Dwa panele wejściowe dla SO2V/SO2R, obsługa klawiatury i wskaźniki dupe/mult.
+- Wybór języka English/Polski zapamiętywany w ustawieniach; napisy objęte katalogiem są aktualizowane od razu, bez restartu i odtwarzania okna. Nieprzetłumaczone teksty pozostają po angielsku.
+- Wybór palety kolorów między obecnym wyglądem a Monokai; zmiana jest zapamiętywana i stosowana natychmiast.
 
 ## Synchronizacja sieciowa i status stacji
 

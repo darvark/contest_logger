@@ -121,6 +121,7 @@ private slots:
     void restoresCentralBackupWithRevisionAndIdempotency();
     void recordsResumableLogImportAudit();
     void commitsIdempotentRevisionsAtomically();
+    void synchronizesWaeQtcWithItsPartnerQso();
     void persistsClientAndTransactionDiagnostics();
     void compactsAcknowledgedEventsAndKeepsSnapshotsAvailable();
     void exportsPagedSnapshotAtPinnedRevision();
@@ -182,7 +183,8 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
         QSqlQuery query(database);
         QVERIFY(query.exec(QStringLiteral(
             "DELETE FROM schema_migrations WHERE version IN "
-            "(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)")));
+            "(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)")));
+        QVERIFY(query.exec(QStringLiteral("ALTER TABLE qsos DROP COLUMN qtc_json")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE qso_change_audit")));
         QVERIFY(query.exec(QStringLiteral(
             "DROP TABLE sync_transaction_metrics")));
@@ -461,6 +463,54 @@ void CentralRepositoryTest::commitsIdempotentRevisionsAtomically()
              qint64(3));
     QCOMPARE(events.last().toObject().value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("is_deleted")).toBool(), true);
+}
+
+void CentralRepositoryTest::synchronizesWaeQtcWithItsPartnerQso()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    logger::CentralRepository central;
+    QString error;
+    QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+    const auto logs = central.repository()->contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const logger::Contest log = logs.first();
+    const QString stationUuid = central.repository()->localStationUuid(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QString qsoUuid = newUuid();
+    QJsonObject operation = sampleOperation(
+        log.logUuid, stationUuid, newUuid(), qsoUuid,
+        QStringLiteral("qso.create"), 0, QStringLiteral("DL1ABC"));
+    QJsonObject qso = operation.value(QStringLiteral("qso")).toObject();
+    qso.insert(QStringLiteral("qtc_transfers"), QJsonArray{QJsonObject{
+        {QStringLiteral("qtc_uuid"), newUuid()},
+        {QStringLiteral("partner_qso_uuid"), qsoUuid},
+        {QStringLiteral("partner_callsign"), QStringLiteral("DL1ABC")},
+        {QStringLiteral("direction"), QStringLiteral("received")},
+        {QStringLiteral("group_number"), 1},
+        {QStringLiteral("messages"), QJsonArray{QJsonObject{
+            {QStringLiteral("timestamp_utc"),
+             QStringLiteral("2026-10-15T09:40:00.000Z")},
+            {QStringLiteral("callsign"), QStringLiteral("DL2XYZ")},
+            {QStringLiteral("serial_number"), 18}
+        }}}
+    }});
+    operation.insert(QStringLiteral("qso"), qso);
+    QJsonArray results;
+    QVERIFY2(central.submitBatch(log.logUuid, {operation}, &results, &error),
+             qPrintable(error));
+
+    const QJsonArray events = central.eventsSince(log.logUuid, 0, 10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(events.size(), 1);
+    QCOMPARE(events.first().toObject().value(QStringLiteral("payload")).toObject()
+                 .value(QStringLiteral("qtc_transfers")).toArray().size(), 1);
+    const QJsonObject snapshot = central.snapshotPage(log.logUuid, 1, 0, 10, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const QJsonArray snapshotQsos = snapshot.value(QStringLiteral("qsos")).toArray();
+    QCOMPARE(snapshotQsos.size(), 1);
+    QCOMPARE(snapshotQsos.first().toObject()
+                 .value(QStringLiteral("qtc_transfers")).toArray().size(), 1);
 }
 
 void CentralRepositoryTest::persistsClientAndTransactionDiagnostics()

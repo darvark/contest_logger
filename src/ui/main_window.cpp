@@ -7,6 +7,7 @@
 #include "logger/radio/band_plan.h"
 #include "logger/ui/new_log_dialog.h"
 #include "logger/ui/operator_dialog.h"
+#include "logger/ui/qtc_dialog.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -19,6 +20,7 @@
 #include <QFrame>
 #include <QInputDialog>
 #include <QListWidget>
+#include <QLocale>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QStyle>
@@ -40,6 +42,7 @@
 #include <QFont>
 #include <QGroupBox>
 #include <QHostInfo>
+#include <QHostAddress>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -55,6 +58,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPainter>
+#include <QPalette>
 #include <QPlainTextEdit>
 #include <QProgressDialog>
 #include <QPolygonF>
@@ -71,6 +75,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
+#include <QTranslator>
 #include <QTabWidget>
 #include <QTimeZone>
 #include <QToolBar>
@@ -1142,8 +1147,134 @@ QString functionKeyText(int key)
         .toString();
 }
 
-QString dxlogStyleSheet()
+QPalette paletteForColorScheme(const QString &scheme)
 {
+    QPalette palette = QApplication::style()->standardPalette();
+    if (scheme != QLatin1String("monokai")) {
+        return palette;
+    }
+
+    palette.setColor(QPalette::Window, QColor(QStringLiteral("#272822")));
+    palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#F8F8F2")));
+    palette.setColor(QPalette::Base, QColor(QStringLiteral("#1E1F1C")));
+    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#35362F")));
+    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#3E3D32")));
+    palette.setColor(QPalette::ToolTipText, QColor(QStringLiteral("#F8F8F2")));
+    palette.setColor(QPalette::Text, QColor(QStringLiteral("#F8F8F2")));
+    palette.setColor(QPalette::Button, QColor(QStringLiteral("#3E3D32")));
+    palette.setColor(QPalette::ButtonText, QColor(QStringLiteral("#F8F8F2")));
+    palette.setColor(QPalette::BrightText, QColor(QStringLiteral("#F92672")));
+    palette.setColor(QPalette::Link, QColor(QStringLiteral("#66D9EF")));
+    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#49483E")));
+    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#F8F8F2")));
+    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#75715E")));
+    palette.setColor(QPalette::Disabled, QPalette::Text,
+                     QColor(QStringLiteral("#75715E")));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText,
+                     QColor(QStringLiteral("#75715E")));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText,
+                     QColor(QStringLiteral("#75715E")));
+    return palette;
+}
+
+QString dxlogStyleSheet(bool monokai = false)
+{
+    if (monokai) {
+        return QStringLiteral(R"(
+QMainWindow { background: #272822; color: #F8F8F2; }
+QMainWindow::separator { background: #49483E; width: 4px; height: 4px; }
+QMenuBar { background: #1E1F1C; color: #F8F8F2; }
+QMenuBar::item { background: transparent; color: #F8F8F2; padding: 4px 8px; }
+QMenuBar::item:selected { background: #49483E; color: #F8F8F2; }
+QMenu { background: #272822; color: #F8F8F2; border: 1px solid #49483E; }
+QMenu::item { background: transparent; color: #F8F8F2; padding: 4px 24px 4px 8px; }
+QMenu::item:selected { background: #49483E; color: #F8F8F2; }
+QMenu::item:disabled { color: #75715E; }
+QMenu::separator { height: 1px; background: #49483E; margin: 4px 8px; }
+QToolBar { background: #1E1F1C; color: #F8F8F2; border: none; spacing: 4px; padding: 2px; }
+QToolBar QCheckBox, QToolBar QLabel { color: #F8F8F2; }
+QComboBox, QLineEdit, QSpinBox, QDateEdit, QPlainTextEdit {
+    color: #F8F8F2; background: #1E1F1C; border: 1px solid #49483E;
+}
+QComboBox QAbstractItemView {
+    color: #F8F8F2; background: #272822;
+    selection-background-color: #49483E; selection-color: #F8F8F2;
+}
+QComboBox QAbstractItemView::item:disabled { color: #75715E; }
+QStatusBar { background: #1E1F1C; color: #F8F8F2; }
+QStatusBar QLabel { color: #F8F8F2; padding: 0 8px; border-left: 1px solid #49483E; }
+QDockWidget { color: #F8F8F2; font-weight: bold; }
+QDockWidget::title { background: #49483E; padding: 2px 4px; text-align: left; }
+QDockWidget::close-button, QDockWidget::float-button {
+    background: #3E3D32; border: 1px solid #75715E; padding: 0px;
+}
+QFrame[pane="true"] { background: #272822; color: #F8F8F2; }
+QFrame[pane="true"] QLabel { color: #F8F8F2; }
+QFrame[pane="true"] QTableWidget, QFrame[pane="true"] QListWidget {
+    background: #272822; color: #F8F8F2; border: none;
+    selection-background-color: #49483E; selection-color: #F8F8F2;
+}
+QFrame[pane="true"] QHeaderView::section {
+    background: #35362F; color: #E6DB74; border: none;
+    border-bottom: 1px solid #49483E; padding: 1px 4px; font-weight: bold;
+}
+QFrame[pane="true"] QTableCornerButton::section { background: #35362F; border: none; }
+QFrame#bandmapPane, QFrame#bandmapPane QTableWidget,
+QFrame#radioABandmapPane, QFrame#radioABandmapPane QTableWidget {
+    background: #1E1F1C; color: #F8F8F2;
+}
+QFrame#bandmapPane QHeaderView, QFrame#radioABandmapPane QHeaderView {
+    background: #35362F; border: none;
+}
+QFrame#bandmapPane QHeaderView::section,
+QFrame#radioABandmapPane QHeaderView::section { background: #35362F; color: #E6DB74; }
+QFrame#clusterPane, QFrame#clusterPane QTableWidget { background: #1E1F1C; color: #F8F8F2; }
+QFrame#clusterPane QHeaderView::section {
+    background: #272822; color: #E6DB74; border-bottom: 1px solid #49483E;
+}
+QFrame#checkPartialPane, QFrame#checkPartialPane QListWidget {
+    background: #272822; color: #F8F8F2;
+}
+QFrame#ratePane { background: #35362F; }
+QFrame#ratePane QLabel { color: #F8F8F2; }
+QFrame#contestInfoPane, QFrame#contestInfoPane QScrollArea,
+QFrame#contestInfoPane QLabel { background: #272822; color: #F8F8F2; }
+QLabel#finalScore { color: #66D9EF; background: #35362F; padding: 3px; }
+QLabel#checkCallTitle { background: #35362F; color: #F8F8F2; padding: 2px 4px; }
+QFrame#logWindow { background: #272822; }
+QLabel#topStatus { background: #49483E; color: #E6DB74; padding: 2px 6px; }
+QTableWidget#recentQsos {
+    background: #272822; color: #F8F8F2; border: 1px solid #49483E;
+    selection-background-color: #49483E; selection-color: #F8F8F2;
+}
+QTableWidget#recentQsos QHeaderView::section {
+    background: #35362F; color: #E6DB74; border: none;
+    border-bottom: 1px solid #49483E; padding: 1px 4px; font-weight: bold;
+}
+QFrame#entryPanel { background: #35362F; border: 2px solid #49483E; }
+QFrame#entryPanel[active="true"] { border: 2px solid #A6E22E; }
+QLabel#entryHeader { background: #49483E; color: #F8F8F2; padding: 2px 6px; }
+QFrame#entryPanel[active="true"] QLabel#entryHeader { background: #49483E; }
+QLabel#fieldCaption { color: #66D9EF; font-size: 8pt; font-weight: bold; }
+QFrame#entryPanel QLineEdit, QFrame#entryPanel QComboBox {
+    background: #1E1F1C; color: #F8F8F2; border: 1px solid #49483E; padding: 1px 3px;
+}
+QFrame#entryPanel QLineEdit:focus { background: #35362F; border: 2px solid #A6E22E; }
+QFrame#entryPanel QLineEdit[sentField="true"] { background: #272822; color: #66D9EF; }
+QLabel#dupeBadge[state="dupe"] { background: #F92672; color: #F8F8F2; }
+QLabel#dupeBadge[state="mult"] { background: #A6E22E; color: #272822; }
+QLabel#dupeBadge[state="ok"] { background: transparent; color: #A6E22E; }
+QLabel#callInfoA, QLabel#callInfoB { color: #66D9EF; }
+QLabel#messageLine { color: #F92672; background: transparent; }
+QLabel#messageLine[alert="true"] { background: #A6E22E; color: #272822; }
+QFrame#fkeyBar QPushButton {
+    background: #3E3D32; border: 1px solid #75715E; padding: 3px 4px; color: #F8F8F2;
+}
+QFrame#fkeyBar QPushButton:hover { background: #49483E; }
+QFrame#fkeyBar QPushButton:pressed { background: #A6E22E; color: #272822; }
+)");
+    }
+
     return QStringLiteral(R"(
 QMainWindow { background: #20B2AA; }
 QMainWindow::separator { background: #178F89; width: 4px; height: 4px; }
@@ -1302,7 +1433,7 @@ void appendClusterRow(QTableWidget *table, const Spot &spot)
     const QStringList values{
         spot.timestampUtc.toUTC().toString(QStringLiteral("HHmm")),
         QString::number(static_cast<double>(spot.frequencyHz) / 1000.0, 'f', 1),
-        spot.callsign, spot.spotter, spot.comment};
+        spot.callsign, spot.spotter, spot.source, spot.comment};
     for (int column = 0; column < values.size(); ++column) {
         auto *item = new QTableWidgetItem(values.at(column));
         item->setForeground(column == 2 ? QColor(QStringLiteral("#FFFF00"))
@@ -1423,6 +1554,17 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     : QMainWindow(parent)
     , m_repository(repository)
 {
+    QSettings n1mmSettings;
+    N1mmUdpConfiguration n1mmConfiguration;
+    n1mmConfiguration.enabled = n1mmSettings.value(
+        QStringLiteral("n1mmUdp/enabled"), false).toBool();
+    n1mmConfiguration.address.setAddress(n1mmSettings.value(
+        QStringLiteral("n1mmUdp/address"), QStringLiteral("127.0.0.1")).toString());
+    n1mmConfiguration.port = static_cast<quint16>(n1mmSettings.value(
+        QStringLiteral("n1mmUdp/port"), 12060).toUInt());
+    QString n1mmConfigurationError;
+    m_n1mmBroadcaster.setConfiguration(n1mmConfiguration,
+                                       &n1mmConfigurationError);
     m_networkLastContactUtc = QDateTime::fromString(
         QSettings().value(QStringLiteral("network/client/lastContactUtc"))
             .toString(), Qt::ISODateWithMs).toUTC();
@@ -1433,7 +1575,15 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                    | QMainWindow::AllowTabbedDocks);
     setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
     setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
-    setStyleSheet(dxlogStyleSheet());
+    QString colorScheme = QSettings().value(
+        QStringLiteral("ui/colorPalette"), QStringLiteral("current")).toString();
+    if (colorScheme != QLatin1String("current")
+        && colorScheme != QLatin1String("monokai")) {
+        qWarning().noquote() << "Unsupported saved color palette; using current palette.";
+        colorScheme = QStringLiteral("current");
+    }
+    QApplication::setPalette(paletteForColorScheme(colorScheme));
+    setStyleSheet(dxlogStyleSheet(colorScheme == QLatin1String("monokai")));
 
     auto *fileMenu = menuBar()->addMenu(tr("&File"));
     auto *newLogAction = fileMenu->addAction(tr("&New log..."));
@@ -1455,6 +1605,9 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         QStringLiteral("restoreContestDefinitionVersionAction"));
     connect(restoreDefinitionAction, &QAction::triggered,
             this, &MainWindow::restoreContestDefinitionVersion);
+    auto *qtcAction = contestMenu->addAction(tr("Manage WAE QTC..."));
+    qtcAction->setObjectName(QStringLiteral("manageQtcAction"));
+    connect(qtcAction, &QAction::triggered, this, &MainWindow::manageQtc);
     auto *operatingMenu = menuBar()->addMenu(tr("O&perating"));
     auto *runModeMenu = operatingMenu->addMenu(tr("Operating mode"));
     auto *runModeGroup = new QActionGroup(runModeMenu);
@@ -1531,7 +1684,118 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     networkStatusAction->setObjectName(QStringLiteral("networkStatusAction"));
     connect(networkStatusAction, &QAction::triggered,
             this, &MainWindow::showNetworkStatus);
+    auto *n1mmSettingsAction =
+        settingsMenu->addAction(tr("N1MM UDP broadcast settings..."));
+    n1mmSettingsAction->setObjectName(QStringLiteral("configureN1mmUdpAction"));
+    connect(n1mmSettingsAction, &QAction::triggered,
+            this, &MainWindow::configureN1mmBroadcast);
     settingsMenu->addSeparator();
+    QMenu *languageMenu = settingsMenu->addMenu(tr("Language"));
+    languageMenu->setObjectName(QStringLiteral("languageMenu"));
+    auto *languageGroup = new QActionGroup(languageMenu);
+    languageGroup->setExclusive(true);
+    auto *englishAction = languageMenu->addAction(tr("English"));
+    englishAction->setObjectName(QStringLiteral("languageEnglishAction"));
+    englishAction->setCheckable(true);
+    languageGroup->addAction(englishAction);
+    auto *polishAction = languageMenu->addAction(tr("Polski"));
+    polishAction->setObjectName(QStringLiteral("languagePolishAction"));
+    polishAction->setCheckable(true);
+    languageGroup->addAction(polishAction);
+    const QString savedLanguage = QSettings().value(
+        QStringLiteral("ui/language"), QStringLiteral("en")).toString();
+    (savedLanguage == QLatin1String("pl") ? polishAction : englishAction)
+        ->setChecked(true);
+    const auto saveLanguage = [this, englishAction, polishAction](
+                                  const QString &language) {
+        auto *translator = qApp->findChild<QTranslator *>(QStringLiteral("uiTranslator"));
+        if (translator == nullptr) {
+            translator = new QTranslator(qApp);
+            translator->setObjectName(QStringLiteral("uiTranslator"));
+        }
+        if (language == QLatin1String("pl") && translator->isEmpty()
+            && !translator->load(QStringLiteral(":/i18n/contest_logger_pl.qm"))) {
+            QMessageBox::critical(this, tr("Language settings error"),
+                                 tr("The Polish translation catalog could not be loaded."));
+            englishAction->setChecked(true);
+            return;
+        }
+        QSettings settings;
+        const QString previousLanguage = settings.value(
+            QStringLiteral("ui/language"), QStringLiteral("en")).toString();
+        settings.setValue(QStringLiteral("ui/language"), language);
+        settings.sync();
+        if (settings.status() != QSettings::NoError) {
+            QMessageBox::critical(
+                this, tr("Language settings error"),
+                tr("The language preference could not be saved."));
+            (previousLanguage == QLatin1String("pl") ? polishAction : englishAction)
+                ->setChecked(true);
+            return;
+        }
+        if (language == QLatin1String("pl")) {
+            if (!QCoreApplication::installTranslator(translator)) {
+                QMessageBox::critical(this, tr("Language settings error"),
+                                     tr("The Polish translation catalog could not be loaded."));
+                settings.setValue(QStringLiteral("ui/language"), previousLanguage);
+                settings.sync();
+                englishAction->setChecked(true);
+                return;
+            }
+            QLocale::setDefault(QLocale(QLocale::Polish, QLocale::Poland));
+        } else {
+            QCoreApplication::removeTranslator(translator);
+            QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
+        }
+        m_retranslateUi();
+        statusBar()->showMessage(
+            tr("Language changed."), 7000);
+    };
+    connect(englishAction, &QAction::triggered, this,
+            [saveLanguage] { saveLanguage(QStringLiteral("en")); });
+    connect(polishAction, &QAction::triggered, this,
+            [saveLanguage] { saveLanguage(QStringLiteral("pl")); });
+    QMenu *colorPaletteMenu = settingsMenu->addMenu(tr("Color palette"));
+    colorPaletteMenu->setObjectName(QStringLiteral("colorPaletteMenu"));
+    auto *colorPaletteGroup = new QActionGroup(colorPaletteMenu);
+    colorPaletteGroup->setExclusive(true);
+    auto *currentPaletteAction = colorPaletteMenu->addAction(tr("Current"));
+    currentPaletteAction->setObjectName(QStringLiteral("colorPaletteCurrentAction"));
+    currentPaletteAction->setCheckable(true);
+    colorPaletteGroup->addAction(currentPaletteAction);
+    auto *monokaiPaletteAction = colorPaletteMenu->addAction(tr("Monokai"));
+    monokaiPaletteAction->setObjectName(QStringLiteral("colorPaletteMonokaiAction"));
+    monokaiPaletteAction->setCheckable(true);
+    colorPaletteGroup->addAction(monokaiPaletteAction);
+    const QString savedColorScheme = QSettings().value(
+        QStringLiteral("ui/colorPalette"), QStringLiteral("current")).toString();
+    (savedColorScheme == QLatin1String("monokai")
+         ? monokaiPaletteAction : currentPaletteAction)
+        ->setChecked(true);
+    const auto saveColorScheme = [this, currentPaletteAction,
+                                  monokaiPaletteAction](const QString &scheme) {
+        QSettings settings;
+        const QString previousScheme = settings.value(
+            QStringLiteral("ui/colorPalette"), QStringLiteral("current")).toString();
+        settings.setValue(QStringLiteral("ui/colorPalette"), scheme);
+        settings.sync();
+        if (settings.status() != QSettings::NoError) {
+            QMessageBox::critical(
+                this, tr("Color palette settings error"),
+                tr("The color palette preference could not be saved."));
+            (previousScheme == QLatin1String("monokai")
+                 ? monokaiPaletteAction : currentPaletteAction)
+                ->setChecked(true);
+            return;
+        }
+        QApplication::setPalette(paletteForColorScheme(scheme));
+        setStyleSheet(dxlogStyleSheet(scheme == QLatin1String("monokai")));
+        statusBar()->showMessage(tr("Color palette changed."), 5000);
+    };
+    connect(currentPaletteAction, &QAction::triggered, this,
+            [saveColorScheme] { saveColorScheme(QStringLiteral("current")); });
+    connect(monokaiPaletteAction, &QAction::triggered, this,
+            [saveColorScheme] { saveColorScheme(QStringLiteral("monokai")); });
     auto *operatorAction = settingsMenu->addAction(tr("&Operator and station..."));
     connect(operatorAction, &QAction::triggered,
             this, &MainWindow::configureOperator);
@@ -1573,6 +1837,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
 
     radioMenu->addSeparator();
     auto *clusterAction = radioMenu->addAction(tr("&DX cluster..."));
+    clusterAction->setObjectName(QStringLiteral("configureDxClusterAction"));
     connect(clusterAction, &QAction::triggered,
             this, &MainWindow::configureDxCluster);
     auto *disconnectClusterAction =
@@ -1777,6 +2042,11 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *exportAdifAction = fileMenu->addAction(tr("Export ADIF..."));
     connect(exportAdifAction, &QAction::triggered,
             this, &MainWindow::exportAdif);
+    auto *broadcastLogAction =
+        fileMenu->addAction(tr("Broadcast full log to N1MM UDP..."));
+    broadcastLogAction->setObjectName(QStringLiteral("broadcastFullLogN1mmAction"));
+    connect(broadcastLogAction, &QAction::triggered,
+            this, &MainWindow::broadcastFullLogToN1mm);
     fileMenu->addSeparator();
     auto *backupAction = fileMenu->addAction(tr("Back up database..."));
     connect(backupAction, &QAction::triggered,
@@ -2432,6 +2702,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_checkCallGrid->setSelectionMode(QAbstractItemView::NoSelection);
     m_checkCallGrid->setFocusPolicy(Qt::NoFocus);
     m_checkCallGrid->setShowGrid(false);
+    m_checkCallGrid->setToolTip(
+        tr("A time means the callsign was worked; +M means this station would add a new multiplier."));
     m_checkCallTitle = new QLabel(checkCallPane);
     m_checkCallTitle->setObjectName(QStringLiteral("checkCallTitle"));
     m_checkCallTitle->setFont(monoFont(10, true));
@@ -2495,6 +2767,12 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         m_bandmapContinentFilter->addItem(continent, continent);
     }
     m_bandmapContinentFilter->addItem(tr("Unknown"), QStringLiteral("@unknown"));
+    m_onlyNewMultiplierSpots =
+        new QCheckBox(tr("New mult only"), bandmapPane);
+    m_onlyNewMultiplierSpots->setObjectName(
+        QStringLiteral("bandmapNewMultiplierFilter"));
+    m_onlyNewMultiplierSpots->setToolTip(
+        tr("Show only spots that can add a multiplier under the active contest rules."));
     auto *bandmapSortSelector = new QComboBox(bandmapPane);
     bandmapSortSelector->setObjectName(QStringLiteral("bandmapSortSelector"));
     bandmapSortSelector->addItem(tr("Frequency"), QStringLiteral("frequency"));
@@ -2512,10 +2790,17 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     bandmapControls->addWidget(m_hideWorkedSpots);
     bandmapControls->addWidget(tuneSelectedSpot);
     static_cast<QVBoxLayout *>(bandmapPane->layout())->addLayout(bandmapControls);
-    m_bandmap = new QTableWidget(0, 5, bandmapPane);
+    auto *multiplierFilterLayout = new QHBoxLayout;
+    multiplierFilterLayout->setContentsMargins(2, 0, 2, 0);
+    multiplierFilterLayout->addWidget(m_onlyNewMultiplierSpots);
+    multiplierFilterLayout->addStretch();
+    static_cast<QVBoxLayout *>(bandmapPane->layout())->addLayout(
+        multiplierFilterLayout);
+    m_bandmap = new QTableWidget(0, 6, bandmapPane);
     m_bandmap->setObjectName(QStringLiteral("dxBandmap"));
     m_bandmap->setHorizontalHeaderLabels(
-        {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Comment")});
+        {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Source"),
+         tr("Comment")});
     m_bandmap->setFont(monoFont(10, true));
     m_bandmap->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_bandmap->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2547,15 +2832,18 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::refreshBandmap);
     connect(m_hideWorkedSpots, &QCheckBox::toggled,
             this, &MainWindow::refreshBandmap);
+    connect(m_onlyNewMultiplierSpots, &QCheckBox::toggled,
+            this, &MainWindow::refreshBandmap);
     bandmapPane->layout()->addWidget(m_bandmap);
     m_bandmapDock = createPaneDock(tr("Bandmap"), QStringLiteral("dxBandmapDock"),
                                    bandmapPane);
 
     auto *radioABandmapPane = createPane(QStringLiteral("radioABandmapPane"));
-    m_radioABandmap = new QTableWidget(0, 5, radioABandmapPane);
+    m_radioABandmap = new QTableWidget(0, 6, radioABandmapPane);
     m_radioABandmap->setObjectName(QStringLiteral("dxBandmapRadioA"));
     m_radioABandmap->setHorizontalHeaderLabels(
-        {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Comment")});
+        {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Source"),
+         tr("Comment")});
     m_radioABandmap->setFont(monoFont(10, true));
     m_radioABandmap->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_radioABandmap->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2607,10 +2895,11 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::sendDxClusterCommand);
     connect(m_clusterCommandInput, &QLineEdit::returnPressed,
             this, &MainWindow::sendDxClusterCommand);
-    m_clusterLog = new QTableWidget(0, 5, clusterPane);
+    m_clusterLog = new QTableWidget(0, 6, clusterPane);
     m_clusterLog->setObjectName(QStringLiteral("clusterLog"));
     m_clusterLog->setHorizontalHeaderLabels(
-        {tr("UTC"), tr("kHz"), tr("Call"), tr("Spotter"), tr("Comment")});
+        {tr("UTC"), tr("kHz"), tr("Call"), tr("Spotter"), tr("Source"),
+         tr("Comment")});
     m_clusterLog->setFont(monoFont(9, false));
     m_clusterLog->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_clusterLog->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2808,6 +3097,106 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         autoStartHostServer();
         autoStartNetworkClient();
     });
+    m_retranslateUi = [this, fileMenu, newLogAction, contestMenu, operatingMenu,
+                       radioMenu, settingsMenu, languageMenu, englishAction,
+                       polishAction, colorPaletteMenu, currentPaletteAction,
+                       monokaiPaletteAction, operatorAction, radioAction,
+                       radioBAction, clusterAction, undoQsoAction,
+                       allowDupeLoggingAction, configureEsmAction,
+                       exportCabrilloAction, exportAdifAction, tuneSelectedSpot,
+                       bandmapSortSelector, sendClusterCommand] {
+        fileMenu->setTitle(tr("&File"));
+        newLogAction->setText(tr("&New log..."));
+        contestMenu->setTitle(tr("&Contest"));
+        operatingMenu->setTitle(tr("O&perating"));
+        radioMenu->setTitle(tr("&Radio"));
+        settingsMenu->setTitle(tr("&Options"));
+        languageMenu->setTitle(tr("Language"));
+        englishAction->setText(tr("English"));
+        polishAction->setText(tr("Polski"));
+        colorPaletteMenu->setTitle(tr("Color palette"));
+        currentPaletteAction->setText(tr("Current"));
+        monokaiPaletteAction->setText(tr("Monokai"));
+        operatorAction->setText(tr("&Operator and station..."));
+        radioAction->setText(tr("Radio A CAT settings..."));
+        radioBAction->setText(tr("Radio B CAT settings..."));
+        clusterAction->setText(tr("&DX cluster..."));
+        undoQsoAction->setText(tr("Undo last QSO change"));
+        allowDupeLoggingAction->setText(tr("Allow logging duplicate QSOs"));
+        configureEsmAction->setText(tr("Configure ESM messages..."));
+        m_esmAction->setText(tr("Enter Sends Message (ESM)"));
+        m_autoCqAction->setText(tr("Auto CQ (F1 repeat)"));
+        exportCabrilloAction->setText(tr("Export Cabrillo..."));
+        exportAdifAction->setText(tr("Export ADIF..."));
+        findChild<QMenu *>(QStringLiteral("windowMenu"))->setTitle(tr("&Window"));
+        findChild<QAction *>(QStringLiteral("resetLayoutAction"))->setText(
+            tr("Restore default layout"));
+        m_checkCallDock->setWindowTitle(tr("Check callsign"));
+        m_checkPartialDock->setWindowTitle(tr("Check partial"));
+        m_summaryDock->setWindowTitle(tr("Summary"));
+        m_contestInfoDock->setWindowTitle(tr("Contest information"));
+        m_onlyNewMultiplierSpots->setText(tr("New mult only"));
+        m_onlyNewMultiplierSpots->setToolTip(
+            tr("Show only spots that can add a multiplier under the active contest rules."));
+        m_hideWorkedSpots->setText(tr("Hide worked"));
+        tuneSelectedSpot->setText(tr("Tune"));
+        sendClusterCommand->setText(tr("Send"));
+        m_clusterCommandInput->setPlaceholderText(
+            tr("Cluster command (e.g. DX W1AW 14025.0 comment)"));
+        m_clusterConnectionSelector->setItemText(0, tr("No connection"));
+        m_bandmapBandFilter->setItemText(0, tr("Active band"));
+        m_bandmapBandFilter->setItemText(1, tr("All bands"));
+        m_bandmapModeFilter->setItemText(0, tr("All modes"));
+        m_bandmapContinentFilter->setItemText(0, tr("All continents"));
+        m_bandmapContinentFilter->setItemText(
+            m_bandmapContinentFilter->findData(QStringLiteral("@unknown")), tr("Unknown"));
+        bandmapSortSelector->setItemText(0, tr("Frequency"));
+        bandmapSortSelector->setItemText(1, tr("Newest first"));
+        for (QTableWidget *table : {m_bandmap, m_radioABandmap}) {
+            table->setHorizontalHeaderLabels(
+                {tr("kHz"), tr("Call"), tr("Age"), tr("Spotter"), tr("Source"),
+                 tr("Comment")});
+        }
+        m_clusterLog->setHorizontalHeaderLabels(
+            {tr("UTC"), tr("kHz"), tr("Call"), tr("Spotter"), tr("Source"), tr("Comment")});
+        m_checkCallGrid->setToolTip(
+            tr("A time means the callsign was worked; +M means this station would add a new multiplier."));
+        updateEntryHeaders();
+        refreshCheckWindows();
+        refreshDxClusterStatus();
+        refreshBandmap();
+        updateTopStatus();
+    };
+    const QVariantList savedClusters = QSettings().value(
+        QStringLiteral("dxCluster/connections")).toList();
+    if (!savedClusters.isEmpty()) {
+        QTimer::singleShot(0, this, [this, savedClusters] {
+            for (const QVariant &saved : savedClusters) {
+                const QVariantMap values = saved.toMap();
+                const DxClusterConfig config{
+                    values.value(QStringLiteral("host")).toString(),
+                    values.value(QStringLiteral("port"), 7300).toInt(),
+                    values.value(QStringLiteral("callsign")).toString()
+                };
+                if (config.host.trimmed().isEmpty()
+                    || config.callsign.trimmed().isEmpty()
+                    || config.port < 1 || config.port > 65535) {
+                    qWarning().noquote()
+                        << "Ignoring invalid saved DX cluster connection.";
+                    continue;
+                }
+                connectDxCluster(config, false);
+            }
+        });
+    }
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::LanguageChange && m_retranslateUi) {
+        m_retranslateUi();
+    }
 }
 
 void MainWindow::recordNetworkContact()
@@ -3131,6 +3520,7 @@ void MainWindow::applyDefaultDockLayout()
 void MainWindow::createWindowMenu()
 {
     QMenu *windowMenu = menuBar()->addMenu(tr("&Window"));
+    windowMenu->setObjectName(QStringLiteral("windowMenu"));
     for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_bandmapDock,
                               m_clusterDock, m_rateDock, m_summaryDock,
                               m_contestInfoDock, m_greylineDock,
@@ -3139,6 +3529,7 @@ void MainWindow::createWindowMenu()
     }
     windowMenu->addSeparator();
     QAction *resetAction = windowMenu->addAction(tr("Restore default layout"));
+    resetAction->setObjectName(QStringLiteral("resetLayoutAction"));
     connect(resetAction, &QAction::triggered, this, &MainWindow::resetWindowLayout);
 }
 
@@ -3215,7 +3606,183 @@ void MainWindow::configureHostMode()
         statusBar()->showMessage(tr("Central server stopped on this station."), 5000);
         return;
     }
+    configureHostModeStart();
+}
 
+void MainWindow::configureN1mmBroadcast()
+{
+        QSettings settings;
+        const N1mmUdpConfiguration current = m_n1mmBroadcaster.configuration();
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("N1MM UDP broadcast"));
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *form = new QFormLayout;
+        auto *enabled = new QCheckBox(tr("Broadcast each newly logged QSO"), &dialog);
+        enabled->setObjectName(QStringLiteral("n1mmUdpEnabled"));
+        enabled->setChecked(current.enabled);
+        auto *address = new QLineEdit(
+            settings.value(QStringLiteral("n1mmUdp/address"),
+                           current.address.toString()).toString(), &dialog);
+        address->setObjectName(QStringLiteral("n1mmUdpAddress"));
+        address->setPlaceholderText(tr("IPv4 or IPv6 address"));
+        auto *port = new QSpinBox(&dialog);
+        port->setObjectName(QStringLiteral("n1mmUdpPort"));
+        port->setRange(1, 65535);
+        port->setValue(settings.value(QStringLiteral("n1mmUdp/port"), 12060).toInt());
+        form->addRow(QString(), enabled);
+        form->addRow(tr("Destination IP address:"), address);
+        form->addRow(tr("UDP port:"), port);
+        layout->addLayout(form);
+        auto *notice = new QLabel(
+            tr("UDP is fire-and-forget: the logger can detect local send errors, "
+               "but cannot determine whether a receiver is listening."), &dialog);
+        notice->setWordWrap(true);
+        layout->addWidget(notice);
+        auto *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        layout->addWidget(buttons);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+
+        N1mmUdpConfiguration configuration;
+        configuration.enabled = enabled->isChecked();
+        configuration.address.setAddress(address->text().trimmed());
+        configuration.port = static_cast<quint16>(port->value());
+        QString error;
+        if (!m_n1mmBroadcaster.setConfiguration(configuration, &error)) {
+            QMessageBox::warning(this, tr("Invalid N1MM UDP destination"), error);
+            return;
+        }
+        settings.setValue(QStringLiteral("n1mmUdp/enabled"), configuration.enabled);
+        settings.setValue(QStringLiteral("n1mmUdp/address"),
+                          configuration.address.toString());
+        settings.setValue(QStringLiteral("n1mmUdp/port"), configuration.port);
+        settings.sync();
+        if (settings.status() != QSettings::NoError) {
+            QMessageBox::critical(this, tr("Unable to save N1MM UDP settings"),
+                                  settings.fileName());
+            return;
+        }
+        statusBar()->showMessage(
+            configuration.enabled ? tr("N1MM UDP QSO broadcast enabled.")
+                                  : tr("N1MM UDP QSO broadcast disabled."),
+            5000);
+}
+
+void MainWindow::broadcastFullLogToN1mm()
+{
+        const Contest *contest = activeContest();
+        if (contest == nullptr) {
+            QMessageBox::warning(this, tr("No log selected"),
+                                 tr("Select a log before broadcasting it."));
+            return;
+        }
+        if (!m_n1mmBroadcaster.configuration().enabled) {
+            QMessageBox::warning(this, tr("N1MM UDP broadcast disabled"),
+                                 tr("Enable N1MM UDP broadcast in Options first."));
+            return;
+        }
+        QString error;
+        const QVector<Qso> qsos = m_repository.qsosForContest(contest->id, 0, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to load log"), error);
+            return;
+        }
+        const QString destination = QStringLiteral("%1:%2")
+            .arg(m_n1mmBroadcaster.configuration().address.toString())
+            .arg(m_n1mmBroadcaster.configuration().port);
+        if (QMessageBox::question(
+                this, tr("Broadcast full log"),
+                tr("Send all %1 logged QSOs in this log to %2? "
+                   "This is a separate, manual UDP operation.")
+                    .arg(qsos.size()).arg(destination))
+            != QMessageBox::Yes) {
+            return;
+        }
+        int sentCount = 0;
+        if (!m_n1mmBroadcaster.broadcastLog(
+                qsos, contest->name, m_station.operatorName, &sentCount, &error)) {
+            QMessageBox::warning(this, tr("N1MM UDP broadcast incomplete"),
+                                 tr("Sent %1 QSO datagrams before the local UDP error: %2")
+                                     .arg(sentCount).arg(error));
+            return;
+        }
+        statusBar()->showMessage(
+            tr("Sent %1 QSO datagrams to %2 (receiver delivery is not acknowledged).")
+                .arg(sentCount).arg(destination), 10000);
+}
+
+void MainWindow::manageQtc()
+{
+        const Contest *contest = activeContest();
+        const ContestDefinition *definition = activeDefinition();
+        const bool wae = definition != nullptr
+            && (definition->id.startsWith(QStringLiteral("wae-"))
+                || definition->cabrilloContest.startsWith(
+                    QStringLiteral("WAE-DC"), Qt::CaseInsensitive));
+        if (contest == nullptr || !wae) {
+            QMessageBox::information(
+                this, tr("WAE QTC"),
+                tr("Select a WAE CW, SSB, or RTTY log to manage QTC exchanges."));
+            return;
+        }
+        if (m_networkReadOnly) {
+            QMessageBox::warning(this, tr("Read-only log"),
+                                 tr("This station cannot modify the synchronized log."));
+            return;
+        }
+        QString error;
+        const QVector<Qso> qsos =
+            m_repository.qsosForContest(contest->id, 0, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to load QTC log"), error);
+            return;
+        }
+        if (qsos.isEmpty()) {
+            QMessageBox::information(this, tr("No partner QSO"),
+                                     tr("Log a QSO with the QTC partner first."));
+            return;
+        }
+        QtcDialog dialog(qsos, this);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const Qso *partner = dialog.partnerQso();
+        if (partner == nullptr) {
+            QMessageBox::critical(this, tr("QTC partner unavailable"),
+                                  tr("The selected partner QSO could not be loaded."));
+            return;
+        }
+        const qint64 partnerId = partner->id;
+        QtcTransfer transfer;
+        if (!dialog.transfer(&transfer, &error)) {
+            QMessageBox::warning(this, tr("Invalid QTC"), error);
+            return;
+        }
+        std::optional<Qso> updated = m_repository.qsoById(partnerId, &error);
+        if (!error.isEmpty() || !updated.has_value()) {
+            QMessageBox::critical(this, tr("Unable to load partner QSO"),
+                                  error.isEmpty() ? tr("The partner QSO no longer exists.")
+                                                  : error);
+            return;
+        }
+        updated->qtcTransfers.append(std::move(transfer));
+        if (!m_repository.updateQso(*updated, &error)) {
+            QMessageBox::critical(this, tr("Unable to save QTC"), error);
+            return;
+        }
+        refreshRecentQsos();
+        statusBar()->showMessage(
+            tr("WAE QTC saved with its partner QSO and queued for synchronization."),
+            7000);
+}
+
+void MainWindow::configureHostModeStart()
+{
+    QString error;
     QSettings settings;
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Host central server on this station"));
@@ -6309,7 +6876,44 @@ void MainWindow::configureDxCluster()
     const int spotLifetimeMinutes = dialog.spotLifetimeMinutes();
     settings.setValue(QStringLiteral("dxCluster/spotLifetimeMinutes"),
                       spotLifetimeMinutes);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(
+            this, tr("Unable to save DX cluster settings"),
+            tr("The cluster host, callsign, or spot retention could not be saved."));
+        return;
+    }
+    if (!connectDxCluster(config)) {
+        QMessageBox::warning(
+            this, tr("Unable to save DX cluster connections"),
+            tr("The connection was not started because its configuration could not be saved."));
+        return;
+    }
     refreshBandmap();
+}
+
+bool MainWindow::saveDxClusterConfigs()
+{
+    QVariantList saved;
+    for (const DxClusterConfig &config : std::as_const(m_dxClusterConfigs)) {
+        saved.append(QVariantMap{
+            {QStringLiteral("host"), config.host},
+            {QStringLiteral("port"), config.port},
+            {QStringLiteral("callsign"), config.callsign}
+        });
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("dxCluster/connections"), saved);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        qWarning().noquote() << "Could not save DX cluster connection settings.";
+        return false;
+    }
+    return true;
+}
+
+bool MainWindow::connectDxCluster(const DxClusterConfig &config, bool persist)
+{
     int connectionIndex = -1;
     for (int index = 0; index < m_dxClusterConfigs.size(); ++index) {
         const DxClusterConfig &existing = m_dxClusterConfigs.at(index);
@@ -6331,18 +6935,25 @@ void MainWindow::configureDxCluster()
         m_clusterConnectionSelector->addItem(
             QStringLiteral("%1:%2").arg(config.host).arg(config.port),
             connectionIndex);
-        m_clusterConnectionSelector->setCurrentIndex(
-            m_clusterConnectionSelector->count() - 1);
         connect(controller, &DxClusterController::statusChanged, this,
                 [this, controller](const DxClusterStatus &status) {
                     updateDxClusterStatus(controller, status);
                 });
-        connect(controller, &DxClusterController::spotReceived,
-                this, &MainWindow::receiveSpot);
+        const QString source = QStringLiteral("%1:%2").arg(config.host).arg(config.port);
+        connect(controller, &DxClusterController::spotReceived, this,
+                [this, source](const Spot &received) {
+                    Spot spot = received;
+                    spot.source = source;
+                    receiveSpot(spot);
+                });
+    }
+    if (persist && !saveDxClusterConfigs()) {
+        return false;
     }
     m_clusterConnectionSelector->setCurrentIndex(
         m_clusterConnectionSelector->findData(connectionIndex));
     controller->start(config);
+    return true;
 }
 
 void MainWindow::disconnectDxClusters()
@@ -9303,6 +9914,8 @@ void MainWindow::refreshCheckWindows()
         value = value.toUpper();
     }
     QHash<QString, QString> worked;
+    const ContestEngine multiplierEngine;
+    const auto multiplierResolver = this->multiplierResolver();
     int workedCount = 0;
     for (const Qso &qso : std::as_const(m_logQsos)) {
         if (!qso.invalid && !callsign.isEmpty()
@@ -9327,17 +9940,52 @@ void MainWindow::refreshCheckWindows()
         }
         m_checkCallGrid->setItem(row, 0, bandItem);
         for (int column = 0; column < modes.size(); ++column) {
+            const QString cellBand = bands.at(row);
+            const QString cellMode = modes.at(column);
             const QString time =
-                worked.value(bands.at(row) + QLatin1Char('|') + modes.at(column));
-            auto *item = new QTableWidgetItem(time.isEmpty() ? QStringLiteral("·") : time);
+                worked.value(cellBand + QLatin1Char('|') + cellMode);
+            Qso candidate;
+            candidate.callsign = callsign;
+            candidate.band = cellBand;
+            candidate.mode = cellMode;
+            const QStringList multiplierKeys = definition == nullptr
+                ? QStringList{}
+                : multiplierEngine.multiplierKeys(
+                      *definition, candidate, multiplierResolver);
+            const bool hasMultiplier = !multiplierKeys.isEmpty();
+            const bool newMultiplier = std::any_of(
+                multiplierKeys.cbegin(), multiplierKeys.cend(),
+                [this](const QString &key) {
+                    return !key.isEmpty()
+                        && !m_workedMultiplierKeys.contains(key);
+                });
+            QString cellText = time;
+            if (cellText.isEmpty()) {
+                cellText = newMultiplier ? QStringLiteral("+M")
+                    : hasMultiplier ? QStringLiteral("M")
+                                    : QStringLiteral("·");
+            } else if (hasMultiplier) {
+                cellText += newMultiplier ? QStringLiteral(" +M")
+                                          : QStringLiteral(" M");
+            }
+            auto *item = new QTableWidgetItem(cellText);
             item->setTextAlignment(Qt::AlignCenter);
             const bool currentCell = currentBand && modes.at(column) == mode;
+            if (newMultiplier) {
+                item->setToolTip(tr("New multiplier available for this band and mode."));
+                item->setForeground(QColor(QStringLiteral("#006400")));
+                item->setBackground(QColor(QStringLiteral("#DDF2DD")));
+            } else if (hasMultiplier) {
+                item->setToolTip(tr("Multiplier already worked."));
+            } else {
+                item->setToolTip(tr("No multiplier can be resolved for this callsign."));
+            }
             if (!time.isEmpty() && currentCell) {
                 item->setBackground(QColor(QStringLiteral("#CE0000")));
                 item->setForeground(Qt::white);
             } else if (!time.isEmpty()) {
                 item->setForeground(QColor(QStringLiteral("#000080")));
-            } else if (currentBand) {
+            } else if (currentBand && !newMultiplier) {
                 item->setBackground(QColor(QStringLiteral("#4682B4")));
                 item->setForeground(Qt::white);
             }
@@ -9659,6 +10307,19 @@ void MainWindow::logQsoForVfo(int vfo)
     if (!m_repository.saveQso(qso, &error)) {
         QMessageBox::critical(this, tr("Unable to save QSO"), error);
         return;
+    }
+    if (m_n1mmBroadcaster.configuration().enabled) {
+        const Contest *contest = activeContest();
+        if (contest == nullptr
+            || !m_n1mmBroadcaster.broadcastQso(
+                qso, contest != nullptr ? contest->name : QString(),
+                m_station.operatorName, &error)) {
+            statusBar()->showMessage(
+                tr("QSO was saved, but N1MM UDP broadcast failed: %1")
+                    .arg(contest == nullptr
+                             ? tr("the active log is unavailable.") : error),
+                10000);
+        }
     }
     if (!reservationUuid.isEmpty()) {
         m_serialReservationUuids[vfo].clear();
@@ -10531,6 +11192,32 @@ void MainWindow::refreshBandmap()
                                                   spot.band, mode);
                            });
     };
+    const auto hasNewMultiplier = [this, definition](const Spot &spot, int context) {
+        if (definition == nullptr || definition->multipliers.isEmpty()) {
+            return false;
+        }
+        Qso candidate;
+        candidate.callsign = spot.callsign.trimmed().toUpper();
+        candidate.band = spot.band.trimmed().toLower();
+        candidate.mode = spot.mode.trimmed().toUpper();
+        if (candidate.mode.isEmpty()) {
+            candidate.mode = m_modeSelectors[context]->currentText().trimmed().toUpper();
+        }
+        if (candidate.mode == QLatin1String("USB")
+            || candidate.mode == QLatin1String("LSB")) {
+            candidate.mode = QStringLiteral("SSB");
+        }
+        if (candidate.callsign.isEmpty() || candidate.band.isEmpty()) {
+            return false;
+        }
+        const QStringList keys = ContestEngine().multiplierKeys(
+            *definition, candidate, multiplierResolver());
+        return std::any_of(keys.cbegin(), keys.cend(),
+                           [this](const QString &key) {
+                               return !key.isEmpty()
+                                   && !m_workedMultiplierKeys.contains(key);
+                           });
+    };
     const QDateTime now = QDateTime::currentDateTimeUtc();
     const int spotLifetimeMinutes = qBound(
         1, QSettings().value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
@@ -10544,8 +11231,8 @@ void MainWindow::refreshBandmap()
     const bool sortByTime = sortSelector != nullptr
         && sortSelector->currentData().toString() == QLatin1String("time");
 
-    const auto populate = [this, &ordered, &isWorked, &loggedCalls, &now, sortByTime,
-                           spotLifetimeMinutes](
+    const auto populate = [this, &ordered, &isWorked, &hasNewMultiplier,
+                           &loggedCalls, &now, sortByTime, spotLifetimeMinutes](
                               QTableWidget *bandmap, QDockWidget *dock,
                               int context, int radio, int labelRadio) {
         qint64 selectedSpot = -1;
@@ -10596,6 +11283,10 @@ void MainWindow::refreshBandmap()
             }
             displayed.insert(dedupeKey);
             const bool worked = isWorked(spot);
+            if (m_onlyNewMultiplierSpots->isChecked()
+                && !hasNewMultiplier(spot, context)) {
+                continue;
+            }
             if (worked && m_hideWorkedSpots->isChecked()) {
                 continue;
             }
@@ -10654,6 +11345,7 @@ void MainWindow::refreshBandmap()
                 spot.callsign,
                 QStringLiteral("%1m").arg(ageMinutes),
                 spot.spotter,
+                spot.source,
                 spot.comment};
             for (int column = 0; column < values.size(); ++column) {
                 auto *item = new QTableWidgetItem(values.at(column));

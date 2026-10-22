@@ -23,7 +23,7 @@ gwarancji przyjęcia logu przez organizatora.
   rozstrzygnąć geografii lub wymaganej wymiany. Zapobiega to wyświetlaniu
   niepopartej regulaminem punktacji.
 - Dodano testy regresyjne punktacji tych przypadków oraz dokładnego wiersza QSO
-  Cabrillo dla wszystkich 20 plików YAML. Test sprawdza też skonfigurowany
+  Cabrillo dla wszystkich 23 plików YAML. Test sprawdza też skonfigurowany
   klucz duplikatu; nie zastępuje niezależnej certyfikacji całej punktacji.
 
 ## Profile zawodów
@@ -41,11 +41,12 @@ gwarancji przyjęcia logu przez organizatora.
 | SP DX — stacja SP | Profil 2026 deklaruje wymianę RST/prowincja oraz RST/serial, 0 punktów w kraju, 1 w Europie i 3 poza Europą oraz DXCC per band. Zależny od klasyfikacji CTY/DXCC. |
 | SP DX — stacja EU/DX | Profil 2026 deklaruje wymianę RST/serial oraz RST/prowincja, 3 punkty za QSO ze stacją SP i mnożnik województwa per band. |
 | WAG | Profil DX odzwierciedla wymianę serial/DOK lub NM, 1 punkt za QSO z Niemcami, district-letter multiplier per band/mode oraz wykluczenie NM. **Brak osobnego profilu entrantów niemieckich**, którzy mają inną wymianę i DXCC/WAE multipliers. |
+| WAE CW/SSB/RTTY | Dodano wymianę serialową i trwałe QTC, eksport `QTC:` oraz po 1 punkcie za każdą wiadomość QTC. Profile nie modelują jeszcze punktowania QSOs według regionu entrantów ani mnożników jednostek WAE/DXCC/call-area, dlatego wynik WAE nie jest certyfikowany i `CLAIMED-SCORE` może być niepełny. |
 | `general-logging`, `grid-field-day`, `serial-sprint` | Przykłady i profile testowe silnika, a nie definicje rzeczywistych regulaminów contestów. |
 
 ## Cabrillo i duplikaty
 
-Testy sprawdzają kolejność oraz zawartość wiersza QSO dla wszystkich 20 YAML-i,
+Testy sprawdzają kolejność oraz zawartość wiersza QSO dla wszystkich 23 YAML-i,
 w tym profilów bez RST i profilów z wieloelementową wymianą. Weryfikacja
 nie obejmuje uploadu do serwisu organizatora, niezależnego parsera
 Cabrillo ani kompletności wszystkich nagłówków zależnych od kategorii.
@@ -63,5 +64,6 @@ duplikatów dla każdego regulaminu pozostają do dodania.
 - [IARU HF — rules PDF](https://contests.arrl.org/ContestRules/IARU-HF-Rules.pdf)
 - [SP DX — 2026 rules](https://spdxcontest.pzk.org.pl/2026/rules.php)
 - [EUDX — rules](https://www.eudx-contest.com/rules/)
+- [DARC WAE — rules](https://www.darc.de/der-club/referate/conteste/wae-dx-contest/en/wae-rules/)
 - [EUHFC — current rules PDF](https://euhf.s5cc.eu/rules/euhfc_rules_latest.pdf)
 - [DARC WAG — rules](https://www.darc.de/der-club/referate/conteste/wag-contest/en/rules/)

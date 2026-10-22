@@ -112,6 +112,25 @@ QJsonObject sampleSyncEvent(const QString &logUuid, const QString &stationUuid,
     };
 }
 
+QJsonArray sampleQtcTransfers(const QString &qsoUuid, const QString &partnerCallsign)
+{
+    const QString qtcUuid =
+        QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    return {QJsonObject{
+        {QStringLiteral("qtc_uuid"), qtcUuid},
+        {QStringLiteral("partner_qso_uuid"), qsoUuid},
+        {QStringLiteral("partner_callsign"), partnerCallsign},
+        {QStringLiteral("direction"), QStringLiteral("received")},
+        {QStringLiteral("group_number"), 1},
+        {QStringLiteral("messages"), QJsonArray{QJsonObject{
+            {QStringLiteral("timestamp_utc"),
+             QStringLiteral("2026-10-15T09:40:00.000Z")},
+            {QStringLiteral("callsign"), QStringLiteral("DL2XYZ")},
+            {QStringLiteral("serial_number"), 18}
+        }}}
+    }};
+}
+
 } // namespace
 
 class SqliteRepositoryTest final : public QObject {
@@ -140,6 +159,7 @@ private slots:
     void findsDuplicateQsos();
     void assignsStableSyncIdentities();
     void persistsAtomicSyncOutbox();
+    void persistsQtcWithQsoAndQueuesItForSynchronization();
     void upgradesLegacyOutboxInvalidFlag();
     void deletesQsoWithAtomicOutboxTombstone();
     void auditsAndUndoesQsoChangesAsVersionedOperations();
@@ -224,7 +244,7 @@ void SqliteRepositoryTest::appliesSchemaMigrationOnce()
     QSqlQuery query(database.database());
     QVERIFY(query.exec(QStringLiteral("SELECT MAX(version) FROM schema_migrations")));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 19);
+    QCOMPARE(query.value(0).toInt(), 20);
     query.finish();
 
     QVERIFY2(database.repository().initialize(&error), qPrintable(error));
@@ -927,6 +947,51 @@ void SqliteRepositoryTest::persistsAtomicSyncOutbox()
     QCOMPARE(local->syncStatus, logger::QsoSyncStatus::Local);
 }
 
+void SqliteRepositoryTest::persistsQtcWithQsoAndQueuesItForSynchronization()
+{
+    TestDatabase database;
+    logger::SqliteRepository &repository = database.repository();
+    QString error;
+    const QVector<logger::Contest> contests = repository.contests(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(contests.size(), 1);
+    QVERIFY2(repository.setSynchronizationEnabled(
+                 contests.first().logUuid, true, &error),
+             qPrintable(error));
+    logger::Qso qso = sampleQso();
+    qso.qsoUuid = QStringLiteral("11111111-1111-4111-8111-111111111111");
+    logger::QtcTransfer transfer;
+    transfer.qtcUuid = QStringLiteral("22222222-2222-4222-8222-222222222222");
+    transfer.partnerQsoUuid = qso.qsoUuid;
+    transfer.partnerCallsign = QStringLiteral("W1AW");
+    transfer.direction = logger::QtcDirection::Received;
+    transfer.groupNumber = 1;
+    transfer.messages.append({
+        QDateTime::fromString(QStringLiteral("2026-10-15T09:40:00.000Z"),
+                              Qt::ISODateWithMs),
+        QStringLiteral("DL2XYZ"), 18
+    });
+    qso.qtcTransfers.append(transfer);
+    QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
+
+    const std::optional<logger::Qso> loaded = repository.qsoById(qso.id, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(loaded.has_value());
+    QCOMPARE(loaded->qtcTransfers.size(), 1);
+    QCOMPARE(loaded->qtcTransfers.first().qtcUuid, transfer.qtcUuid);
+    const QVector<logger::SyncOutboxOperation> outbox =
+        repository.syncOutbox(contests.first().logUuid, false, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(outbox.size(), 1);
+    const QJsonObject operation =
+        QJsonDocument::fromJson(outbox.first().payloadJson.toUtf8()).object();
+    const QJsonArray transfers = operation.value(QStringLiteral("qso")).toObject()
+        .value(QStringLiteral("qtc_transfers")).toArray();
+    QCOMPARE(transfers.size(), 1);
+    QCOMPARE(transfers.first().toObject().value(QStringLiteral("qtc_uuid")).toString(),
+             transfer.qtcUuid);
+}
+
 void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
 {
     TestDatabase database;
@@ -1423,6 +1488,10 @@ void SqliteRepositoryTest::atomicallyAppliesSyncChangesAndRecoversInflightOperat
     QJsonObject event = sampleSyncEvent(
         logUuid, remoteStation, remoteQso, remoteOperation, 1,
         QStringLiteral("W1AW"));
+    QJsonObject remotePayload = event.value(QStringLiteral("payload")).toObject();
+    remotePayload.insert(QStringLiteral("qtc_transfers"),
+                         sampleQtcTransfers(remoteQso, QStringLiteral("W1AW")));
+    event.insert(QStringLiteral("payload"), remotePayload);
     QJsonObject invalidPayload = event.value(QStringLiteral("payload")).toObject();
     invalidPayload.insert(QStringLiteral("is_invalid"), true);
     invalidPayload.insert(QStringLiteral("points"), 0);
@@ -1459,6 +1528,8 @@ void SqliteRepositoryTest::atomicallyAppliesSyncChangesAndRecoversInflightOperat
     QCOMPARE(found->qsoVersion, 1);
     QVERIFY(found->invalid);
     QCOMPARE(found->points, 0);
+    QCOMPARE(found->qtcTransfers.size(), 1);
+    QCOMPARE(found->qtcTransfers.first().messages.first().serialNumber, 18);
     const auto conflicted = repository.qsoById(local.id, &error);
     QVERIFY2(conflicted.has_value(), qPrintable(error));
     QCOMPARE(conflicted->callsign, QStringLiteral("K2REMOTE"));
@@ -1487,10 +1558,14 @@ void SqliteRepositoryTest::atomicallyReplacesDataFromVerifiedSnapshot()
         .toString(QUuid::WithoutBraces).toLower();
     const QString stationUuid = repository.localStationUuid(&error);
     QVERIFY2(!stationUuid.isEmpty(), qPrintable(error));
-    const QJsonArray snapshot{sampleSyncEvent(
+    QJsonObject snapshotQso = sampleSyncEvent(
         logUuid, stationUuid, remoteQsoUuid, QUuid::createUuid()
             .toString(QUuid::WithoutBraces).toLower(), 1,
-        QStringLiteral("W1REMOTE")).value(QStringLiteral("payload"))};
+        QStringLiteral("W1REMOTE")).value(QStringLiteral("payload")).toObject();
+    snapshotQso.insert(QStringLiteral("qtc_transfers"),
+                       sampleQtcTransfers(remoteQsoUuid,
+                                          QStringLiteral("W1REMOTE")));
+    const QJsonArray snapshot{snapshotQso};
     const QString checksum = QString::fromLatin1(QCryptographicHash::hash(
         QJsonDocument(snapshot).toJson(QJsonDocument::Compact),
         QCryptographicHash::Sha256).toHex());
@@ -1501,11 +1576,14 @@ void SqliteRepositoryTest::atomicallyReplacesDataFromVerifiedSnapshot()
     QVector<logger::Qso> qsos = repository.qsosForContest(1, 0, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(qsos.size(), 2);
-    QVERIFY(std::any_of(qsos.cbegin(), qsos.cend(),
+    const auto remote = std::find_if(qsos.cbegin(), qsos.cend(),
         [&remoteQsoUuid](const logger::Qso &qso) {
             return qso.qsoUuid == remoteQsoUuid
                 && qso.callsign == QStringLiteral("W1REMOTE");
-        }));
+        });
+    QVERIFY(remote != qsos.cend());
+    QCOMPARE(remote->qtcTransfers.size(), 1);
+    QCOMPARE(remote->qtcTransfers.first().messages.first().serialNumber, 18);
     QVERIFY(std::any_of(qsos.cbegin(), qsos.cend(),
         [&pendingQso](const logger::Qso &qso) {
             return qso.qsoUuid == pendingQso.qsoUuid

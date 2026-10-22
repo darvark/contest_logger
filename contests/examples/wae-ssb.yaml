@@ -1,0 +1,15 @@
+schema_version: 1
+id: wae-ssb
+name: Worked All Europe DX Contest (SSB)
+description: WAE DX SSB contest profile. QTC exchange is managed separately in the log.
+cabrillo: {contest: WAE-DC-SSB}
+bands: [80m, 40m, 20m, 15m, 10m]
+modes: [SSB]
+exchange:
+  sent:
+    - {name: serial, label: Serial, type: serial, generated: true, width: 3}
+  received:
+    - {name: serial, label: Serial, type: integer, min: 1, max: 999999}
+scoring:
+  qso_points: 1
+dupe_key: [callsign, band, mode]
