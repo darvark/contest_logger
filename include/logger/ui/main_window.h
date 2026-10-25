@@ -176,6 +176,7 @@ private:
     void updateTopStatus();
     void updateEntryHeaders();
     void showOperatorMessage(const QString &message, bool alert = false);
+    bool tuneFrequencyFromCallsign(int context);
     bool sendCwTemplate(QString message, int context, QString *problem,
                         QString callsignOverride = {});
     int cwRadioForContext(int context) const;

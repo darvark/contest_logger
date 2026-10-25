@@ -115,6 +115,29 @@ QNetworkRequest supportDataRequest(const QUrl &url)
     return request;
 }
 
+std::optional<qint64> frequencyHzFromCallsignInput(const QString &input)
+{
+    const QString value = input.trimmed();
+    static const QRegularExpression pattern(
+        QStringLiteral("^[0-9]+(?:[.,][0-9]{1,3})?$"));
+    if (!pattern.match(value).hasMatch()) {
+        return std::nullopt;
+    }
+
+    QString normalized = value;
+    normalized.replace(QLatin1Char(','), QLatin1Char('.'));
+    bool ok = false;
+    const double frequencyKhz = normalized.toDouble(&ok);
+    if (!ok || !std::isfinite(frequencyKhz) || frequencyKhz <= 0.0
+        || frequencyKhz > 450'000.0) {
+        return std::nullopt;
+    }
+
+    const qint64 frequencyHz = qRound64(frequencyKhz * 1000.0);
+    return bandForFrequency(frequencyHz).isEmpty()
+        ? std::nullopt : std::optional<qint64>(frequencyHz);
+}
+
 void populateSerialControlSelector(QComboBox *selector, SerialControlState state)
 {
     selector->addItem(QObject::tr("Unchanged"),
@@ -3009,7 +3032,6 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         QFontMetrics(monoFont(10, true)).height() + 4);
     m_summaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_summaryTable->horizontalHeader()->setMinimumSectionSize(8);
-    m_summaryTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_summaryTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_summaryTable->horizontalHeader()->setHighlightSections(false);
     m_summaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -7214,6 +7236,9 @@ bool MainWindow::sendFunctionKeyForContext(int index, int context)
 void MainWindow::handleEntryEnter(int vfo, bool callsignField)
 {
     vfo = qBound(0, vfo, 1);
+    if (callsignField && tuneFrequencyFromCallsign(vfo)) {
+        return;
+    }
     const bool esmEnabled = m_esmAction->isChecked()
         && m_modeSelectors[vfo]->currentText().compare(
                QStringLiteral("CW"), Qt::CaseInsensitive) == 0;
@@ -9809,6 +9834,24 @@ void MainWindow::wipeEntry(int context)
     m_callsignEdits[context]->setFocus();
 }
 
+bool MainWindow::tuneFrequencyFromCallsign(int context)
+{
+    context = qBound(0, context, 1);
+    const std::optional<qint64> frequencyHz =
+        frequencyHzFromCallsignInput(m_callsignEdits[context]->text());
+    if (!frequencyHz.has_value()) {
+        return false;
+    }
+
+    const int radio = m_so2rToggle->isChecked()
+        ? context : m_activeRadioSelector->currentData().toInt();
+    const int radioVfo = m_so2rToggle->isChecked()
+        ? m_radioSnapshots[radio].focusVfo : context;
+    m_radioControllers[radio].setFrequency(*frequencyHz, radioVfo);
+    m_callsignEdits[context]->clear();
+    return true;
+}
+
 void MainWindow::rebuildCallCompleters()
 {
     QSet<QString> unique(m_checkCallsigns.cbegin(), m_checkCallsigns.cend());
@@ -10034,13 +10077,16 @@ void MainWindow::logQso()
 
 void MainWindow::logQsoForVfo(int vfo)
 {
+    vfo = qBound(0, vfo, 1);
+    if (tuneFrequencyFromCallsign(vfo)) {
+        return;
+    }
     if (m_networkReadOnly) {
         showOperatorMessage(
             tr("This station has read-only access; QSO changes are disabled."),
             true);
         return;
     }
-    vfo = qBound(0, vfo, 1);
     const int radio = m_so2rToggle->isChecked()
         ? vfo : m_activeRadioSelector->currentData().toInt();
     const int radioVfo = m_so2rToggle->isChecked()
