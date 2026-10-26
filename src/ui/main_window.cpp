@@ -68,7 +68,6 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSet>
-#include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStringListModel>
@@ -165,8 +164,7 @@ QString networkReplyError(const QNetworkReply *reply)
 bool saveSupportDataFile(const QString &fileName, const QByteArray &contents,
                          QString &path, QString &error)
 {
-    const QString directory =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString directory = applicationDataDirectory();
     if (directory.isEmpty() || !QDir().mkpath(directory)) {
         error = QStringLiteral("Unable to create the application data directory.");
         return false;
@@ -3464,8 +3462,7 @@ void MainWindow::autoStartHostServer()
         return;
     }
     auto repository = std::make_unique<CentralRepository>();
-    const QString dataDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+    const QString dataDirectory = QDir(applicationDataDirectory())
         .filePath(QStringLiteral("central-server"));
     if (!repository->initialize(dataDirectory, &error)) {
         statusBar()->showMessage(
@@ -3861,8 +3858,7 @@ void MainWindow::configureHostModeStart()
     }
 
     auto repository = std::make_unique<CentralRepository>();
-    const QString centralDataDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+    const QString centralDataDirectory = QDir(applicationDataDirectory())
         .filePath(QStringLiteral("central-server"));
     if (!repository->initialize(centralDataDirectory, &error)) {
         QMessageBox::critical(this, tr("Unable to initialize central database"), error);
@@ -8283,8 +8279,7 @@ void MainWindow::importCtyDat()
 
 void MainWindow::restoreSupportDataVersion()
 {
-    const QString historyDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+    const QString historyDirectory = QDir(applicationDataDirectory())
         .filePath(QStringLiteral("support-data-versions"));
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Restore downloaded support data"), historyDirectory,

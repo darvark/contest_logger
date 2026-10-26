@@ -33,8 +33,8 @@ Przy pierwszym uruchomieniu aplikacja tworzy katalog danych wyznaczony przez
 Qt. Znajdują się w nim baza `contest-logger.sqlite`, konfiguracja
 `config/ContestLogger/ContestLogger.ini` (obsługiwana przez `QSettings`) oraz
 katalog `contests/` z kopiami wbudowanych definicji YAML. Domyślny katalog w
-systemie Linux to `~/.local/share/ContestLogger/ContestLogger/`, a w Windows:
-`%APPDATA%\ContestLogger\ContestLogger\`. Istniejące ustawienia są jednorazowo
+systemie Linux to `~/.local/share/ContestLogger/`, a w Windows:
+`%APPDATA%\ContestLogger\`. Istniejące ustawienia są jednorazowo
 kopiowane do pliku INI, bez usuwania oryginału. Brakujące wbudowane definicje
 są odtwarzane przy uruchomieniu; istniejące pliki nie są nadpisywane.
 

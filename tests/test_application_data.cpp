@@ -51,19 +51,38 @@ void ApplicationDataTest::init()
 
 void ApplicationDataTest::cleanup()
 {
-    const QString directory = applicationDataDirectory();
-    if (QFileInfo(directory).isDir()) {
-        QVERIFY(QDir(directory).removeRecursively());
-    } else if (QFileInfo::exists(directory)) {
-        QVERIFY(QFile::remove(directory));
+    const QStringList directories{
+        applicationDataDirectory(),
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)};
+    for (const QString &directory : directories) {
+        if (QFileInfo(directory).isDir()) {
+            QVERIFY(QDir(directory).removeRecursively());
+        } else if (QFileInfo::exists(directory)) {
+            QVERIFY(QFile::remove(directory));
+        }
     }
 }
 
 void ApplicationDataTest::firstStartCreatesSettingsDatabaseAndDefinitions()
 {
+    QCOMPARE(applicationDataDirectory(),
+             QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+                 .filePath(QCoreApplication::applicationName()));
     QVERIFY(!QFileInfo::exists(applicationDataDirectory()));
+    const QString legacyDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QVERIFY(QDir().mkpath(legacyDirectory));
+    QFile legacyMarker(QDir(legacyDirectory).filePath(
+        QStringLiteral("legacy-marker.txt")));
+    QVERIFY(legacyMarker.open(QIODevice::WriteOnly));
+    QCOMPARE(legacyMarker.write(QByteArrayLiteral("legacy data")), 11);
+    legacyMarker.close();
     QString error;
     QVERIFY2(initializeApplicationData(&error), qPrintable(error));
+    QFile migratedMarker(QDir(applicationDataDirectory()).filePath(
+        QStringLiteral("legacy-marker.txt")));
+    QVERIFY(migratedMarker.open(QIODevice::ReadOnly));
+    QCOMPARE(migratedMarker.readAll(), QByteArrayLiteral("legacy data"));
     QVERIFY(QFileInfo::exists(QSettings().fileName()));
     QVERIFY(QSettings().fileName().startsWith(
         applicationDataDirectory() + QLatin1Char('/')));

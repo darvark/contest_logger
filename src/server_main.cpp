@@ -1,11 +1,11 @@
 #include "logger/data/central_repository.h"
+#include "logger/data/application_data.h"
 #include "logger/network/sync_server.h"
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDir>
-#include <QStandardPaths>
 #include <QTextStream>
 
 int main(int argc, char *argv[])
@@ -64,8 +64,7 @@ int main(int argc, char *argv[])
 
     QString dataDirectory = parser.value(dataDirectoryOption);
     if (dataDirectory.isEmpty()) {
-        dataDirectory = QStandardPaths::writableLocation(
-            QStandardPaths::AppLocalDataLocation);
+        dataDirectory = logger::applicationDataDirectory();
     }
     if (dataDirectory.isEmpty()) {
         errorOutput << "No writable application data directory is available; "

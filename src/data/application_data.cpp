@@ -5,6 +5,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
@@ -28,11 +29,41 @@ bool writeDefinition(const QString &path, const QByteArray &contents, QString *e
     return true;
 }
 
+bool copyLegacyApplicationData(const QString &directory, QString *error)
+{
+    const QString legacyDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (legacyDirectory.isEmpty()
+        || QDir::cleanPath(legacyDirectory) == QDir::cleanPath(directory)
+        || !QFileInfo(legacyDirectory).isDir()) {
+        return true;
+    }
+
+    const QDir legacy(legacyDirectory);
+    QDirIterator iterator(legacyDirectory, QDir::Files, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString source = iterator.next();
+        const QString destination = QDir(directory).filePath(
+            legacy.relativeFilePath(source));
+        if (QFileInfo::exists(destination)) {
+            continue;
+        }
+        if (!QDir().mkpath(QFileInfo(destination).path())
+            || !QFile::copy(source, destination)) {
+            *error = QStringLiteral("%1: could not migrate application data.")
+                         .arg(source);
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 QString applicationDataDirectory()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+        .filePath(QCoreApplication::applicationName());
 }
 
 QString contestDefinitionsDirectory()
@@ -49,7 +80,16 @@ bool initializeApplicationData(QString *error)
 {
     error->clear();
     const QString directory = applicationDataDirectory();
-    if (directory.isEmpty() || !QDir().mkpath(contestDefinitionsDirectory())) {
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+        *error = QCoreApplication::translate(
+            "ApplicationData", "Could not create the application data directory: %1")
+                     .arg(directory);
+        return false;
+    }
+    if (!copyLegacyApplicationData(directory, error)) {
+        return false;
+    }
+    if (!QDir().mkpath(contestDefinitionsDirectory())) {
         *error = QCoreApplication::translate(
             "ApplicationData", "Could not create the application data directory: %1")
                      .arg(directory);
