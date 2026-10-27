@@ -8831,7 +8831,24 @@ void MainWindow::loadSupportData()
             masterPaths.append(legacyPath);
         }
     }
+    bool masterPathsPruned = false;
+    // Paths saved by older versions pointed into the nested ContestLogger/ContestLogger directory.
+    for (QString &path : masterPaths) {
+        if (!QFileInfo::exists(path)) {
+            const QString relocated = QDir(applicationDataDirectory())
+                                          .filePath(QFileInfo(path).fileName());
+            if (QFileInfo::exists(relocated)) {
+                path = relocated;
+                masterPathsPruned = true;
+            }
+        }
+    }
+    masterPaths.removeDuplicates();
     for (const QString &path : masterPaths) {
+        if (!QFileInfo::exists(path)) {
+            masterPathsPruned = true;
+            continue;
+        }
         QString contents;
         if (!readFile(path, contents)) {
             continue;
@@ -8847,6 +8864,27 @@ void MainWindow::loadSupportData()
         } else {
             QMessageBox::warning(this, tr("master.cpy unavailable"),
                                  tr("%1: %2").arg(path, error));
+        }
+    }
+    if (masterPathsPruned) {
+        QStringList existing;
+        for (const QString &path : masterPaths) {
+            if (QFileInfo::exists(path)) {
+                existing.append(path);
+            }
+        }
+        settings.setValue(QStringLiteral("supportData/masterCpyFiles"), existing);
+        const QString scpPath =
+            settings.value(QStringLiteral("supportData/masterScpPath")).toString();
+        if (!scpPath.isEmpty() && !QFileInfo::exists(scpPath)) {
+            const QString relocated = QDir(applicationDataDirectory())
+                                          .filePath(QFileInfo(scpPath).fileName());
+            if (QFileInfo::exists(relocated)) {
+                settings.setValue(QStringLiteral("supportData/masterScpPath"), relocated);
+            } else {
+                settings.remove(QStringLiteral("supportData/masterScpPath"));
+                settings.remove(QStringLiteral("supportData/masterScpEtag"));
+            }
         }
     }
     const QString ctyPath =
