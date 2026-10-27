@@ -169,11 +169,6 @@ else()
         RUNTIME DESTINATION bin
     )
 endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    install(FILES resources/contest-logger.desktop
-        DESTINATION share/applications
-    )
-endif()
 install(DIRECTORY contests/examples/
     DESTINATION share/contest-logger/contests
 )

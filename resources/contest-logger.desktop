@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Contest Logger
-Comment=Amateur radio contest logging
-Exec=contest_logger
-Terminal=false
-Categories=Utility;
-StartupNotify=true

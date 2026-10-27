@@ -85,12 +85,12 @@ Budowanie bez Hamlib: `-DLOGGER_ENABLE_HAMLIB=OFF`. Instrukcja dla Windows
 
 ## 2. Pliki programu i ich położenie
 
-Program używa katalogu danych Qt (`QStandardPaths::GenericDataLocation`) i nazwy
-aplikacji `ContestLogger`:
+Program używa nazwy organizacji i aplikacji `ContestLogger`. Konkretne katalogi
+wyznacza Qt (`QStandardPaths::AppDataLocation`):
 
 | Dane | Linux | Windows |
 |---|---|---|
-| Baza danych | `~/.local/share/ContestLogger/contest-logger.sqlite` | `%APPDATA%\ContestLogger\contest-logger.sqlite` |
+| Baza danych | `~/.local/share/ContestLogger/ContestLogger/contest-logger.sqlite` | `%APPDATA%\ContestLogger\ContestLogger\contest-logger.sqlite` |
 | Kopie automatyczne | `…/backups/automatic-RRRR-MM-DD.sqlite` | jw. |
 | Pobrane `master.scp`, `wl_cty.dat` | katalog danych aplikacji | jw. |
 | Ustawienia (QSettings, INI) | `…/config/ContestLogger/ContestLogger.ini` | jw. |
@@ -599,7 +599,7 @@ wymianę nadaną i odebraną.
 - Odtwarzanie (przy zamkniętym programie):
 
   ```sh
-  contest_logger --restore-backup ~/.local/share/ContestLogger/backups/automatic-2026-10-16.sqlite
+  contest_logger --restore-backup ~/.local/share/ContestLogger/ContestLogger/backups/automatic-2026-10-16.sqlite
   ```
 
   Poprzednia baza jest zachowywana obok odtworzonej.

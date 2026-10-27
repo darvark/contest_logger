@@ -82,7 +82,6 @@ private slots:
     void esmSendsCallAndLogsOnExchangeEnter();
     void esmMessagesAreConfiguredPerContest();
     void autoCqRequiresRunAndStopsWhenEnteringCallsign();
-    void frequencyEnteredInCallsignFieldTunesRadioInKilohertz();
     void frequencyChangeWithinBandSwitchesRunToSearchAndPounce();
     void runFrequencyThreshold_data();
     void runFrequencyThreshold();
@@ -1151,37 +1150,6 @@ void MainWindowUiTest::autoCqRequiresRunAndStopsWhenEnteringCallsign()
 
     callEdit()->setText(QStringLiteral("K1ABC"));
     QVERIFY(!autoCq->isChecked());
-}
-
-void MainWindowUiTest::frequencyEnteredInCallsignFieldTunesRadioInKilohertz()
-{
-    QSettings settings;
-    settings.setValue(QStringLiteral("radio/A/backend"),
-                      static_cast<int>(RadioBackendType::Mock));
-    m_window->findChild<QAction *>(QStringLiteral("reconnectRadioAAction"))->trigger();
-
-    auto *radioStatus = m_window->findChild<QLabel *>(QStringLiteral("radioStatus"));
-    auto *header = m_window->findChild<QLabel *>(QStringLiteral("entryHeader"));
-    auto *band = m_window->findChild<QComboBox *>(QStringLiteral("bandSelectorA"));
-    QVERIFY(radioStatus != nullptr);
-    QVERIFY(header != nullptr);
-    QVERIFY(band != nullptr);
-    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: "))
-                && radioStatus->text().contains(QStringLiteral(" MHz ")));
-
-    callEdit()->setText(QStringLiteral("14200"));
-    QTest::keyClick(callEdit(), Qt::Key_Return);
-    QTRY_VERIFY(header->text().contains(QStringLiteral("14200.00 kHz")));
-    QCOMPARE(band->currentText(), QStringLiteral("20m"));
-    QVERIFY(callEdit()->text().isEmpty());
-    QCOMPARE(table()->rowCount(), 0);
-
-    callEdit()->setText(QStringLiteral("3720"));
-    QTest::keyClick(callEdit(), Qt::Key_Return);
-    QTRY_VERIFY(header->text().contains(QStringLiteral("3720.00 kHz")));
-    QCOMPARE(band->currentText(), QStringLiteral("80m"));
-    QVERIFY(callEdit()->text().isEmpty());
-    QCOMPARE(table()->rowCount(), 0);
 }
 
 void MainWindowUiTest::frequencyChangeWithinBandSwitchesRunToSearchAndPounce()

@@ -58,8 +58,7 @@ APT i DNF pobierają zależności bibliotek z włączonych repozytoriów. Pakiet
 wymagają także wtyczki SQLite dla Qt oraz wtyczek GUI/platformy, ładowanych
 dynamicznie i niewykrywanych przez skanery zależności ELF. Pakiet zawiera
 programy `contest_logger` i `contest_logger_server`, przykładowe definicje
-zawodów, wpis menu aplikacji (KDE/GNOME), dokumentację i licencję.
-Nie uruchamia automatycznie usługi, nie
+zawodów, dokumentację i licencję. Nie uruchamia automatycznie usługi, nie
 tworzy użytkownika systemowego i nie zawiera ustawień ani logów użytkownika.
 
 Budowanie odbywa się z uprawnieniami bieżącego użytkownika. Tylko opcja

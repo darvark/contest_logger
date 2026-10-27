@@ -68,6 +68,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSet>
+#include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStringListModel>
@@ -114,29 +115,6 @@ QNetworkRequest supportDataRequest(const QUrl &url)
     return request;
 }
 
-std::optional<qint64> frequencyHzFromCallsignInput(const QString &input)
-{
-    const QString value = input.trimmed();
-    static const QRegularExpression pattern(
-        QStringLiteral("^[0-9]+(?:[.,][0-9]{1,3})?$"));
-    if (!pattern.match(value).hasMatch()) {
-        return std::nullopt;
-    }
-
-    QString normalized = value;
-    normalized.replace(QLatin1Char(','), QLatin1Char('.'));
-    bool ok = false;
-    const double frequencyKhz = normalized.toDouble(&ok);
-    if (!ok || !std::isfinite(frequencyKhz) || frequencyKhz <= 0.0
-        || frequencyKhz > 450'000.0) {
-        return std::nullopt;
-    }
-
-    const qint64 frequencyHz = qRound64(frequencyKhz * 1000.0);
-    return bandForFrequency(frequencyHz).isEmpty()
-        ? std::nullopt : std::optional<qint64>(frequencyHz);
-}
-
 void populateSerialControlSelector(QComboBox *selector, SerialControlState state)
 {
     selector->addItem(QObject::tr("Unchanged"),
@@ -164,7 +142,8 @@ QString networkReplyError(const QNetworkReply *reply)
 bool saveSupportDataFile(const QString &fileName, const QByteArray &contents,
                          QString &path, QString &error)
 {
-    const QString directory = applicationDataDirectory();
+    const QString directory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (directory.isEmpty() || !QDir().mkpath(directory)) {
         error = QStringLiteral("Unable to create the application data directory.");
         return false;
@@ -3462,7 +3441,8 @@ void MainWindow::autoStartHostServer()
         return;
     }
     auto repository = std::make_unique<CentralRepository>();
-    const QString dataDirectory = QDir(applicationDataDirectory())
+    const QString dataDirectory = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("central-server"));
     if (!repository->initialize(dataDirectory, &error)) {
         statusBar()->showMessage(
@@ -3858,7 +3838,8 @@ void MainWindow::configureHostModeStart()
     }
 
     auto repository = std::make_unique<CentralRepository>();
-    const QString centralDataDirectory = QDir(applicationDataDirectory())
+    const QString centralDataDirectory = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("central-server"));
     if (!repository->initialize(centralDataDirectory, &error)) {
         QMessageBox::critical(this, tr("Unable to initialize central database"), error);
@@ -7232,9 +7213,6 @@ bool MainWindow::sendFunctionKeyForContext(int index, int context)
 void MainWindow::handleEntryEnter(int vfo, bool callsignField)
 {
     vfo = qBound(0, vfo, 1);
-    if (callsignField && tuneFrequencyFromCallsign(vfo)) {
-        return;
-    }
     const bool esmEnabled = m_esmAction->isChecked()
         && m_modeSelectors[vfo]->currentText().compare(
                QStringLiteral("CW"), Qt::CaseInsensitive) == 0;
@@ -8279,7 +8257,8 @@ void MainWindow::importCtyDat()
 
 void MainWindow::restoreSupportDataVersion()
 {
-    const QString historyDirectory = QDir(applicationDataDirectory())
+    const QString historyDirectory = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
         .filePath(QStringLiteral("support-data-versions"));
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Restore downloaded support data"), historyDirectory,
@@ -9829,24 +9808,6 @@ void MainWindow::wipeEntry(int context)
     m_callsignEdits[context]->setFocus();
 }
 
-bool MainWindow::tuneFrequencyFromCallsign(int context)
-{
-    context = qBound(0, context, 1);
-    const std::optional<qint64> frequencyHz =
-        frequencyHzFromCallsignInput(m_callsignEdits[context]->text());
-    if (!frequencyHz.has_value()) {
-        return false;
-    }
-
-    const int radio = m_so2rToggle->isChecked()
-        ? context : m_activeRadioSelector->currentData().toInt();
-    const int radioVfo = m_so2rToggle->isChecked()
-        ? m_radioSnapshots[radio].focusVfo : context;
-    m_radioControllers[radio].setFrequency(*frequencyHz, radioVfo);
-    m_callsignEdits[context]->clear();
-    return true;
-}
-
 void MainWindow::rebuildCallCompleters()
 {
     QSet<QString> unique(m_checkCallsigns.cbegin(), m_checkCallsigns.cend());
@@ -10072,16 +10033,13 @@ void MainWindow::logQso()
 
 void MainWindow::logQsoForVfo(int vfo)
 {
-    vfo = qBound(0, vfo, 1);
-    if (tuneFrequencyFromCallsign(vfo)) {
-        return;
-    }
     if (m_networkReadOnly) {
         showOperatorMessage(
             tr("This station has read-only access; QSO changes are disabled."),
             true);
         return;
     }
+    vfo = qBound(0, vfo, 1);
     const int radio = m_so2rToggle->isChecked()
         ? vfo : m_activeRadioSelector->currentData().toInt();
     const int radioVfo = m_so2rToggle->isChecked()
