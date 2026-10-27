@@ -68,7 +68,6 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSet>
-#include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStringListModel>
@@ -93,6 +92,61 @@
 namespace logger {
 namespace {
 
+bool isLogSetting(const QString &key)
+{
+    return key.startsWith(QLatin1String("station/"))
+        || key.startsWith(QLatin1String("contest/"))
+        || key.startsWith(QLatin1String("cw/functionKeys/"))
+        || key.startsWith(QLatin1String("cw/esm/"))
+        || key.startsWith(QLatin1String("operating/"));
+}
+
+QString supportAssetKey(const QString &type, const QString &path)
+{
+    return type == QLatin1String("support/cty")
+        ? type : type + QLatin1Char('/')
+            + QString::fromLatin1(QCryptographicHash::hash(
+                QFileInfo(path).absoluteFilePath().toUtf8(),
+                QCryptographicHash::Sha256).toHex());
+}
+
+class LogSettings final : public QSettings {
+    Q_DECLARE_TR_FUNCTIONS(logger::MainWindow)
+public:
+    explicit LogSettings(SqliteRepository &repository) : m_repository(repository) {}
+
+    QVariant value(const QString &key, const QVariant &fallback = {}) const
+    {
+        const QString fullKey = group().isEmpty() ? key : group() + QLatin1Char('/') + key;
+        if (!m_repository.isStandaloneLog() || !isLogSetting(fullKey)) {
+            return QSettings::value(key, fallback);
+        }
+        QString error;
+        const auto values = m_repository.logSettings(&error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(nullptr, tr("Unable to read log settings"), error);
+            return {};
+        }
+        return values.value(fullKey, fallback);
+    }
+
+    void setValue(const QString &key, const QVariant &value)
+    {
+        const QString fullKey = group().isEmpty() ? key : group() + QLatin1Char('/') + key;
+        if (!m_repository.isStandaloneLog() || !isLogSetting(fullKey)) {
+            QSettings::setValue(key, value);
+            return;
+        }
+        QString error;
+        if (!m_repository.setLogSetting(fullKey, value, &error)) {
+            QMessageBox::critical(nullptr, tr("Unable to save log settings"), error);
+        }
+    }
+
+private:
+    SqliteRepository &m_repository;
+};
+
 void issueNetworkRequest(QObject *context, QNetworkAccessManager *manager,
                          const QNetworkRequest &request,
                          std::function<void(QNetworkReply *)> finished)
@@ -113,6 +167,29 @@ QNetworkRequest supportDataRequest(const QUrl &url)
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     return request;
+}
+
+std::optional<qint64> frequencyHzFromCallsignInput(const QString &input)
+{
+    const QString value = input.trimmed();
+    static const QRegularExpression pattern(
+        QStringLiteral("^[0-9]+(?:[.,][0-9]{1,3})?$"));
+    if (!pattern.match(value).hasMatch()) {
+        return std::nullopt;
+    }
+
+    QString normalized = value;
+    normalized.replace(QLatin1Char(','), QLatin1Char('.'));
+    bool ok = false;
+    const double frequencyKhz = normalized.toDouble(&ok);
+    if (!ok || !std::isfinite(frequencyKhz) || frequencyKhz <= 0.0
+        || frequencyKhz > 450'000.0) {
+        return std::nullopt;
+    }
+
+    const qint64 frequencyHz = qRound64(frequencyKhz * 1000.0);
+    return bandForFrequency(frequencyHz).isEmpty()
+        ? std::nullopt : std::optional<qint64>(frequencyHz);
 }
 
 void populateSerialControlSelector(QComboBox *selector, SerialControlState state)
@@ -142,8 +219,7 @@ QString networkReplyError(const QNetworkReply *reply)
 bool saveSupportDataFile(const QString &fileName, const QByteArray &contents,
                          QString &path, QString &error)
 {
-    const QString directory =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString directory = applicationDataDirectory();
     if (directory.isEmpty() || !QDir().mkpath(directory)) {
         error = QStringLiteral("Unable to create the application data directory.");
         return false;
@@ -511,13 +587,14 @@ private:
 };
 
 class SyncConnectionDialog final : public QDialog {
+    Q_DECLARE_TR_FUNCTIONS(logger::SyncConnectionDialog)
 public:
     SyncConnectionDialog(const QVector<Contest> &contests,
                          const QString &savedHost, int savedPort,
                          const QString &savedLogUuid, bool autoStart, QWidget *parent)
         : QDialog(parent)
     {
-        setWindowTitle(tr("Central synchronization connection"));
+        setWindowTitle(tr("Network client"));
         auto *layout = new QVBoxLayout(this);
         auto *form = new QFormLayout;
         m_host = new QLineEdit(savedHost, this);
@@ -538,8 +615,6 @@ public:
                                .arg(contest.name, contest.stationCallsign),
                            contest.logUuid);
         }
-        m_log->addItem(tr("Join a remote central log..."),
-                       QStringLiteral("@remote"));
         const int savedLogIndex = m_log->findData(savedLogUuid);
         if (savedLogIndex >= 0) {
             m_log->setCurrentIndex(savedLogIndex);
@@ -547,6 +622,7 @@ public:
             m_log->setCurrentIndex(m_log->count() - 1);
         }
         form->addRow(tr("Log to synchronize:"), m_log);
+        m_log->setEnabled(false);
 
         m_autoStart = new QCheckBox(
             tr("Connect automatically at application startup"), this);
@@ -556,9 +632,8 @@ public:
         layout->addLayout(form);
 
         auto *notice = new QLabel(
-            tr("Stations that can reach this trusted LAN/VPN server receive "
-               "read/write access. Network traffic is not encrypted. A local "
-               "copy is retained when joining a central log."),
+            tr("The currently open log must have the same contest definition "
+               "as the server log. QSOs are sent automatically over plain TCP."),
             this);
         notice->setWordWrap(true);
         layout->addWidget(notice);
@@ -1131,17 +1206,17 @@ constexpr FunctionKeyDefault kFunctionKeyDefaults[8] = {
     {"AGN", "AGN"},
 };
 
-QString functionKeyLabel(int key)
+QString functionKeyLabel(SqliteRepository &repository, int key)
 {
-    QSettings settings;
+    LogSettings settings(repository);
     return settings.value(QStringLiteral("cw/functionKeys/F%1/label").arg(key + 1),
                           QString::fromLatin1(kFunctionKeyDefaults[key].label))
         .toString();
 }
 
-QString functionKeyText(int key)
+QString functionKeyText(SqliteRepository &repository, int key)
 {
-    QSettings settings;
+    LogSettings settings(repository);
     return settings.value(QStringLiteral("cw/functionKeys/F%1/text").arg(key + 1),
                           QString::fromLatin1(kFunctionKeyDefaults[key].text))
         .toString();
@@ -1590,6 +1665,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     newLogAction->setObjectName(QStringLiteral("newLogAction"));
     newLogAction->setShortcut(QKeySequence::New);
     connect(newLogAction, &QAction::triggered, this, &MainWindow::createNewLog);
+    auto *openLogAction = fileMenu->addAction(tr("&Open log..."));
+    openLogAction->setObjectName(QStringLiteral("openLogAction"));
+    openLogAction->setShortcut(QKeySequence::Open);
+    connect(openLogAction, &QAction::triggered, this, &MainWindow::openLog);
     auto *logPropertiesAction = fileMenu->addAction(tr("Log &properties..."));
     logPropertiesAction->setObjectName(QStringLiteral("logPropertiesAction"));
     connect(logPropertiesAction, &QAction::triggered,
@@ -1626,10 +1705,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_esmAction = operatingMenu->addAction(tr("Enter Sends Message (ESM)"));
     m_esmAction->setObjectName(QStringLiteral("esmAction"));
     m_esmAction->setCheckable(true);
-    m_esmAction->setChecked(QSettings().value(QStringLiteral("operating/esmEnabled"),
+    m_esmAction->setChecked(LogSettings(m_repository).value(QStringLiteral("operating/esmEnabled"),
                                                false).toBool());
-    connect(m_esmAction, &QAction::toggled, this, [](bool enabled) {
-        QSettings().setValue(QStringLiteral("operating/esmEnabled"), enabled);
+    connect(m_esmAction, &QAction::toggled, this, [this](bool enabled) {
+        LogSettings(m_repository).setValue(QStringLiteral("operating/esmEnabled"), enabled);
     });
     auto *undoQsoAction = operatingMenu->addAction(tr("Undo last QSO change"));
     undoQsoAction->setObjectName(QStringLiteral("undoLastQsoChangeAction"));
@@ -1639,10 +1718,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     auto *allowDupeLoggingAction = operatingMenu->addAction(tr("Allow logging duplicate QSOs"));
     allowDupeLoggingAction->setObjectName(QStringLiteral("allowDupeLoggingAction"));
     allowDupeLoggingAction->setCheckable(true);
-    allowDupeLoggingAction->setChecked(QSettings().value(
+    allowDupeLoggingAction->setChecked(LogSettings(m_repository).value(
         QStringLiteral("operating/allowDupeLogging"), false).toBool());
-    connect(allowDupeLoggingAction, &QAction::toggled, this, [](bool enabled) {
-        QSettings().setValue(QStringLiteral("operating/allowDupeLogging"), enabled);
+    connect(allowDupeLoggingAction, &QAction::toggled, this, [this](bool enabled) {
+        LogSettings(m_repository).setValue(QStringLiteral("operating/allowDupeLogging"), enabled);
     });
     auto *configureEsmAction = operatingMenu->addAction(tr("Configure ESM messages..."));
     configureEsmAction->setObjectName(QStringLiteral("configureEsmMessagesAction"));
@@ -1654,16 +1733,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     connect(m_autoCqAction, &QAction::toggled,
             this, &MainWindow::setAutoCqEnabled);
     const int savedRunMode =
-        qBound(0, QSettings().value(QStringLiteral("operating/runMode"), 0).toInt(), 1);
+        qBound(0, LogSettings(m_repository).value(QStringLiteral("operating/runMode"), 0).toInt(), 1);
     runModeGroup->actions().at(savedRunMode)->setChecked(true);
     auto *radioMenu = menuBar()->addMenu(tr("&Radio"));
-    auto *settingsMenu = menuBar()->addMenu(tr("&Options"));
-    auto *networkAction = settingsMenu->addAction(tr("Central network connection..."));
+    auto *settingsMenu = menuBar()->addMenu(tr("Op&tions"));
+    auto *networkAction = settingsMenu->addAction(tr("Network operation..."));
     networkAction->setObjectName(QStringLiteral("configureNetworkConnectionAction"));
     connect(networkAction, &QAction::triggered,
             this, &MainWindow::configureNetworkConnection);
     m_hostModeAction =
-        settingsMenu->addAction(tr("Host central server on this station..."));
+        settingsMenu->addAction(tr("Start/stop network server..."));
     m_hostModeAction->setObjectName(QStringLiteral("configureHostModeAction"));
     connect(m_hostModeAction, &QAction::triggered,
             this, &MainWindow::configureHostMode);
@@ -1671,10 +1750,11 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         tr("Create central log / import local log..."));
     m_hostImportAction->setObjectName(QStringLiteral("hostImportLogAction"));
     m_hostImportAction->setEnabled(false);
+    m_hostImportAction->setVisible(false);
     connect(m_hostImportAction, &QAction::triggered,
             this, &MainWindow::importLocalLogToHost);
     auto *disconnectNetworkAction =
-        settingsMenu->addAction(tr("Disconnect central network"));
+        settingsMenu->addAction(tr("Disconnect network"));
     disconnectNetworkAction->setObjectName(
         QStringLiteral("disconnectNetworkConnectionAction"));
     connect(disconnectNetworkAction, &QAction::triggered,
@@ -1796,9 +1876,14 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             [saveColorScheme] { saveColorScheme(QStringLiteral("current")); });
     connect(monokaiPaletteAction, &QAction::triggered, this,
             [saveColorScheme] { saveColorScheme(QStringLiteral("monokai")); });
-    auto *operatorAction = settingsMenu->addAction(tr("&Operator and station..."));
+    auto *operatorAction = settingsMenu->addAction(tr("Operator and &station..."));
     connect(operatorAction, &QAction::triggered,
             this, &MainWindow::configureOperator);
+    auto *operatorCallsignAction = settingsMenu->addAction(tr("Operator callsign..."));
+    operatorCallsignAction->setObjectName(QStringLiteral("operatorCallsignAction"));
+    operatorCallsignAction->setShortcut(QKeySequence(QStringLiteral("Alt+O")));
+    connect(operatorCallsignAction, &QAction::triggered,
+            this, &MainWindow::configureOperatorCallsign);
     auto *functionKeysAction =
         settingsMenu->addAction(tr("CW function key messages..."));
     functionKeysAction->setObjectName(QStringLiteral("configureFunctionKeysAction"));
@@ -2069,12 +2154,13 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         supportDataMenu->addAction(tr("Download/update Master.SCP..."));
     downloadMasterScpAction->setObjectName(QStringLiteral("downloadMasterScpAction"));
     connect(downloadMasterScpAction, &QAction::triggered, this, [this] {
+        const QString logPath = m_repository.databasePath();
         auto *manager = new QNetworkAccessManager(this);
         const QUrl catalogUrl(QStringLiteral(
             "https://www.supercheckpartial.com/api/v1/files"));
         const QNetworkRequest catalogRequest = supportDataRequest(catalogUrl);
         issueNetworkRequest(this, manager, catalogRequest,
-                            [this, manager](QNetworkReply *catalogReply) {
+                            [this, manager, logPath](QNetworkReply *catalogReply) {
             const QString catalogError = networkReplyError(catalogReply);
             if (!catalogError.isEmpty()) {
                 manager->deleteLater();
@@ -2121,13 +2207,20 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             QNetworkRequest fileRequest = supportDataRequest(QUrl(
                 QStringLiteral("https://www.supercheckpartial.com/downloads/%1")
                     .arg(encodedName)));
-            if (cachedEtag == etag && QFileInfo::exists(cachePath)) {
+            if (!m_repository.isStandaloneLog()
+                && cachedEtag == etag && QFileInfo::exists(cachePath)) {
                 fileRequest.setRawHeader(
                     "If-None-Match", QByteArray("\"") + etag.toUtf8() + QByteArray("\""));
             }
             issueNetworkRequest(this, manager, fileRequest,
-                                [this, manager, fileName, etag, expectedSize]
+                                [this, manager, fileName, etag, expectedSize, logPath]
                                 (QNetworkReply *fileReply) {
+                if (m_repository.databasePath() != logPath) {
+                    manager->deleteLater();
+                    QMessageBox::warning(this, tr("Support data download"),
+                                         tr("The log changed. Downloaded data was not applied."));
+                    return;
+                }
                 const int status = fileReply->attribute(
                     QNetworkRequest::HttpStatusCodeAttribute).toInt();
                 if (status == 304) {
@@ -2181,6 +2274,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                     paths.append(path);
                 }
                 settings.setValue(QStringLiteral("supportData/masterCpyFiles"), paths);
+                if (!storeSupportAsset(supportAssetKey(QStringLiteral("support/master"), path), contents)) {
+                    manager->deleteLater();
+                    return;
+                }
                 loadSupportData();
                 manager->deleteLater();
                 statusBar()->showMessage(
@@ -2202,11 +2299,18 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         supportDataMenu->addAction(tr("Download/update wl_cty.dat..."));
     downloadCtyAction->setObjectName(QStringLiteral("downloadWlCtyAction"));
     connect(downloadCtyAction, &QAction::triggered, this, [this] {
+        const QString logPath = m_repository.databasePath();
         auto *manager = new QNetworkAccessManager(this);
         const QNetworkRequest request = supportDataRequest(QUrl(
             QStringLiteral("https://www.country-files.com/cty/wl_cty.dat")));
         issueNetworkRequest(this, manager, request,
-                            [this, manager](QNetworkReply *reply) {
+                            [this, manager, logPath](QNetworkReply *reply) {
+            if (m_repository.databasePath() != logPath) {
+                manager->deleteLater();
+                QMessageBox::warning(this, tr("Support data download"),
+                                     tr("The log changed. Downloaded data was not applied."));
+                return;
+            }
             const QString downloadError = networkReplyError(reply);
             if (!downloadError.isEmpty()) {
                 manager->deleteLater();
@@ -2231,6 +2335,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
                 return;
             }
             QSettings().setValue(QStringLiteral("supportData/ctyDat"), path);
+            if (!storeSupportAsset(QStringLiteral("support/cty"), contents)) {
+                manager->deleteLater();
+                return;
+            }
             loadSupportData();
             manager->deleteLater();
             statusBar()->showMessage(
@@ -2248,14 +2356,16 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     toolbar->setMovable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
     toolbar->addWidget(new QLabel(tr(" Log: "), toolbar));
-    m_contestSelector = new QComboBox(toolbar);
+    m_contestSelector = new QComboBox(this);
     m_contestSelector->setObjectName(QStringLiteral("contestSelector"));
-    m_contestSelector->setMinimumContentsLength(30);
-    m_contestSelector->setMinimumWidth(260);
-    m_contestSelector->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    toolbar->addWidget(m_contestSelector);
+    m_contestSelector->hide();
     connect(m_contestSelector, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::selectContest);
+    m_openLogLabel = new QLabel(tr("no log"), toolbar);
+    m_openLogLabel->setObjectName(QStringLiteral("openLogLabel"));
+    m_openLogLabel->setMinimumWidth(260);
+    toolbar->addWidget(m_openLogLabel);
+    toolbar->addAction(openLogAction);
     toolbar->addSeparator();
     toolbar->addWidget(new QLabel(tr(" Active radio: "), toolbar));
     m_activeRadioSelector = new QComboBox(toolbar);
@@ -3061,6 +3171,10 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     updateStationLabel();
     loadContests();
     loadSupportData();
+    if (m_repository.isStandaloneLog()) {
+        setWindowFilePath(m_repository.databasePath());
+        m_openLogLabel->setToolTip(m_repository.databasePath());
+    }
     m_catStaleTimer = new QTimer(this);
     m_catStaleTimer->setInterval(1000);
     connect(m_catStaleTimer, &QTimer::timeout, this, [this] {
@@ -3099,7 +3213,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_retranslateUi = [this, fileMenu, newLogAction, contestMenu, operatingMenu,
                        radioMenu, settingsMenu, languageMenu, englishAction,
                        polishAction, colorPaletteMenu, currentPaletteAction,
-                       monokaiPaletteAction, operatorAction, radioAction,
+                       monokaiPaletteAction, operatorAction, operatorCallsignAction, radioAction,
                        radioBAction, clusterAction, undoQsoAction,
                        allowDupeLoggingAction, configureEsmAction,
                        exportCabrilloAction, exportAdifAction, tuneSelectedSpot,
@@ -3109,14 +3223,15 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         contestMenu->setTitle(tr("&Contest"));
         operatingMenu->setTitle(tr("O&perating"));
         radioMenu->setTitle(tr("&Radio"));
-        settingsMenu->setTitle(tr("&Options"));
+        settingsMenu->setTitle(tr("Op&tions"));
         languageMenu->setTitle(tr("Language"));
         englishAction->setText(tr("English"));
         polishAction->setText(tr("Polski"));
         colorPaletteMenu->setTitle(tr("Color palette"));
         currentPaletteAction->setText(tr("Current"));
         monokaiPaletteAction->setText(tr("Monokai"));
-        operatorAction->setText(tr("&Operator and station..."));
+        operatorAction->setText(tr("Operator and &station..."));
+        operatorCallsignAction->setText(tr("Operator callsign..."));
         radioAction->setText(tr("Radio A CAT settings..."));
         radioBAction->setText(tr("Radio B CAT settings..."));
         clusterAction->setText(tr("&DX cluster..."));
@@ -3212,6 +3327,11 @@ void MainWindow::recordNetworkContact()
 
 void MainWindow::updateNetworkOperatingState()
 {
+    if (m_hostServer) {
+        m_hostServer->setHostOperatingState(
+            m_bandSelectors[currentEntryContext()]->currentText().trimmed(),
+            m_modeSelectors[currentEntryContext()]->currentText().trimmed());
+    }
     if (!m_syncClient || m_activeEntryContext < 0 || m_activeEntryContext > 1
         || m_bandSelectors[m_activeEntryContext] == nullptr
         || m_modeSelectors[m_activeEntryContext] == nullptr) {
@@ -3224,6 +3344,9 @@ void MainWindow::updateNetworkOperatingState()
 
 void MainWindow::refreshNetworkStations()
 {
+    if (m_hostServer) {
+        updateNetworkOperatingState();
+    }
     if (m_networkStationsDock == nullptr || !m_networkStationsDock->isVisible()
         || m_networkStationsTable == nullptr || m_networkStationsStatus == nullptr) {
         return;
@@ -3239,20 +3362,6 @@ void MainWindow::refreshNetworkStations()
     }
     if (m_hostServer) {
         QJsonArray stations = m_hostServer->connectedStations(logUuid);
-        if (contest != nullptr && contest->logUuid == logUuid) {
-            const QString band =
-                m_bandSelectors[currentEntryContext()]->currentText().trimmed();
-            const QString mode =
-                m_modeSelectors[currentEntryContext()]->currentText().trimmed();
-            stations.append(QJsonObject{
-                {QStringLiteral("computer_name"), QHostInfo::localHostName()},
-                {QStringLiteral("station_callsign"), m_station.callsign},
-                {QStringLiteral("operating_band"), band},
-                {QStringLiteral("operating_mode"), mode},
-                {QStringLiteral("operating_state_updated_utc"),
-                 QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}
-            });
-        }
         showNetworkStations(stations);
         return;
     }
@@ -3322,7 +3431,8 @@ void MainWindow::showNetworkStations(const QJsonArray &stations)
 void MainWindow::autoStartNetworkClient()
 {
     QSettings settings;
-    if (!settings.value(QStringLiteral("network/client/autoStart"), false).toBool()) {
+    if (m_hostServer
+        || !settings.value(QStringLiteral("network/client/autoStart"), false).toBool()) {
         return;
     }
     const QString host =
@@ -3335,87 +3445,15 @@ void MainWindow::autoStartNetworkClient()
     QHostAddress serverAddress;
     if (host.isEmpty() || !serverAddress.setAddress(host)
         || port < 1 || port > 65535 || logUuid.isEmpty()
-        || stationUuid.isEmpty() || !error.isEmpty()) {
+        || stationUuid.isEmpty() || !error.isEmpty()
+        || !activeContest() || activeContest()->logUuid != logUuid) {
         statusBar()->showMessage(
             tr("Automatic network connection was not started: saved IP, port, "
                "log or station identity is invalid. %1").arg(error),
             15000);
         return;
     }
-    const QVector<Contest> logs = m_repository.contests(&error);
-    if (!error.isEmpty()
-        || std::none_of(logs.cbegin(), logs.cend(),
-            [&logUuid](const Contest &log) { return log.logUuid == logUuid; })) {
-        statusBar()->showMessage(
-            tr("Automatic network connection was not started: the selected local log "
-               "is unavailable."),
-            15000);
-        return;
-    }
-    if (!m_repository.setSynchronizationEnabled(logUuid, true, &error)) {
-        statusBar()->showMessage(
-            tr("Automatic network connection was not started: %1").arg(error), 15000);
-        return;
-    }
-    m_syncClient = std::make_unique<SyncClient>();
-    connect(m_syncClient.get(), &SyncClient::stateChanged, this,
-            [this](SyncClient::State state, const QString &message) {
-                if (state == SyncClient::State::Ready) {
-                    recordNetworkContact();
-                    updateNetworkOperatingState();
-                    refreshNetworkStations();
-                } else if (state == SyncClient::State::Disconnected
-                           || state == SyncClient::State::Error) {
-                    refreshNetworkStations();
-                }
-                if (!message.isEmpty()) {
-                    statusBar()->showMessage(message, 10000);
-                }
-            });
-    connect(m_syncClient.get(), &SyncClient::ready, this,
-            [this](const QString &, qint64, const QString &) {
-                QString syncError;
-                if (!m_syncClient->startSynchronization(m_repository, &syncError)) {
-                    statusBar()->showMessage(
-                        tr("Automatic synchronization could not start: %1").arg(syncError),
-                        15000);
-                }
-            });
-    connect(m_syncClient.get(), &SyncClient::responseReceived, this,
-            [this](const QString &requestId, const QString &type,
-                   const QJsonObject &payload) {
-                recordNetworkContact();
-                if (requestId == m_networkStationsRequestId) {
-                    m_networkStationsRequestId.clear();
-                    const QJsonValue connected =
-                        payload.value(QStringLiteral("connected_stations"));
-                    if (type == QStringLiteral("status") && connected.isArray()) {
-                        showNetworkStations(connected.toArray());
-                    }
-                }
-            });
-    connect(m_syncClient.get(), &SyncClient::requestFailed, this,
-            [this](const QString &requestId, const QString &code,
-                   const QString &message, bool) {
-                if (requestId == m_networkStationsRequestId) {
-                    m_networkStationsRequestId.clear();
-                    m_networkStationsStatus->setText(
-                        tr("Station list request failed: %1").arg(message));
-                }
-                statusBar()->showMessage(
-                    tr("Network request failed (%1): %2").arg(code, message), 15000);
-            });
-    SyncClientConfiguration configuration;
-    configuration.host = host;
-    configuration.port = static_cast<quint16>(port);
-    configuration.stationUuid = stationUuid;
-    configuration.computerName = QHostInfo::localHostName();
-    configuration.stationCallsign = m_station.callsign;
-    configuration.operatorName = m_station.operatorName;
-    configuration.trustedNetworkMode = true;
-    configuration.logUuid = logUuid;
-    m_syncClient->connectToServer(configuration);
-    updateNetworkOperatingState();
+    configureClientConnection(true);
 }
 
 void MainWindow::autoStartHostServer()
@@ -3441,28 +3479,35 @@ void MainWindow::autoStartHostServer()
         return;
     }
     auto repository = std::make_unique<CentralRepository>();
-    const QString dataDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("central-server"));
-    if (!repository->initialize(dataDirectory, &error)) {
+    const Contest *log = activeContest();
+    if (!log || !repository->attach(m_repository, &error)
+        || !m_repository.setHostedLog(log->logUuid, &error)) {
         statusBar()->showMessage(
             tr("Automatic server startup failed: %1").arg(error), 15000);
         return;
     }
     auto server = std::make_unique<SyncServer>(*repository);
-    if (!server->listenTrustedNetwork(address, static_cast<quint16>(port),
+    if (!server->hostOpenLog(log->logUuid, settings.value(
+            QStringLiteral("network/stationName"), QHostInfo::localHostName()).toString(),
+            &error)
+        || !server->listenTrustedNetwork(address, static_cast<quint16>(port),
                                      maximumConnections, &error)) {
+        m_repository.setHostedLog(QString());
         statusBar()->showMessage(
             tr("Automatic server startup failed: %1").arg(error), 15000);
         return;
     }
     m_hostRepository = std::move(repository);
+    m_hostRepository->setCtyPrefixes(m_ctyPrefixes);
     m_hostServer = std::move(server);
+    m_networkLogId = log->id;
+    connect(m_hostServer.get(), &SyncServer::logChanged,
+            this, &MainWindow::refreshRecentQsos);
     if (m_hostModeAction != nullptr) {
         m_hostModeAction->setText(tr("Stop central server on this station"));
     }
     if (m_hostImportAction != nullptr) {
-        m_hostImportAction->setEnabled(true);
+        m_hostImportAction->setEnabled(false);
     }
     statusBar()->showMessage(
         tr("Central server started automatically on port %1.").arg(port), 10000);
@@ -3590,6 +3635,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         m_hostServer.reset();
     }
     m_hostRepository.reset();
+    m_repository.setHostedLog(QString());
     QMainWindow::closeEvent(event);
 }
 
@@ -3600,7 +3646,8 @@ void MainWindow::configureHostMode()
         m_hostServer->close();
         m_hostServer.reset();
         m_hostRepository.reset();
-        m_hostModeAction->setText(tr("Host central server on this station..."));
+        m_repository.setHostedLog(QString());
+        m_hostModeAction->setText(tr("Start/stop network server..."));
         m_hostImportAction->setEnabled(false);
         statusBar()->showMessage(tr("Central server stopped on this station."), 5000);
         return;
@@ -3703,7 +3750,7 @@ void MainWindow::broadcastFullLogToN1mm()
         }
         int sentCount = 0;
         if (!m_n1mmBroadcaster.broadcastLog(
-                qsos, contest->name, m_station.operatorName, &sentCount, &error)) {
+                qsos, contest->name, operatorIdentity(), &sentCount, &error)) {
             QMessageBox::warning(this, tr("N1MM UDP broadcast incomplete"),
                                  tr("Sent %1 QSO datagrams before the local UDP error: %2")
                                      .arg(sentCount).arg(error));
@@ -3784,7 +3831,7 @@ void MainWindow::configureHostModeStart()
     QString error;
     QSettings settings;
     QDialog dialog(this);
-    dialog.setWindowTitle(tr("Host central server on this station"));
+    dialog.setWindowTitle(tr("Network server - open log"));
     auto *layout = new QVBoxLayout(&dialog);
     auto *form = new QFormLayout;
     auto *address = new QLineEdit(
@@ -3814,8 +3861,8 @@ void MainWindow::configureHostModeStart()
     auto *notice = new QLabel(
         tr("This server accepts any station that can reach the selected network "
            "interface. Traffic is not encrypted; use only on a trusted LAN/VPN. "
-           "Clients receive read/write access. The server database is stored in "
-           "the application data directory."),
+           "All client QSOs are saved directly in the currently open log. "
+           "Clients must open the same contest type."),
         &dialog);
     notice->setWordWrap(true);
     layout->addWidget(notice);
@@ -3837,18 +3884,24 @@ void MainWindow::configureHostModeStart()
         return;
     }
 
+    if (m_syncClient) {
+        disconnectNetworkConnection();
+    }
     auto repository = std::make_unique<CentralRepository>();
-    const QString centralDataDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("central-server"));
-    if (!repository->initialize(centralDataDirectory, &error)) {
+    const Contest *log = activeContest();
+    if (!log || !repository->attach(m_repository, &error)
+        || !m_repository.setHostedLog(log->logUuid, &error)) {
         QMessageBox::critical(this, tr("Unable to initialize central database"), error);
         return;
     }
     auto server = std::make_unique<SyncServer>(*repository);
-    if (!server->listenTrustedNetwork(
+    if (!server->hostOpenLog(log->logUuid, settings.value(
+            QStringLiteral("network/stationName"), QHostInfo::localHostName()).toString(),
+            &error)
+        || !server->listenTrustedNetwork(
             bindAddress, static_cast<quint16>(port->value()),
             maximumConnections->value(), &error)) {
+        m_repository.setHostedLog(QString());
         QMessageBox::critical(this, tr("Unable to start central server"), error);
         return;
     }
@@ -3859,18 +3912,24 @@ void MainWindow::configureHostModeStart()
                       maximumConnections->value());
     settings.setValue(QStringLiteral("network/host/autoStart"),
                       autoStartHost->isChecked());
+    settings.setValue(QStringLiteral("network/client/autoStart"), false);
     settings.sync();
     if (settings.status() != QSettings::NoError) {
         server->close();
+        m_repository.setHostedLog(QString());
         QMessageBox::critical(this, tr("Unable to save host settings"),
                               tr("The server has been stopped because its settings "
                                  "could not be saved."));
         return;
     }
     m_hostRepository = std::move(repository);
+    m_hostRepository->setCtyPrefixes(m_ctyPrefixes);
     m_hostServer = std::move(server);
+    m_networkLogId = log->id;
+    connect(m_hostServer.get(), &SyncServer::logChanged,
+            this, &MainWindow::refreshRecentQsos);
     m_hostModeAction->setText(tr("Stop hosted central server"));
-    m_hostImportAction->setEnabled(true);
+    m_hostImportAction->setEnabled(false);
     statusBar()->showMessage(
         tr("This station is hosting the central server on %1:%2.")
             .arg(bindAddress).arg(m_hostServer->serverPort()),
@@ -4293,6 +4352,63 @@ void MainWindow::importLocalLogToHost()
 
 void MainWindow::configureNetworkConnection()
 {
+    if (!activeContest()) {
+        QMessageBox::warning(this, tr("Network operation"), tr("Open a log first."));
+        return;
+    }
+    QSettings settings;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Network operation"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *role = new QComboBox(&dialog);
+    role->setObjectName(QStringLiteral("networkRoleSelector"));
+    role->addItem(tr("Server"), QStringLiteral("server"));
+    role->addItem(tr("Client"), QStringLiteral("client"));
+    role->setCurrentIndex(m_hostServer ? 0 : 1);
+    form->addRow(tr("Role:"), role);
+    auto *name = new QLineEdit(settings.value(
+        QStringLiteral("network/stationName"), QHostInfo::localHostName()).toString(), &dialog);
+    name->setObjectName(QStringLiteral("networkStationName"));
+    form->addRow(tr("Unique station name:"), name);
+    layout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const QString stationName = name->text().trimmed();
+    if (stationName.isEmpty() || stationName.size() > 255
+        || std::any_of(stationName.cbegin(), stationName.cend(), [](QChar c) {
+               return c.category() == QChar::Other_Control;
+           })) {
+        QMessageBox::warning(this, tr("Invalid station name"),
+                             tr("Enter a non-empty station name (up to 255 characters)."));
+        return;
+    }
+    settings.setValue(QStringLiteral("network/stationName"), stationName);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::critical(this, tr("Network operation"),
+                              tr("Unable to save the station name."));
+        return;
+    }
+    disconnectNetworkConnection();
+    if (m_hostServer) {
+        configureHostMode();
+    }
+    if (role->currentData().toString() == QStringLiteral("server")) {
+        configureHostModeStart();
+    } else {
+        configureClientConnection();
+    }
+}
+
+void MainWindow::configureClientConnection(bool automatic)
+{
     QString error;
     const QVector<Contest> contests = m_repository.contests(&error);
     if (!error.isEmpty()) {
@@ -4307,6 +4423,10 @@ void MainWindow::configureNetworkConnection()
     }
     QSettings settings;
     const Contest *active = activeContest();
+    if (!active) {
+        showOperatorMessage(tr("Open a log first."), true);
+        return;
+    }
     const QString defaultLogUuid = active != nullptr && !active->logUuid.isEmpty()
         ? active->logUuid
         : (connectableLogs.isEmpty() ? QString() : connectableLogs.first().logUuid);
@@ -4315,13 +4435,12 @@ void MainWindow::configureNetworkConnection()
     const quint16 savedPort = static_cast<quint16>(
         settings.value(QStringLiteral("network/client/port"), 7443).toInt());
     SyncConnectionDialog dialog(
-        connectableLogs,
+        QVector<Contest>{*active},
         savedHost, savedPort,
-        settings.value(QStringLiteral("network/client/logUuid"),
-                       defaultLogUuid).toString(),
+        defaultLogUuid,
         settings.value(QStringLiteral("network/client/autoStart"), false).toBool(),
         this);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (!automatic && dialog.exec() != QDialog::Accepted) {
         return;
     }
     if (dialog.autoStart() && (dialog.joinRemote() || dialog.createRemote())) {
@@ -4364,6 +4483,7 @@ void MainWindow::configureNetworkConnection()
     settings.setValue(QStringLiteral("network/client/host"), dialog.host());
     settings.setValue(QStringLiteral("network/client/port"), dialog.port());
     settings.setValue(QStringLiteral("network/client/autoStart"), dialog.autoStart());
+    settings.setValue(QStringLiteral("network/host/autoStart"), false);
     if (!dialog.joinRemote() && !dialog.createRemote()) {
         settings.setValue(QStringLiteral("network/client/logUuid"), dialog.logUuid());
     }
@@ -4392,6 +4512,25 @@ void MainWindow::configureNetworkConnection()
     }
     if (!m_syncClient) {
         m_syncClient = std::make_unique<SyncClient>();
+        m_networkLogId = active ? active->id : 0;
+        connect(m_syncClient.get(), &SyncClient::logBound, this,
+                [this](const QString &uuid) {
+                    QSettings settings;
+                    settings.setValue(QStringLiteral("network/client/logUuid"), uuid);
+                    settings.sync();
+                    if (settings.status() != QSettings::NoError) {
+                        showOperatorMessage(tr("Unable to save network settings"), true);
+                    }
+                    loadContests();
+                });
+        connect(m_syncClient.get(), &SyncClient::synchronizationFinished, this,
+                [this](int, int, qint64, bool success, const QString &detail) {
+                    if (success) {
+                        refreshRecentQsos();
+                    } else {
+                        showOperatorMessage(detail, true);
+                    }
+                });
         connect(m_syncClient.get(), &SyncClient::readOnlyChanged,
                 this, [this](bool readOnly) {
                     m_networkReadOnly = readOnly;
@@ -4988,6 +5127,10 @@ void MainWindow::configureNetworkConnection()
                 this, [this](const QString &requestId, const QString &type,
                              const QJsonObject &payload) {
                     recordNetworkContact();
+                    if (type == QStringLiteral("changes") || type == QStringLiteral("snapshot_page")
+                        || type == QStringLiteral("batch_result")) {
+                        refreshRecentQsos();
+                    }
                     if (requestId == m_networkStationsRequestId) {
                         m_networkStationsRequestId.clear();
                         const QJsonValue connected =
@@ -5441,10 +5584,12 @@ void MainWindow::configureNetworkConnection()
     configuration.host = dialog.host();
     configuration.port = dialog.port();
     configuration.stationUuid = stationUuid;
-    configuration.computerName = QHostInfo::localHostName();
+    configuration.computerName = settings.value(
+        QStringLiteral("network/stationName"), QHostInfo::localHostName()).toString();
     configuration.stationCallsign = m_station.callsign;
-    configuration.operatorName = m_station.operatorName;
+    configuration.operatorName = operatorIdentity();
     configuration.trustedNetworkMode = true;
+    configuration.useServerActiveLog = true;
     configuration.logUuid = dialog.joinRemote() || dialog.createRemote()
         ? QString() : dialog.logUuid();
     if (!definitionYaml.trimmed().isEmpty()) {
@@ -5525,6 +5670,10 @@ void MainWindow::completeRemoteLogMerge()
 
 void MainWindow::disconnectNetworkConnection()
 {
+    m_networkLogId = 0;
+    if (m_hostServer) {
+        configureHostMode();
+    }
     if (!m_syncClient) {
         statusBar()->showMessage(tr("No central network connection is active."), 5000);
         return;
@@ -6465,6 +6614,50 @@ void MainWindow::showNetworkStatus()
     dialog.exec();
 }
 
+QString MainWindow::operatorIdentity() const
+{
+    return m_operatorCallsign.isEmpty() ? m_station.operatorName : m_operatorCallsign;
+}
+
+void MainWindow::configureOperatorCallsign()
+{
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("operatorCallsignDialog"));
+    dialog.setWindowTitle(tr("Operator callsign"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *prompt = new QLabel(
+        tr("Operator callsign (A-Z, 0-9, /; leave empty to clear):"), &dialog);
+    prompt->setWordWrap(true);
+    layout->addWidget(prompt);
+    auto *edit = new QLineEdit(m_operatorCallsign, &dialog);
+    edit->setObjectName(QStringLiteral("activeOperatorCallsign"));
+    edit->setMaxLength(20);
+    edit->setPlaceholderText(m_station.callsign);
+    layout->addWidget(edit);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    const auto validate = [edit, buttons] {
+        const QString callsign = edit->text().trimmed().toUpper();
+        const bool valid = callsign.isEmpty()
+            || QRegularExpression(QStringLiteral("^[A-Z0-9/]{1,20}$"))
+                   .match(callsign).hasMatch();
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(valid);
+    };
+    connect(edit, &QLineEdit::textChanged, &dialog, validate);
+    validate();
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    edit->selectAll();
+    edit->setFocus();
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    m_operatorCallsign = edit->text().trimmed().toUpper();
+    LogSettings(m_repository).setValue(QStringLiteral("station/operatorCallsign"), m_operatorCallsign);
+    applyActiveLogStation();
+}
+
 void MainWindow::configureOperator()
 {
     OperatorDialog dialog(m_station, this);
@@ -6480,7 +6673,7 @@ void MainWindow::configureOperator()
     }
 
     m_defaultStation = updated;
-    QSettings settings;
+    LogSettings settings(m_repository);
     settings.beginGroup(QStringLiteral("station"));
     settings.setValue(QStringLiteral("callsign"), m_defaultStation.callsign);
     settings.setValue(QStringLiteral("operatorName"), m_defaultStation.operatorName);
@@ -6605,7 +6798,7 @@ void MainWindow::importLog()
         if (!imported.stationCallsign.isEmpty()) {
             station.callsign = imported.stationCallsign;
         }
-        NewLogDialog dialog(options, station, logNames(), this);
+        NewLogDialog dialog(options, station, {}, this);
         for (const auto &option : options) {
             if (option.definition.id.compare(imported.contestCode, Qt::CaseInsensitive) == 0
                 || (!option.definition.cabrilloContest.isEmpty()
@@ -6670,14 +6863,14 @@ void MainWindow::importLog()
         showOperatorMessage(tr("This station has read-only access to the log."), true);
         return;
     }
+    if (createNew) {
+        if (createLogFile(target, selected, sentValues, preview.qsos)) {
+            showOperatorMessage(tr("Imported %1 QSOs; skipped %2 identical records.")
+                                    .arg(preview.qsos.size()).arg(preview.skipped));
+        }
+        return;
+    }
     if (!m_repository.withTransaction([&](QString *operationError) {
-            if (createNew) {
-                target.id = m_repository.createContestLog(
-                    selected.definition, selected.yaml, target, operationError);
-                if (target.id <= 0) {
-                    return false;
-                }
-            }
             for (Qso &qso : preview.qsos) {
                 qso.contestId = target.id;
                 if (!m_repository.saveQso(qso, operationError)) {
@@ -6688,12 +6881,6 @@ void MainWindow::importLog()
         }, &error)) {
         QMessageBox::critical(this, tr("Import failed — no records saved"), error);
         return;
-    }
-    if (createNew) {
-        saveSentExchangeValues(target.id, sentValues);
-        QSettings().setValue(QStringLiteral("session/activeContestId"), target.id);
-        loadContests();
-        m_contestSelector->setCurrentIndex(m_contestSelector->findData(target.id));
     }
     refreshRecentQsos();
     updateSerialFields();
@@ -7118,7 +7305,7 @@ bool MainWindow::sendCwTemplate(QString message, int context, QString *problem,
     QMap<QString, QString> macros;
     macros.insert(QStringLiteral("CALL"), callsign.toUpper());
     macros.insert(QStringLiteral("MYCALL"), m_station.callsign.toUpper());
-    macros.insert(QStringLiteral("OPERATOR"), m_station.operatorName);
+    macros.insert(QStringLiteral("OPERATOR"), operatorIdentity());
     macros.insert(QStringLiteral("WPM"), QString::number(m_cwWpm));
     macros.insert(QStringLiteral("SERIAL"), serialValue);
     macros.insert(QStringLiteral("NR"), serialValue);
@@ -7171,10 +7358,10 @@ QString MainWindow::esmSequenceForContest(const QString &stage,
 {
     const Contest *contest = activeContest();
     if (contest == nullptr) {
-        return functionKeyText(fallbackFunctionKey);
+        return functionKeyText(m_repository, fallbackFunctionKey);
     }
     const QString key = QStringLiteral("cw/esm/%1/%2").arg(contest->id).arg(stage);
-    return QSettings().value(key, functionKeyText(fallbackFunctionKey)).toString();
+    return LogSettings(m_repository).value(key, functionKeyText(m_repository, fallbackFunctionKey)).toString();
 }
 
 void MainWindow::sendFunctionKey(int index)
@@ -7192,7 +7379,7 @@ bool MainWindow::sendFunctionKeyForContext(int index, int context)
     }
     context = qBound(0, context, 1);
     const QString mode = m_modeSelectors[context]->currentText().trimmed().toUpper();
-    const QString label = functionKeyLabel(index);
+    const QString label = functionKeyLabel(m_repository, index);
     if (mode != QStringLiteral("CW")) {
         showOperatorMessage(
             tr("F%1 %2: function-key messages are sent in CW only (entry mode is %3)")
@@ -7201,7 +7388,7 @@ bool MainWindow::sendFunctionKeyForContext(int index, int context)
         return false;
     }
     QString problem;
-    if (!sendCwTemplate(functionKeyText(index), context, &problem)) {
+    if (!sendCwTemplate(functionKeyText(m_repository, index), context, &problem)) {
         showOperatorMessage(tr("F%1 %2 not sent: %3").arg(index + 1).arg(label, problem),
                             true);
         return false;
@@ -7213,6 +7400,9 @@ bool MainWindow::sendFunctionKeyForContext(int index, int context)
 void MainWindow::handleEntryEnter(int vfo, bool callsignField)
 {
     vfo = qBound(0, vfo, 1);
+    if (callsignField && tuneFrequencyFromCallsign(vfo)) {
+        return;
+    }
     const bool esmEnabled = m_esmAction->isChecked()
         && m_modeSelectors[vfo]->currentText().compare(
                QStringLiteral("CW"), Qt::CaseInsensitive) == 0;
@@ -7263,7 +7453,7 @@ void MainWindow::setRunMode(int mode)
             m_runFrequencies[radio] = connectedVfoFrequencies(m_radioSnapshots[radio]);
         }
     }
-    QSettings().setValue(QStringLiteral("operating/runMode"), mode);
+    LogSettings(m_repository).setValue(QStringLiteral("operating/runMode"), mode);
     {
         const QSignalBlocker blocker(m_runModeSelector);
         m_runModeSelector->setCurrentIndex(m_runModeSelector->findData(mode));
@@ -7325,7 +7515,7 @@ void MainWindow::editFunctionKey(int index)
     bool ok = false;
     const QString label = QInputDialog::getText(
         this, tr("F%1 message").arg(index + 1), tr("Button label:"),
-        QLineEdit::Normal, functionKeyLabel(index), &ok);
+        QLineEdit::Normal, functionKeyLabel(m_repository, index), &ok);
     if (!ok) {
         return;
     }
@@ -7333,11 +7523,11 @@ void MainWindow::editFunctionKey(int index)
         this, tr("F%1 message").arg(index + 1),
         tr("CW text ({CALL}, {MYCALL}, {OPERATOR}, {WPM}, {SERIAL}, {NR}, "
            "{SENT} and sent-field macros are supported):"),
-        QLineEdit::Normal, functionKeyText(index), &ok);
+        QLineEdit::Normal, functionKeyText(m_repository, index), &ok);
     if (!ok) {
         return;
     }
-    QSettings settings;
+    LogSettings settings(m_repository);
     settings.setValue(QStringLiteral("cw/functionKeys/F%1/label").arg(index + 1),
                       label.trimmed());
     settings.setValue(QStringLiteral("cw/functionKeys/F%1/text").arg(index + 1),
@@ -7369,9 +7559,9 @@ void MainWindow::configureFunctionKeys()
     QPlainTextEdit *messages[8]{};
     for (int key = 0; key < 8; ++key) {
         auto *keyLabel = new QLabel(QStringLiteral("F%1").arg(key + 1), &dialog);
-        labels[key] = new QLineEdit(functionKeyLabel(key), &dialog);
+        labels[key] = new QLineEdit(functionKeyLabel(m_repository, key), &dialog);
         labels[key]->setObjectName(QStringLiteral("functionKeyLabel%1").arg(key + 1));
-        messages[key] = new QPlainTextEdit(functionKeyText(key), &dialog);
+        messages[key] = new QPlainTextEdit(functionKeyText(m_repository, key), &dialog);
         messages[key]->setObjectName(QStringLiteral("functionKeyMessage%1").arg(key + 1));
         messages[key]->setTabChangesFocus(true);
         messages[key]->setFixedHeight(48);
@@ -7405,7 +7595,7 @@ void MainWindow::configureFunctionKeys()
             }
         }
 
-        QSettings settings;
+        LogSettings settings(m_repository);
         for (int key = 0; key < 8; ++key) {
             const QString group =
                 QStringLiteral("cw/functionKeys/F%1/").arg(key + 1);
@@ -7433,7 +7623,7 @@ void MainWindow::configureEsmMessages()
     }
 
     const QString settingsPrefix = QStringLiteral("cw/esm/%1/").arg(contest->id);
-    QSettings settings;
+    LogSettings settings(m_repository);
     QDialog dialog(this);
     dialog.setWindowTitle(tr("ESM messages — %1").arg(contest->name));
     dialog.setMinimumWidth(560);
@@ -7450,11 +7640,11 @@ void MainWindow::configureEsmMessages()
     auto *callMessages = new QPlainTextEdit(&dialog);
     callMessages->setObjectName(QStringLiteral("esmCallMessages"));
     callMessages->setPlainText(settings.value(
-        settingsPrefix + QStringLiteral("call"), functionKeyText(4)).toString());
+        settingsPrefix + QStringLiteral("call"), functionKeyText(m_repository, 4)).toString());
     auto *loggedMessages = new QPlainTextEdit(&dialog);
     loggedMessages->setObjectName(QStringLiteral("esmLoggedMessages"));
     loggedMessages->setPlainText(settings.value(
-        settingsPrefix + QStringLiteral("logged"), functionKeyText(2)).toString());
+        settingsPrefix + QStringLiteral("logged"), functionKeyText(m_repository, 2)).toString());
     form->addRow(tr("After Call Enter:"), callMessages);
     form->addRow(tr("After successful QSO:"), loggedMessages);
     layout->addLayout(form);
@@ -7477,8 +7667,8 @@ void MainWindow::configureEsmMessages()
 void MainWindow::updateFunctionKeyButtons()
 {
     for (int key = 0; key < 8; ++key) {
-        const QString label = functionKeyLabel(key);
-        const QString text = functionKeyText(key);
+        const QString label = functionKeyLabel(m_repository, key);
+        const QString text = functionKeyText(m_repository, key);
         m_functionKeyButtons[key]->setText(QStringLiteral("F%1  %2").arg(key + 1).arg(label));
         m_functionKeyButtons[key]->setToolTip(
             tr("%1\nRight-click to edit.").arg(text));
@@ -7674,6 +7864,9 @@ void MainWindow::selectContest(int index)
         }
         applyActiveLogStation();
         m_activeContestLabel->setText(tr("No log is available."));
+        if (m_openLogLabel != nullptr) {
+            m_openLogLabel->setText(tr("no log"));
+        }
         rebuildQsoForm();
         refreshRecentQsos();
         refreshBandmap();
@@ -7681,6 +7874,14 @@ void MainWindow::selectContest(int index)
     }
 
     const Contest &contest = m_contests.at(index);
+    if (m_networkLogId != 0 && contest.id != m_networkLogId) {
+        disconnectNetworkConnection();
+        if (m_hostServer) {
+            configureHostMode();
+        }
+        m_networkLogId = 0;
+        statusBar()->showMessage(tr("Network stopped because the open log changed."), 10000);
+    }
     QSettings settings;
     if (settings.value(QStringLiteral("session/activeContestId")).toLongLong()
         != contest.id) {
@@ -7692,6 +7893,10 @@ void MainWindow::selectContest(int index)
         }
     }
     settings.setValue(QStringLiteral("session/activeContestId"), contest.id);
+    if (m_openLogLabel != nullptr) {
+        m_openLogLabel->setText(contest.name);
+        m_openLogLabel->setToolTip(contest.description);
+    }
     applyActiveLogStation();
     const auto definition = m_definitions.constFind(contest.id);
     if (definition == m_definitions.cend()) {
@@ -7834,6 +8039,27 @@ bool MainWindow::newLogOptions(QVector<NewLogContestOption> *result, QString *er
         optionIndexById.insert(id, static_cast<int>(options.size()));
         options.append({file.definition, file.yaml, file.path});
     }
+    if (m_repository.isStandaloneLog()) {
+        const auto assets = m_repository.logAssets(error);
+        if (error != nullptr && !error->isEmpty()) {
+            return false;
+        }
+        for (auto it = assets.cbegin(); it != assets.cend(); ++it) {
+            if (!it.key().startsWith(QLatin1String("definitions/"))) {
+                continue;
+            }
+            ContestDefinition definition;
+            const QString yaml = QString::fromUtf8(it.value());
+            if (!ContestDefinitionLoader().loadText(yaml, it.key(), definition, error)) {
+                return false;
+            }
+            const QString id = definition.id.toUpper();
+            if (!optionIndexById.contains(id)) {
+                optionIndexById.insert(id, static_cast<int>(options.size()));
+                options.append({definition, yaml, tr("installed")});
+            }
+        }
+    }
     for (const Contest &contest : m_contests) {
         const auto definition = m_definitions.constFind(contest.id);
         if (definition == m_definitions.cend()) {
@@ -7872,27 +8098,170 @@ void MainWindow::createNewLog()
         QMessageBox::critical(this, tr("Unable to load contest definition"), error);
         return;
     }
-    NewLogDialog dialog(options, m_defaultStation, logNames(), this);
+    NewLogDialog dialog(options, m_defaultStation, {}, this);
     if (dialog.exec() != QDialog::Accepted || dialog.selectedOption() == nullptr) {
         return;
     }
-    const NewLogContestOption selected = *dialog.selectedOption();
-    const Contest log = dialog.log();
-    const qint64 newId =
-        m_repository.createContestLog(selected.definition, selected.yaml, log, &error);
-    if (newId <= 0) {
-        QMessageBox::critical(this, tr("Unable to create log"), error);
+    createLogFile(dialog.log(), *dialog.selectedOption(), dialog.sentExchange());
+}
+
+void MainWindow::openLog()
+{
+    QFileDialog dialog(this, tr("Open log"));
+    dialog.setObjectName(QStringLiteral("openLogFileDialog"));
+    dialog.setNameFilter(tr("Log databases (*.sqlite);;All files (*)"));
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setDirectory(QSettings().value(QStringLiteral("session/logDirectory"),
+                                          QDir::homePath()).toString());
+    if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    saveSentExchangeValues(newId, dialog.sentExchange());
-    QSettings().setValue(QStringLiteral("session/activeContestId"), newId);
-    loadContests();
-    const int created = m_contestSelector->findData(newId);
-    if (created >= 0 && m_contestSelector->currentIndex() != created) {
-        m_contestSelector->setCurrentIndex(created);
+    const QString path = dialog.selectedFiles().first();
+    if (m_repository.isStandaloneLog()
+        && QFileInfo(path).canonicalFilePath()
+            == QFileInfo(m_repository.databasePath()).canonicalFilePath()) {
+        return;
     }
-    statusBar()->showMessage(
-        tr("New log created: %1 (%2)").arg(log.name, log.stationCallsign), 5000);
+    SqliteRepository candidate{QSqlDatabase()};
+    QString error;
+    if (!candidate.openLogFile(path, &error)) {
+        QMessageBox::critical(this, tr("Unable to open log"), error);
+        return;
+    }
+    if (!backupLogIfDue(candidate, &error)) {
+        QMessageBox::critical(this, tr("Automatic database backup failed"), error);
+        return;
+    }
+    activateLogFile(candidate);
+}
+
+QString MainWindow::chooseNewLogPath(const QString &name)
+{
+    QString safeName = name;
+    safeName.replace(QRegularExpression(QStringLiteral("[<>:\"/\\\\|?*\\x00-\\x1f]")),
+                     QStringLiteral("_"));
+    QFileDialog dialog(this, tr("Save new log"));
+    dialog.setObjectName(QStringLiteral("newLogFileDialog"));
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setNameFilter(tr("Log databases (*.sqlite)"));
+    dialog.setDefaultSuffix(QStringLiteral("sqlite"));
+    dialog.setOption(QFileDialog::DontConfirmOverwrite);
+    dialog.setDirectory(QSettings().value(QStringLiteral("session/logDirectory"),
+                                          QDir::homePath()).toString());
+    dialog.selectFile(safeName + QStringLiteral(".sqlite"));
+    return dialog.exec() == QDialog::Accepted ? dialog.selectedFiles().first() : QString();
+}
+
+bool MainWindow::createLogFile(Contest log, const NewLogContestOption &option,
+                               const QMap<QString, QString> &sentValues,
+                               const QVector<Qso> &qsos)
+{
+    const QString path = chooseNewLogPath(log.name);
+    if (path.isEmpty()) {
+        return false;
+    }
+    QString error;
+    QMap<QString, QByteArray> assets;
+    if (!supportDataAssets(&assets, &error)) {
+        QMessageBox::critical(this, tr("Unable to create log"), error);
+        return false;
+    }
+    QVector<NewLogContestOption> definitions;
+    if (!newLogOptions(&definitions, &error)) {
+        QMessageBox::critical(this, tr("Unable to create log"), error);
+        return false;
+    }
+    for (const auto &definition : definitions) {
+        assets.insert(QStringLiteral("definitions/%1").arg(definition.definition.id),
+                      definition.yaml.toUtf8());
+    }
+    assets.insert(QStringLiteral("definitions/%1").arg(option.definition.id), option.yaml.toUtf8());
+    QVariantMap settings;
+    if (m_repository.isStandaloneLog()) {
+        settings = m_repository.logSettings(&error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to create log"), error);
+            return false;
+        }
+    } else {
+        QSettings defaults;
+        for (const QString &key : defaults.allKeys()) {
+            if (isLogSetting(key) && !key.startsWith(QLatin1String("contest/"))
+                && !key.startsWith(QLatin1String("cw/esm/"))) {
+                settings.insert(key, defaults.value(key));
+            }
+        }
+    }
+    // New files start with contest id 1; never inherit another log's sent exchange.
+    for (auto it = settings.begin(); it != settings.end();) {
+        if (it.key().startsWith(QLatin1String("contest/"))
+            || it.key().startsWith(QLatin1String("cw/esm/"))) {
+            it = settings.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = sentValues.cbegin(); it != sentValues.cend(); ++it) {
+        for (int vfo = 0; vfo < 2; ++vfo) {
+            settings.insert(QStringLiteral("contest/sentExchange/1/%1/vfo%2")
+                                .arg(it.key()).arg(vfo), it.value());
+        }
+    }
+    SqliteRepository candidate{QSqlDatabase()};
+    if (!candidate.createLogFile(path, option.definition, option.yaml, log,
+                                  settings, assets, qsos, &error)) {
+        QMessageBox::critical(this, tr("Unable to create log"), error);
+        return false;
+    }
+    activateLogFile(candidate);
+    return true;
+}
+
+void MainWindow::activateLogFile(SqliteRepository &candidate)
+{
+    abortCwTransmission();
+    disconnectNetworkConnection();
+    m_syncClient.reset();
+    m_networkLogId = 0;
+    m_networkReadOnly = false;
+    m_joiningRemoteLog = false;
+    m_creatingRemoteLog = false;
+    m_mergingRemoteLog = false;
+    m_pendingRemoteContest = {};
+    m_pendingRemoteDefinitionYaml.clear();
+    m_pendingSerialHistoryRequestId.clear();
+    m_pendingAdminSerialRequestId.clear();
+    m_pendingSerialAdjustmentRequestId.clear();
+    for (int vfo = 0; vfo < 2; ++vfo) {
+        wipeEntry(vfo);
+        m_serialReservationUuids[vfo].clear();
+        m_serialReservationBands[vfo].clear();
+        m_serialReservationModes[vfo].clear();
+        m_serialReservationSerials[vfo].clear();
+    }
+    m_repository.swap(candidate);
+    m_logQsos.clear();
+    loadOperator();
+    loadSupportData();
+    loadContests();
+    updateFunctionKeyButtons();
+    refreshNetworkStations();
+    LogSettings settings(m_repository);
+    {
+        const QSignalBlocker blocker(m_esmAction);
+        m_esmAction->setChecked(settings.value(QStringLiteral("operating/esmEnabled"), false).toBool());
+    }
+    if (auto *action = findChild<QAction *>(QStringLiteral("allowDupeLoggingAction"))) {
+        const QSignalBlocker blocker(action);
+        action->setChecked(settings.value(QStringLiteral("operating/allowDupeLogging"), false).toBool());
+    }
+    setRunMode(settings.value(QStringLiteral("operating/runMode"), 0).toInt());
+    setWindowFilePath(m_repository.databasePath());
+    m_openLogLabel->setToolTip(m_repository.databasePath());
+    QSettings global;
+    global.setValue(QStringLiteral("session/logFile"), m_repository.databasePath());
+    global.setValue(QStringLiteral("session/logDirectory"), QFileInfo(m_repository.databasePath()).absolutePath());
+    statusBar()->showMessage(tr("Opened log: %1").arg(m_repository.databasePath()), 5000);
 }
 
 void MainWindow::editLogProperties()
@@ -7906,7 +8275,7 @@ void MainWindow::editLogProperties()
     NewLogContestOption option;
     QMap<QString, QString> sentValues;
     const auto definition = m_definitions.constFind(contest->id);
-    QSettings settings;
+    LogSettings settings(m_repository);
     if (definition != m_definitions.cend()) {
         option.definition = definition.value();
         option.source = contest->code;
@@ -7929,6 +8298,9 @@ void MainWindow::editLogProperties()
         current.stationCallsign = m_station.callsign;
     }
     NewLogDialog dialog(option, current, sentValues, logNames(contest->id), this);
+    if (m_repository.isStandaloneLog()) {
+        dialog.findChild<QLineEdit *>(QStringLiteral("newLogName"))->setReadOnly(true);
+    }
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -7947,7 +8319,7 @@ void MainWindow::editLogProperties()
 void MainWindow::saveSentExchangeValues(qint64 contestId,
                                         const QMap<QString, QString> &values)
 {
-    QSettings settings;
+    LogSettings settings(m_repository);
     for (auto it = values.cbegin(); it != values.cend(); ++it) {
         for (int vfo = 0; vfo < 2; ++vfo) {
             settings.setValue(QStringLiteral("contest/sentExchange/%1/%2/vfo%3")
@@ -7991,7 +8363,7 @@ void MainWindow::applyActiveLogStation()
     }
     updateStationLabel();
     if (m_syncClient) {
-        m_syncClient->setStationIdentity(m_station.callsign, m_station.operatorName);
+        m_syncClient->setStationIdentity(m_station.callsign, operatorIdentity());
     }
     updateSentExchangeVisibility(0);
     updateSentExchangeVisibility(1);
@@ -8050,36 +8422,12 @@ void MainWindow::importContestDefinition()
         return;
     }
 
-    const QStringList installedCodes = m_repository.contestDefinitionCodes(&error);
-    if (!error.isEmpty()) {
-        QMessageBox::critical(this, tr("Unable to inspect contest definitions"), error);
-        return;
-    }
-    const QString code = definition.id.toUpper();
-    if (installedCodes.contains(code)
-        && QMessageBox::question(
-               this, tr("Replace contest definition?"),
-               tr("A definition with ID '%1' is already installed. Replace it?")
-                   .arg(definition.id))
-            != QMessageBox::Yes) {
-        return;
-    }
-
-    if (!storeContestDefinitionFile(yaml, &error)
-        || !m_repository.saveContestDefinition(definition, yaml, &error)) {
+    if (!storeContestDefinitionFile(yaml, &error)) {
         QMessageBox::critical(this, tr("Unable to import definition"), error);
         return;
     }
-    loadContests();
-    int index = -1;
-    for (const Contest &contest : m_contests) {
-        if (contest.code == code) {
-            index = m_contestSelector->findData(contest.id);
-            break;
-        }
-    }
-    if (index >= 0) {
-        m_contestSelector->setCurrentIndex(index);
+    if (!storeSupportAsset(QStringLiteral("definitions/%1").arg(definition.id), yaml.toUtf8())) {
+        return;
     }
     statusBar()->showMessage(tr("Imported contest: %1").arg(definition.name), 5000);
 }
@@ -8114,21 +8462,12 @@ void MainWindow::restoreContestDefinitionVersion()
         != QMessageBox::Yes) {
         return;
     }
-    if (!storeContestDefinitionFile(yaml, &error)
-        || !m_repository.saveContestDefinition(definition, yaml, &error)) {
+    if (!storeContestDefinitionFile(yaml, &error)) {
         QMessageBox::critical(this, tr("Unable to restore definition version"), error);
         return;
     }
-    loadContests();
-    const QString code = definition.id.toUpper();
-    for (const Contest &contest : m_contests) {
-        if (contest.code == code) {
-            const int index = m_contestSelector->findData(contest.id);
-            if (index >= 0) {
-                m_contestSelector->setCurrentIndex(index);
-            }
-            break;
-        }
+    if (!storeSupportAsset(QStringLiteral("definitions/%1").arg(definition.id), yaml.toUtf8())) {
+        return;
     }
     statusBar()->showMessage(tr("Restored contest definition: %1")
                                  .arg(definition.name), 5000);
@@ -8148,11 +8487,15 @@ void MainWindow::importCallHistory()
                               QStringLiteral("%1: %2").arg(path, file.errorString()));
         return;
     }
+    const QByteArray contents = file.readAll();
     QHash<QString, CallHistoryEntry> imported;
     QString error;
     if (!SupportDataParser::parseCallHistory(
-            QString::fromUtf8(file.readAll()), imported, &error)) {
+            QString::fromUtf8(contents), imported, &error)) {
         QMessageBox::critical(this, tr("Invalid call history"), error);
+        return;
+    }
+    if (!storeSupportAsset(supportAssetKey(QStringLiteral("support/history"), path), contents)) {
         return;
     }
     for (auto it = imported.cbegin(); it != imported.cend(); ++it) {
@@ -8186,11 +8529,15 @@ void MainWindow::importMasterCpy()
                               QStringLiteral("%1: %2").arg(path, file.errorString()));
         return;
     }
+    const QByteArray contents = file.readAll();
     QStringList imported;
     QString error;
     if (!SupportDataParser::parseMasterCpy(
-            QString::fromUtf8(file.readAll()), imported, &error)) {
+            QString::fromUtf8(contents), imported, &error)) {
         QMessageBox::critical(this, tr("Invalid master.cpy"), error);
+        return;
+    }
+    if (!storeSupportAsset(supportAssetKey(QStringLiteral("support/master"), path), contents)) {
         return;
     }
     QSet<QString> known(m_masterCallsigns.cbegin(), m_masterCallsigns.cend());
@@ -8235,14 +8582,21 @@ void MainWindow::importCtyDat()
                               QStringLiteral("%1: %2").arg(path, file.errorString()));
         return;
     }
+    const QByteArray contents = file.readAll();
     QVector<CtyPrefixEntry> imported;
     QString error;
     if (!SupportDataParser::parseCtyDat(
-            QString::fromUtf8(file.readAll()), imported, &error)) {
+            QString::fromUtf8(contents), imported, &error)) {
         QMessageBox::critical(this, tr("Invalid wl_cty.dat"), error);
         return;
     }
+    if (!storeSupportAsset(QStringLiteral("support/cty"), contents)) {
+        return;
+    }
     m_ctyPrefixes = std::move(imported);
+    if (m_hostRepository) {
+        m_hostRepository->setCtyPrefixes(m_ctyPrefixes);
+    }
     m_ctyCache.clear();
     refreshRecentQsos();
     QSettings().setValue(QStringLiteral("supportData/ctyDat"), path);
@@ -8257,8 +8611,7 @@ void MainWindow::importCtyDat()
 
 void MainWindow::restoreSupportDataVersion()
 {
-    const QString historyDirectory = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+    const QString historyDirectory = QDir(applicationDataDirectory())
         .filePath(QStringLiteral("support-data-versions"));
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Restore downloaded support data"), historyDirectory,
@@ -8318,9 +8671,71 @@ void MainWindow::restoreSupportDataVersion()
             tr("The restored file was saved, but its active path could not be stored."));
         return;
     }
+    if (!storeSupportAsset(supportAssetKey(
+            fileName == QLatin1String("master.scp") ? QStringLiteral("support/master")
+                                                   : QStringLiteral("support/cty"),
+            restoredPath), contents)) {
+        return;
+    }
     loadSupportData();
     refreshRecentQsos();
     statusBar()->showMessage(tr("Restored support data: %1").arg(fileName), 5000);
+}
+
+bool MainWindow::supportDataAssets(QMap<QString, QByteArray> *assets, QString *error) const
+{
+    error->clear();
+    if (m_repository.isStandaloneLog()) {
+        *assets = m_repository.logAssets(error);
+        return error->isEmpty();
+    }
+    QSettings settings;
+    const auto addFiles = [&](const QString &prefix, QStringList paths) {
+        paths.removeDuplicates();
+        for (const QString &path : paths) {
+            if (path.isEmpty()) {
+                continue;
+            }
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) {
+                *error = QStringLiteral("%1: %2").arg(path, file.errorString());
+                return false;
+            }
+            const QByteArray contents = file.readAll();
+            if (file.error() != QFileDevice::NoError) {
+                *error = QStringLiteral("%1: %2").arg(path, file.errorString());
+                return false;
+            }
+            assets->insert(supportAssetKey(prefix, path), contents);
+        }
+        return true;
+    };
+    auto history = settings.value(QStringLiteral("supportData/callHistoryFiles")).toStringList();
+    if (history.isEmpty()) {
+        history.append(settings.value(QStringLiteral("supportData/callHistory")).toString());
+    }
+    auto master = settings.value(QStringLiteral("supportData/masterCpyFiles")).toStringList();
+    if (master.isEmpty()) {
+        master.append(settings.value(QStringLiteral("supportData/masterCpy")).toString());
+    }
+    master.append(settings.value(QStringLiteral("supportData/masterScpPath")).toString());
+    return addFiles(QStringLiteral("support/history"), history)
+        && addFiles(QStringLiteral("support/master"), master)
+        && addFiles(QStringLiteral("support/cty"),
+                    {settings.value(QStringLiteral("supportData/ctyDat")).toString()});
+}
+
+bool MainWindow::storeSupportAsset(const QString &key, const QByteArray &contents)
+{
+    if (!m_repository.isStandaloneLog()) {
+        return true;
+    }
+    QString error;
+    if (!m_repository.setLogAsset(key, contents, &error)) {
+        QMessageBox::critical(this, tr("Unable to save log data"), error);
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::loadSupportData()
@@ -8328,7 +8743,46 @@ void MainWindow::loadSupportData()
     m_callHistory.clear();
     m_masterCallsigns.clear();
     m_ctyPrefixes.clear();
+    if (m_hostRepository) {
+        m_hostRepository->setCtyPrefixes(m_ctyPrefixes);
+    }
     m_ctyCache.clear();
+    if (m_repository.isStandaloneLog()) {
+        QString error;
+        const auto assets = m_repository.logAssets(&error);
+        if (!error.isEmpty()) {
+            QMessageBox::critical(this, tr("Unable to read log data"), error);
+            return;
+        }
+        for (auto it = assets.cbegin(); it != assets.cend(); ++it) {
+            const QString contents = QString::fromUtf8(it.value());
+            bool valid = true;
+            if (it.key().startsWith(QLatin1String("support/history/"))) {
+                QHash<QString, CallHistoryEntry> entries;
+                valid = SupportDataParser::parseCallHistory(contents, entries, &error);
+                for (auto entry = entries.cbegin(); entry != entries.cend(); ++entry) {
+                    m_callHistory.insert(entry.key(), entry.value());
+                }
+            } else if (it.key().startsWith(QLatin1String("support/master/"))) {
+                QStringList callsigns;
+                valid = SupportDataParser::parseMasterCpy(contents, callsigns, &error);
+                m_masterCallsigns.append(callsigns);
+            } else if (it.key() == QLatin1String("support/cty")) {
+                valid = SupportDataParser::parseCtyDat(contents, m_ctyPrefixes, &error);
+            }
+            if (!valid) {
+                QMessageBox::critical(this, tr("Invalid embedded support data"),
+                                      QStringLiteral("%1: %2").arg(it.key(), error));
+                return;
+            }
+        }
+        m_masterCallsigns.removeDuplicates();
+        rebuildCheckPartialIndex();
+        for (int vfo = 0; vfo < 2; ++vfo) {
+            updateCallLookup(vfo);
+        }
+        return;
+    }
     QSettings settings;
     const auto readFile = [this](const QString &path, QString &contents) {
         QFile file(path);
@@ -8403,6 +8857,9 @@ void MainWindow::loadSupportData()
         if (readFile(ctyPath, contents)) {
             if (SupportDataParser::parseCtyDat(contents, prefixes, &error)) {
                 m_ctyPrefixes = std::move(prefixes);
+                if (m_hostRepository) {
+                    m_hostRepository->setCtyPrefixes(m_ctyPrefixes);
+                }
                 m_ctyCache.clear();
                 if (!m_logQsos.isEmpty()) {
                     refreshRecentQsos();
@@ -8632,18 +9089,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 void MainWindow::loadBuiltInDefinitions()
 {
+    if (m_repository.isStandaloneLog()) {
+        return;
+    }
     QString error;
     if (!installBundledContestDefinitions(&error)) {
         QMessageBox::critical(this, tr("Unable to install example definition"), error);
         return;
     }
-    const QStringList installedCodes =
-        m_repository.contestDefinitionCodes(&error);
-    if (!error.isEmpty()) {
-        QMessageBox::critical(this, tr("Unable to inspect contest definitions"), error);
-        return;
-    }
-
     QVector<ContestDefinitionFile> files;
     if (!loadContestDefinitionFiles(&files, &error)) {
         QMessageBox::critical(this, tr("Invalid contest definition"), error);
@@ -8654,22 +9107,18 @@ void MainWindow::loadBuiltInDefinitions()
         if (!definition.cabrilloContest.isEmpty()) {
             m_builtInCabrilloContests.insert(definition.id, definition.cabrilloContest);
         }
-        if (installedCodes.contains(definition.id.toUpper())) {
-            continue;
-        }
-        if (!m_repository.saveContestDefinition(definition, file.yaml, &error)) {
-            QMessageBox::critical(this, tr("Unable to install example definition"), error);
-        }
     }
 }
 
 void MainWindow::loadOperator()
 {
-    QSettings settings;
+    LogSettings settings(m_repository);
     settings.beginGroup(QStringLiteral("station"));
     m_defaultStation.callsign = settings.value(QStringLiteral("callsign")).toString();
     m_defaultStation.operatorName =
         settings.value(QStringLiteral("operatorName")).toString();
+    m_operatorCallsign =
+        settings.value(QStringLiteral("operatorCallsign")).toString().trimmed().toUpper();
     m_defaultStation.grid = settings.value(QStringLiteral("grid")).toString();
     m_defaultStation.powerClass = settings.value(QStringLiteral("powerClass")).toString();
     m_defaultStation.email = settings.value(QStringLiteral("email")).toString();
@@ -8731,6 +9180,7 @@ void MainWindow::loadContests()
     }
     if (selectedIndex < 0) {
         m_activeContestLabel->setText(tr("No logs are defined."));
+        selectContest(-1);
     } else {
         selectContest(selectedIndex);
     }
@@ -8738,9 +9188,9 @@ void MainWindow::loadContests()
 
 void MainWindow::updateStationLabel()
 {
-    const QString operatorText = m_station.operatorName.isEmpty()
+    const QString operatorText = operatorIdentity().isEmpty()
         ? tr("Operator not configured")
-        : m_station.operatorName.toHtmlEscaped();
+        : operatorIdentity().toHtmlEscaped();
     const QString callsignText = m_station.callsign.isEmpty()
         ? tr("Callsign not set")
         : m_station.callsign.toHtmlEscaped();
@@ -8800,7 +9250,7 @@ void MainWindow::rebuildQsoForm(int vfo)
         return metrics.horizontalAdvance(QLatin1Char('W')) * qMax(characters, 3) + 14;
     };
     QWidget *panel = m_entryGroups[vfo];
-    QSettings settings;
+    LogSettings settings(m_repository);
     for (const ExchangeFieldDefinition &field : definition->sentExchange) {
         auto *edit = new QLineEdit;
         edit->setObjectName(QStringLiteral("sentExchange_%1").arg(field.name));
@@ -8863,8 +9313,8 @@ void MainWindow::rebuildQsoForm(int vfo)
         if (!(field.type == ExchangeFieldType::Serial && field.generated)) {
             installUppercase(edit);
             connect(edit, &QLineEdit::textChanged, this,
-                    [settingKey](const QString &value) {
-                        QSettings().setValue(settingKey, value);
+                    [this, settingKey](const QString &value) {
+                        LogSettings(m_repository).setValue(settingKey, value);
                     });
         }
         edit->installEventFilter(this);
@@ -8966,6 +9416,9 @@ QString MainWindow::exchangeDisplay(const QMap<QString, QString> &fields,
 
 void MainWindow::refreshRecentQsos()
 {
+    if (m_syncClient) {
+        m_syncClient->flushPendingChanges();
+    }
     m_recentQsos->setRowCount(0);
     m_logQsos.clear();
     m_workedMultiplierKeys.clear();
@@ -9342,8 +9795,8 @@ void MainWindow::updateTopStatus()
     QString text = QStringLiteral("%1z  %2%3  │  %4  │  QSO %5  PTS %6")
         .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("HH:mm:ss")) + cwSpeed,
              station,
-             m_station.operatorName.isEmpty()
-                 ? QString() : QStringLiteral(" (%1)").arg(m_station.operatorName),
+             operatorIdentity().isEmpty()
+                 ? QString() : QStringLiteral(" (%1)").arg(operatorIdentity()),
              contest)
         .arg(definition != nullptr
                  ? m_score.totalQsos
@@ -9577,9 +10030,9 @@ void MainWindow::cancelSerialForVfo(int vfo)
                             true);
         return;
     }
-    if (!m_syncClient || m_syncClient->state() != SyncClient::State::Ready
+    if (!m_hostServer && (!m_syncClient || m_syncClient->state() != SyncClient::State::Ready
         || QSettings().value(QStringLiteral("network/client/logUuid")).toString()
-            != contest->logUuid) {
+            != contest->logUuid)) {
         showOperatorMessage(
             tr("Connect to the central server for this log before cancelling the "
                "reservation."),
@@ -9601,6 +10054,21 @@ void MainWindow::cancelSerialForVfo(int vfo)
         return;
     }
 
+    if (m_hostServer) {
+        QString error;
+        const QString stationUuid = m_repository.localStationUuid(&error);
+        if (!error.isEmpty() || !m_hostRepository->cancelSerialReservation(
+                contest->logUuid, stationUuid, reservationUuid, false, &error)) {
+            showOperatorMessage(error, true);
+            return;
+        }
+        m_serialReservationUuids[vfo].clear();
+        m_serialReservationBands[vfo].clear();
+        m_serialReservationModes[vfo].clear();
+        m_serialReservationSerials[vfo].clear();
+        updateSerialFields();
+        return;
+    }
     const QString requestId = m_syncClient->cancelSerial(reservationUuid);
     if (requestId.isEmpty()) {
         showOperatorMessage(
@@ -9633,9 +10101,9 @@ void MainWindow::reserveSerialForVfo(int vfo)
                             true);
         return;
     }
-    if (!m_syncClient
+    if (!m_hostServer && (!m_syncClient
         || QSettings().value(QStringLiteral("network/client/logUuid")).toString()
-            != contest->logUuid) {
+            != contest->logUuid)) {
         showOperatorMessage(
             tr("Connect this log to its central server before requesting a serial."),
             true);
@@ -9689,7 +10157,7 @@ void MainWindow::reserveSerialForVfo(int vfo)
                 tr("A serial request for %1/%2 is already queued. No number is "
                    "allocated until the server confirms it.")
                     .arg(band, mode),
-                m_syncClient->state() != SyncClient::State::Ready);
+                !m_hostServer && m_syncClient->state() != SyncClient::State::Ready);
             return;
         }
     }
@@ -9732,6 +10200,21 @@ void MainWindow::reserveSerialForVfo(int vfo)
 
     const QString reservationUuid = QUuid::createUuid()
         .toString(QUuid::WithoutBraces).toLower();
+    if (m_hostServer) {
+        const QJsonObject reservation = m_hostRepository->reserveSerial(
+            contest->logUuid, stationUuid, reservationUuid, band, mode, &error);
+        if (!error.isEmpty() || reservation.isEmpty()) {
+            showOperatorMessage(tr("Unable to reserve serial: %1").arg(error), true);
+            return;
+        }
+        m_serialReservationUuids[vfo] = reservationUuid;
+        m_serialReservationBands[vfo] = band;
+        m_serialReservationModes[vfo] = mode;
+        m_serialReservationSerials[vfo] =
+            reservation.value(QStringLiteral("formatted_serial")).toString();
+        updateSerialFields();
+        return;
+    }
     m_serialReservationContexts.insert(reservationUuid, vfo);
     m_serialReservationPendingBands.insert(reservationUuid, band);
     m_serialReservationPendingModes.insert(reservationUuid, mode);
@@ -9806,6 +10289,24 @@ void MainWindow::wipeEntry(int context)
     }
     m_messageLine->clear();
     m_callsignEdits[context]->setFocus();
+}
+
+bool MainWindow::tuneFrequencyFromCallsign(int context)
+{
+    context = qBound(0, context, 1);
+    const std::optional<qint64> frequencyHz =
+        frequencyHzFromCallsignInput(m_callsignEdits[context]->text());
+    if (!frequencyHz.has_value()) {
+        return false;
+    }
+
+    const int radio = m_so2rToggle->isChecked()
+        ? context : m_activeRadioSelector->currentData().toInt();
+    const int radioVfo = m_so2rToggle->isChecked()
+        ? m_radioSnapshots[radio].focusVfo : context;
+    m_radioControllers[radio].setFrequency(*frequencyHz, radioVfo);
+    m_callsignEdits[context]->clear();
+    return true;
 }
 
 void MainWindow::rebuildCallCompleters()
@@ -10033,13 +10534,16 @@ void MainWindow::logQso()
 
 void MainWindow::logQsoForVfo(int vfo)
 {
+    vfo = qBound(0, vfo, 1);
+    if (tuneFrequencyFromCallsign(vfo)) {
+        return;
+    }
     if (m_networkReadOnly) {
         showOperatorMessage(
             tr("This station has read-only access; QSO changes are disabled."),
             true);
         return;
     }
-    vfo = qBound(0, vfo, 1);
     const int radio = m_so2rToggle->isChecked()
         ? vfo : m_activeRadioSelector->currentData().toInt();
     const int radioVfo = m_so2rToggle->isChecked()
@@ -10108,7 +10612,7 @@ void MainWindow::logQsoForVfo(int vfo)
     int points = 0;
     QStringList newMultipliers;
     bool isDupe = false;
-    const bool allowDupeLogging = QSettings().value(
+    const bool allowDupeLogging = LogSettings(m_repository).value(
         QStringLiteral("operating/allowDupeLogging"), false).toBool();
     const auto definition = m_definitions.constFind(contestId);
     QString reservationUuid;
@@ -10118,10 +10622,10 @@ void MainWindow::logQsoForVfo(int vfo)
             const Contest *contest = activeContest();
             const QString band = bandSelector->currentText().trimmed().toLower();
             const QString mode = modeSelector->currentText().trimmed().toUpper();
-            if (contest == nullptr || !m_syncClient
+            if (contest == nullptr || (!m_hostServer && (!m_syncClient
                 || m_syncClient->state() != SyncClient::State::Ready
                 || QSettings().value(QStringLiteral("network/client/logUuid"))
-                       .toString() != contest->logUuid) {
+                       .toString() != contest->logUuid))) {
                 showOperatorMessage(
                     tr("A ready central connection for this log is required to use "
                        "server serials."),
@@ -10312,7 +10816,7 @@ void MainWindow::logQsoForVfo(int vfo)
         if (contest == nullptr
             || !m_n1mmBroadcaster.broadcastQso(
                 qso, contest != nullptr ? contest->name : QString(),
-                m_station.operatorName, &error)) {
+                operatorIdentity(), &error)) {
             statusBar()->showMessage(
                 tr("QSO was saved, but N1MM UDP broadcast failed: %1")
                     .arg(contest == nullptr
@@ -10462,7 +10966,7 @@ void MainWindow::editSelectedQso(int row, int)
     Qso edited = original;
     const auto validate = [&]() -> QStringList {
         QStringList problems;
-        const bool allowDupeLogging = QSettings().value(
+        const bool allowDupeLogging = LogSettings(m_repository).value(
             QStringLiteral("operating/allowDupeLogging"), false).toBool();
         Qso candidate = original;
         candidate.callsign = callEdit->text().trimmed().toUpper();
@@ -10742,7 +11246,7 @@ void MainWindow::setSelectedQsoInvalid(int row, bool invalid)
                 }
                 break;
             }
-            const bool allowDuplicate = QSettings().value(
+            const bool allowDuplicate = LogSettings(m_repository).value(
                 QStringLiteral("operating/allowDupeLogging"), false).toBool();
             const ContestEvaluationResult evaluation = engine.evaluate(
                 *definition, changed.callsign, changed.band, changed.mode,

@@ -4,7 +4,7 @@ Wieloplatformowy logger zawodów krótkofalarskich dla systemów Linux i Windows
 napisany w C++20 i Qt 6. Obsługuje lokalne logi SQLite, definicje zawodów YAML,
 walidację wymiany, sprawdzanie duplikatów, punktację i mnożniki, wprowadzanie
 QSO z klawiatury, łączność CAT z radiem oraz opcjonalną synchronizację
-centralnego logu przez niezabezpieczony TCP w zaufanej sieci LAN/VPN.
+aktualnie otwartego logu serwera przez zwykły TCP w sieci LAN.
 
 **[Instrukcja użytkownika](docs/USER_GUIDE.md)** zawiera zrzuty ekranu, opis
 konfiguracji, skróty klawiszowe i znane ograniczenia. **[Architektura
@@ -30,13 +30,25 @@ ctest --test-dir build --output-on-failure
 ```
 
 Przy pierwszym uruchomieniu aplikacja tworzy katalog danych wyznaczony przez
-Qt. Znajdują się w nim baza `contest-logger.sqlite`, konfiguracja
+Qt. Znajdują się w nim konfiguracja
 `config/ContestLogger/ContestLogger.ini` (obsługiwana przez `QSettings`) oraz
 katalog `contests/` z kopiami wbudowanych definicji YAML. Domyślny katalog w
-systemie Linux to `~/.local/share/ContestLogger/ContestLogger/`, a w Windows:
-`%APPDATA%\ContestLogger\ContestLogger\`. Istniejące ustawienia są jednorazowo
+systemie Linux to `~/.local/share/ContestLogger/`, a w Windows:
+`%APPDATA%\ContestLogger\`. Istniejące ustawienia są jednorazowo
 kopiowane do pliku INI, bez usuwania oryginału. Brakujące wbudowane definicje
 są odtwarzane przy uruchomieniu; istniejące pliki nie są nadpisywane.
+
+Każdy log jest osobnym plikiem SQLite w lokalizacji wybranej przez użytkownika.
+**File → New log…** po wyborze zawodów otwiera okno zapisu pliku, a
+**File → Open log…** (`Ctrl+O`) wybiera plik z dysku. Nazwa logu odpowiada nazwie
+pliku bez rozszerzenia `.sqlite`; data nie jest dopisywana automatycznie.
+Plik zawiera QSO, definicje YAML, dane stacji, wymianę, makra CW/ESM oraz kopie
+używanych list SCP, call history i CTY. Nie wymaga oryginalnych plików pomocniczych.
+Porty CAT, konfiguracja urządzeń, sieci i wygląd okien pozostają lokalne.
+Przed przeniesieniem pliku zamknij log/program albo wykonaj kopię przez
+**Back up database…** (SQLite WAL). Dawna wspólna baza `contest-logger.sqlite`
+pozostaje nietknięta; nie jest automatycznie konwertowana. Logi ze starszej
+wersji można wyeksportować do ADIF/Cabrillo i zaimportować do nowych plików.
 
 Jeśli Hamlib znajduje się w niestandardowym katalogu, podczas konfiguracji
 CMake podaj `HAMLIB_INCLUDE_DIR` i `HAMLIB_LIBRARY`. Szczegółowe instrukcje
@@ -115,9 +127,13 @@ kontynentu i stref CQ/ITU.
 - CAT przez Hamlib lub backend Mock, tryby SO2V/SO2R w zakresie opisanym
   w instrukcji, keyer CW Hamlib/cwdaemon/Mock oraz klient DX Cluster.
 - Eksport Cabrillo 3.0 i ADIF, kopie zapasowe SQLite oraz import logów.
-- Opcjonalna synchronizacja centralna przez trusted TCP bez TLS i logowania;
-  każda stacja ma własną bazę SQLite. Nie należy współdzielić pliku bazy przez
-  sieć.
+- **Opcje → Praca w sieci...**: wybór roli serwer/klient i unikalnej nazwy
+  stacji. Serwer zapisuje łączności klientów bezpośrednio w otwartym logu,
+  bez tworzenia osobnego logu centralnego. Klienci muszą otworzyć log z tą
+  samą definicją zawodów; jego nazwa i lokalny UUID mogą być inne.
+  Łączności i zmiany są synchronizowane automatycznie, a panel stacji pokazuje
+  serwer i klientów. Połączenia używają TCP bez TLS i logowania.
+  Każda stacja ma własną bazę SQLite; nie współdziel pliku bazy przez sieć.
 
 Trusted TCP nie szyfruje ruchu i nie uwierzytelnia klientów. Każda stacja,
 która może połączyć się z serwerem, otrzymuje dostęp do odczytu i zapisu;

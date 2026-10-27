@@ -551,10 +551,9 @@ void NewLogDialog::updateSuggestedName()
         return;
     }
     const QString callsign = m_callsign->text().trimmed().toUpper();
-    const QString base = QStringLiteral("%1%2 %3")
+    const QString base = QStringLiteral("%1%2")
         .arg(callsign.isEmpty() ? QString() : callsign + QLatin1Char(' '),
-             option->definition.name)
-        .arg(m_startDate->date().year());
+             option->definition.name);
     QString suggested = base;
     const auto taken = [this](const QString &candidate) {
         return std::any_of(m_existingLogNames.cbegin(), m_existingLogNames.cend(),

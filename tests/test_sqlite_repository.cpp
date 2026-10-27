@@ -1,4 +1,5 @@
 #include "logger/data/sqlite_repository.h"
+#include "logger/contest/contest_definition_loader.h"
 
 #include <QCryptographicHash>
 #include <QJsonDocument>
@@ -138,6 +139,8 @@ class SqliteRepositoryTest final : public QObject {
 
 private slots:
     void savesAndReadsQso();
+    void standaloneFilesAreIndependentAndPortable();
+    void standaloneFilesRejectOverwriteInvalidFilesAndConcurrentOpen();
     void commitsTransaction();
     void rollsBackFailedTransaction();
     void appliesSchemaMigrationOnce();
@@ -171,6 +174,108 @@ private slots:
     void migratesLegacyExchangesAndPreservesOnUpdate();
     void backsUpAndRestoresVerifiedDatabase();
 };
+
+void SqliteRepositoryTest::standaloneFilesAreIndependentAndPortable()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString first = directory.filePath(QStringLiteral("First log.sqlite"));
+    const QString second = directory.filePath(QStringLiteral("Second log.sqlite"));
+    const QString yaml = QStringLiteral(
+        "schema_version: 1\nid: portable\nname: Portable\nbands: [20m]\n"
+        "modes: [CW]\nexchange:\n  sent:\n    - {name: report, type: rst}\n"
+        "  received:\n    - {name: report, type: rst}\nscoring: {qso_points: 1}\n");
+    logger::ContestDefinition definition;
+    QString error;
+    QVERIFY2(logger::ContestDefinitionLoader().loadText(yaml, {}, definition, &error),
+             qPrintable(error));
+    const QVariantMap settings{
+        {QStringLiteral("station/callsign"), QStringLiteral("K1TEST")},
+        {QStringLiteral("cw/functionKeys/F1/text"), QStringLiteral("CQ {MYCALL}")},
+        {QStringLiteral("operating/esmEnabled"), true}};
+    const QMap<QString, QByteArray> assets{
+        {QStringLiteral("support/master/test"), QByteArray("W1AW\nSP9ABC\n")},
+        {QStringLiteral("support/cty"), QByteArray("Poland: 15: 28: EU: 52: -18: -1: SP:\n SP;\n")},
+        {QStringLiteral("definitions/portable"), yaml.toUtf8()}};
+    {
+        logger::SqliteRepository repository{QSqlDatabase()};
+        logger::Contest log;
+        log.name = QStringLiteral("Ignored in favor of filename");
+        log.stationCallsign = QStringLiteral("K1TEST");
+        QVERIFY2(repository.createLogFile(first, definition, yaml, log, settings, assets,
+                                           {sampleQso()}, &error), qPrintable(error));
+        QVERIFY(repository.isStandaloneLog());
+        QCOMPARE(repository.contests().size(), 1);
+        QCOMPARE(repository.contests().first().name, QStringLiteral("First log"));
+        QCOMPARE(repository.contestDefinitionYaml(1), yaml);
+        QCOMPARE(repository.logSettings(), settings);
+        QCOMPARE(repository.logAssets(), assets);
+        QCOMPARE(repository.qsosForContest(1).size(), 1);
+        QCOMPARE(repository.createContestLog(definition, yaml, log, &error), qint64(0));
+        QVERIFY(!error.isEmpty());
+        QVERIFY2(repository.createLogFile(second, definition, yaml, log, {}, {}, {}, &error),
+                 qPrintable(error));
+        QVERIFY(repository.qsosForContest(1).isEmpty());
+        QVERIFY(repository.logAssets().isEmpty());
+        QVERIFY(repository.logSettings().isEmpty());
+        QVERIFY2(repository.openLogFile(first, &error), qPrintable(error));
+        QCOMPARE(repository.qsosForContest(1).size(), 1);
+        QVERIFY2(repository.setLogSetting(QStringLiteral("station/operatorCallsign"),
+                                           QStringLiteral("SP9OP"), &error), qPrintable(error));
+    }
+    const QString moved = directory.filePath(QStringLiteral("Copied log.sqlite"));
+    QVERIFY(QFile::copy(first, moved));
+    QVERIFY(QFile::remove(first));
+    logger::SqliteRepository reopened{QSqlDatabase()};
+    QVERIFY2(reopened.openLogFile(moved, &error), qPrintable(error));
+    QCOMPARE(reopened.qsosForContest(1).first().callsign, QStringLiteral("W1AW"));
+    QCOMPARE(reopened.logAssets(), assets);
+    QCOMPARE(reopened.logSettings().value(QStringLiteral("station/operatorCallsign")).toString(),
+             QStringLiteral("SP9OP"));
+}
+
+void SqliteRepositoryTest::standaloneFilesRejectOverwriteInvalidFilesAndConcurrentOpen()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("Protected.sqlite"));
+    const QString yaml = QStringLiteral(
+        "schema_version: 1\nid: portable\nname: Portable\nbands: [20m]\n"
+        "modes: [CW]\nexchange:\n  sent:\n    - {name: report, type: rst}\n"
+        "  received:\n    - {name: report, type: rst}\nscoring: {qso_points: 1}\n");
+    logger::ContestDefinition definition;
+    QString error;
+    QVERIFY(logger::ContestDefinitionLoader().loadText(yaml, {}, definition, &error));
+    logger::Contest log;
+    log.name = QStringLiteral("Protected");
+    logger::SqliteRepository repository{QSqlDatabase()};
+    QVERIFY2(repository.createLogFile(path, definition, yaml, log, {}, {}, {}, &error),
+             qPrintable(error));
+    QVERIFY(!repository.createLogFile(path, definition, yaml, log, {}, {}, {}, &error));
+    QVERIFY(!error.isEmpty());
+    logger::SqliteRepository other{QSqlDatabase()};
+    QVERIFY(!other.openLogFile(path, &error));
+    QVERIFY(error.contains(QStringLiteral("locked")));
+    const QString invalidPath = directory.filePath(QStringLiteral("Not a log.sqlite"));
+    {
+        QFile invalid(invalidPath);
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        invalid.write("not a database");
+    }
+    QVERIFY(!repository.openLogFile(invalidPath, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(repository.databasePath(), path);
+    QFile invalid(invalidPath);
+    QVERIFY(invalid.open(QIODevice::ReadOnly));
+    QCOMPARE(invalid.readAll(), QByteArray("not a database"));
+    QVERIFY(!repository.openLogFile(directory.filePath(QStringLiteral("missing.sqlite")), &error));
+    QCOMPARE(repository.contests().size(), 1);
+    logger::Qso bad = sampleQso();
+    bad.frequencyHz = -1;
+    const QString failed = directory.filePath(QStringLiteral("Failed.sqlite"));
+    QVERIFY(!other.createLogFile(failed, definition, yaml, log, {}, {}, {bad}, &error));
+    QVERIFY(!QFileInfo::exists(failed));
+}
 
 void SqliteRepositoryTest::savesAndReadsQso()
 {
@@ -244,7 +349,7 @@ void SqliteRepositoryTest::appliesSchemaMigrationOnce()
     QSqlQuery query(database.database());
     QVERIFY(query.exec(QStringLiteral("SELECT MAX(version) FROM schema_migrations")));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 20);
+    QCOMPARE(query.value(0).toInt(), logger::SqliteRepository::currentSchemaVersion());
     query.finish();
 
     QVERIFY2(database.repository().initialize(&error), qPrintable(error));

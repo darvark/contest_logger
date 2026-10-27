@@ -3,12 +3,42 @@
 <TS version="2.1" language="pl_PL" sourcelanguage="en_US">
 <context>
     <name>logger::MainWindow</name>
+    <message><source>Save new log</source><translation>Zapisz nowy log</translation></message>
+    <message><source>Log databases (*.sqlite)</source><translation>Bazy logów (*.sqlite)</translation></message>
+    <message><source>Log databases (*.sqlite);;All files (*)</source><translation>Bazy logów (*.sqlite);;Wszystkie pliki (*)</translation></message>
+    <message><source>Unable to open log</source><translation>Nie można otworzyć logu</translation></message>
+    <message><source>Unable to create log</source><translation>Nie można utworzyć logu</translation></message>
+    <message><source>Unable to read log settings</source><translation>Nie można odczytać ustawień logu</translation></message>
+    <message><source>Unable to save log settings</source><translation>Nie można zapisać ustawień logu</translation></message>
+    <message><source>Unable to read log data</source><translation>Nie można odczytać danych logu</translation></message>
+    <message><source>Unable to save log data</source><translation>Nie można zapisać danych logu</translation></message>
+    <message><source>Invalid embedded support data</source><translation>Nieprawidłowe dane pomocnicze w pliku logu</translation></message>
+    <message><source>Automatic database backup failed</source><translation>Nie udało się wykonać automatycznej kopii bazy</translation></message>
+    <message><source>Support data download</source><translation>Pobieranie danych pomocniczych</translation></message>
+    <message><source>The log changed. Downloaded data was not applied.</source><translation>Zmieniono log. Pobrane dane nie zostały zastosowane.</translation></message>
+    <message><source>Operator callsign...</source><translation>Znak operatora...</translation></message>
+    <message><source>Operator callsign</source><translation>Znak operatora</translation></message>
+    <message><source>Operator callsign (A-Z, 0-9, /; leave empty to clear):</source><translation>Znak operatora (A-Z, 0-9, /; puste pole usuwa osobny znak):</translation></message>
+    <message><source>Network operation...</source><translation>Praca w sieci...</translation></message>
+    <message><source>Network operation</source><translation>Praca w sieci</translation></message>
+    <message><source>Server</source><translation>Serwer</translation></message>
+    <message><source>Client</source><translation>Klient</translation></message>
+    <message><source>Role:</source><translation>Rola:</translation></message>
+    <message><source>Unique station name:</source><translation>Unikalna nazwa stacji:</translation></message>
+    <message><source>Open a log first.</source><translation>Najpierw otwórz log.</translation></message>
+    <message><source>Invalid station name</source><translation>Nieprawidłowa nazwa stacji</translation></message>
+    <message><source>Enter a non-empty station name (up to 255 characters).</source><translation>Wpisz niepustą nazwę stacji (do 255 znaków).</translation></message>
+    <message><source>Unable to save the station name.</source><translation>Nie udało się zapisać nazwy stacji.</translation></message>
+    <message><source>Start/stop network server...</source><translation>Uruchom/zatrzymaj serwer sieciowy...</translation></message>
+    <message><source>Disconnect network</source><translation>Rozłącz sieć</translation></message>
+    <message><source>Network server - open log</source><translation>Serwer sieciowy - otwarty log</translation></message>
+    <message><source>Network stopped because the open log changed.</source><translation>Zatrzymano pracę w sieci z powodu zmiany otwartego logu.</translation></message>
     <message><source>&amp;File</source><translation>&amp;Plik</translation></message>
     <message><source>O&amp;perating</source><translation>&amp;Praca</translation></message>
     <message><source>&amp;Contest</source><translation>&amp;Zawody</translation></message>
     <message><source>&amp;Radio</source><translation>&amp;Radio</translation></message>
-    <message><source>&amp;Options</source><translation>&amp;Opcje</translation></message>
-    <message><source>&amp;Window</source><translation>&amp;Okno</translation></message>
+    <message><source>Op&amp;tions</source><translation>Opc&amp;je</translation></message>
+    <message><source>&amp;Window</source><translation>O&amp;kno</translation></message>
     <message><source>Language</source><translation>Język</translation></message>
     <message><source>Color palette</source><translation>Paleta kolorów</translation></message>
     <message><source>Current</source><translation>Obecna</translation></message>
@@ -22,7 +52,7 @@
     <message><source>The language preference could not be saved.</source><translation>Nie udało się zapisać ustawienia języka.</translation></message>
     <message><source>Language changed.</source><translation>Zmieniono język.</translation></message>
     <message><source>The Polish translation catalog could not be loaded.</source><translation>Nie udało się wczytać polskiego katalogu tłumaczeń.</translation></message>
-    <message><source>&amp;Operator and station...</source><translation>&amp;Operator i stacja...</translation></message>
+    <message><source>Operator and &amp;station...</source><translation>Operator i &amp;stacja...</translation></message>
     <message><source>Radio A CAT settings...</source><translation>Ustawienia CAT radia A...</translation></message>
     <message><source>Radio B CAT settings...</source><translation>Ustawienia CAT radia B...</translation></message>
     <message><source>&amp;DX cluster...</source><translation>&amp;DX Cluster...</translation></message>
@@ -84,7 +114,29 @@
     <message><source>Database ready</source><translation>Baza danych gotowa</translation></message>
     <message><source>&amp;New log...</source><translation>&amp;Nowy log...</translation></message>
     <message><source>Open log...</source><translation>Otwórz log...</translation></message>
+    <message><source>&amp;Open log...</source><translation>&amp;Otwórz log...</translation></message>
+    <message><source>Open log</source><translation>Otwórz log</translation></message>
+    <message><source>no log</source><translation>brak logu</translation></message>
+    <message><source>Unable to load logs</source><translation>Nie można wczytać logów</translation></message>
+    <message><source>The database contains no logs. Create a new log first.</source><translation>Baza danych nie zawiera logów. Najpierw utwórz nowy log.</translation></message>
+    <message><source>Log</source><translation>Log</translation></message>
+    <message><source>Contest</source><translation>Zawody</translation></message>
+    <message><source>Callsign</source><translation>Znak</translation></message>
+    <message><source>Start (UTC)</source><translation>Początek (UTC)</translation></message>
+    <message><source>QSOs</source><translation>QSO</translation></message>
+    <message><source>Opened log: %1</source><translation>Otwarto log: %1</translation></message>
     <message><source>Export Cabrillo...</source><translation>Eksportuj Cabrillo...</translation></message>
     <message><source>Export ADIF...</source><translation>Eksportuj ADIF...</translation></message>
+</context>
+<context>
+    <name>logger::SyncConnectionDialog</name>
+    <message><source>Network client</source><translation>Klient sieciowy</translation></message>
+    <message><source>Server IPv4 or IPv6 address</source><translation>Adres IPv4 lub IPv6 serwera</translation></message>
+    <message><source>Server IP address:</source><translation>Adres IP serwera:</translation></message>
+    <message><source>Port:</source><translation>Port:</translation></message>
+    <message><source>Log to synchronize:</source><translation>Synchronizowany log:</translation></message>
+    <message><source>Connect automatically at application startup</source><translation>Połącz automatycznie przy uruchomieniu aplikacji</translation></message>
+    <message><source>The currently open log must have the same contest definition as the server log. QSOs are sent automatically over plain TCP.</source><translation>Otwarty log musi mieć tę samą definicję zawodów co log serwera. Łączności są przesyłane automatycznie przez zwykły TCP.</translation></message>
+    <message><source>Connect</source><translation>Połącz</translation></message>
 </context>
 </TS>

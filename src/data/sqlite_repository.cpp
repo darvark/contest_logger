@@ -3,6 +3,7 @@
 
 #include "logger/contest/contest_definition_loader.h"
 #include "logger/data/log_exporter.h"
+#include "logger/data/support_data_parser.h"
 #include "logger/contest/qtc_service.h"
 
 #include <QCryptographicHash>
@@ -11,6 +12,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QDataStream>
+#include <QLockFile>
+#include <QTemporaryFile>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QRegularExpression>
@@ -24,7 +28,7 @@
 namespace logger {
 namespace {
 
-constexpr int CurrentSchemaVersion = 20;
+constexpr int CurrentSchemaVersion = 21;
 constexpr int SpotPruneInterval = 200;
 constexpr int SpotRetentionHours = 24;
 constexpr int MaximumRetainedSpots = 5000;
@@ -251,10 +255,74 @@ bool recordQsoAudit(QSqlDatabase &database, const QString &logUuid,
     return true;
 }
 
+QString newUuid();
+
 bool enqueueQsoOperation(QSqlDatabase &database, const Qso &qso,
                          const QString &operation, int expectedVersion,
-                         QString *error)
+                         QString *error, bool hosted = false)
 {
+    if (hosted) {
+        const QString operationUuid = newUuid();
+        const QString now = utcString(QDateTime::currentDateTimeUtc());
+        const bool deleted = operation == QStringLiteral("qso.delete");
+        QJsonObject snapshotObject = qsoAuditSnapshot(qso, deleted);
+        snapshotObject.remove(QStringLiteral("reservation_uuid"));
+        const QByteArray snapshot = QJsonDocument(snapshotObject).toJson(QJsonDocument::Compact);
+        const auto execute = [&database, error](const QString &sql,
+                                                const QVariantList &values) {
+            QSqlQuery query(database);
+            query.prepare(sql);
+            for (const QVariant &value : values) {
+                query.addBindValue(value);
+            }
+            if (!query.exec()) {
+                setError(error, queryError(query));
+                return false;
+            }
+            return true;
+        };
+        if (!execute(QStringLiteral(
+                "INSERT INTO sync_log_state(log_uuid, current_revision) VALUES(?, 1) "
+                "ON CONFLICT(log_uuid) DO UPDATE SET current_revision = current_revision + 1"),
+                {qso.logUuid})) {
+            return false;
+        }
+        QSqlQuery revisionQuery(database);
+        revisionQuery.prepare(QStringLiteral(
+            "SELECT current_revision FROM sync_log_state WHERE log_uuid = ?"));
+        revisionQuery.addBindValue(qso.logUuid);
+        if (!revisionQuery.exec() || !revisionQuery.next()) {
+            setError(error, queryError(revisionQuery));
+            return false;
+        }
+        const qint64 revision = revisionQuery.value(0).toLongLong();
+        revisionQuery.finish();
+        const QJsonObject result{
+            {QStringLiteral("operation_uuid"), operationUuid},
+            {QStringLiteral("status"), QStringLiteral("accepted")},
+            {QStringLiteral("qso_uuid"), qso.qsoUuid},
+            {QStringLiteral("qso_version"), qso.qsoVersion},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("qso"), QJsonDocument::fromJson(snapshot).object()}
+        };
+        return execute(QStringLiteral(
+            "INSERT INTO sync_operations(operation_uuid, log_uuid, station_uuid, "
+            "payload_sha256, result_json, created_at_utc) VALUES(?, ?, ?, ?, ?, ?)"),
+            {operationUuid, qso.logUuid, qso.stationUuid,
+             QString::fromLatin1(QCryptographicHash::hash(
+                 snapshot, QCryptographicHash::Sha256).toHex()),
+             QJsonDocument(result).toJson(QJsonDocument::Compact), now})
+            && execute(QStringLiteral(
+                "INSERT INTO qso_history(log_uuid, qso_uuid, qso_version, operation_uuid, "
+                "snapshot_json, is_deleted, created_at_utc, revision) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"),
+                {qso.logUuid, qso.qsoUuid, qso.qsoVersion, operationUuid,
+                 QString::fromUtf8(snapshot), deleted ? 1 : 0, now, revision})
+            && execute(QStringLiteral(
+                "INSERT INTO sync_events(event_uuid, log_uuid, revision, operation_uuid, "
+                "kind, entity_uuid, payload_json, created_at_utc) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"),
+                {newUuid(), qso.logUuid, revision, operationUuid, operation,
+                 qso.qsoUuid, QString::fromUtf8(snapshot), now});
+    }
     QSqlQuery enabled(database);
     enabled.prepare(QStringLiteral(
         "SELECT enabled FROM sync_state WHERE log_uuid = ?"));
@@ -954,6 +1022,300 @@ SqliteRepository::SqliteRepository(QSqlDatabase database)
 {
 }
 
+struct SqliteRepository::FileConnection {
+    QString name = QStringLiteral("log-file-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    std::unique_ptr<QLockFile> lock;
+    ~FileConnection()
+    {
+        if (QSqlDatabase::contains(name)) {
+            QSqlDatabase::removeDatabase(name);
+        }
+    }
+};
+
+QString SqliteRepository::databasePath() const
+{
+    return m_database.databaseName() == QLatin1String(":memory:")
+        ? QString() : m_database.databaseName();
+}
+
+bool SqliteRepository::isStandaloneLog() const
+{
+    return m_standaloneLog;
+}
+
+void SqliteRepository::swap(SqliteRepository &other)
+{
+    std::swap(m_fileConnection, other.m_fileConnection);
+    std::swap(m_database, other.m_database);
+    std::swap(m_standaloneLog, other.m_standaloneLog);
+    std::swap(m_hostedLogUuid, other.m_hostedLogUuid);
+    std::swap(m_spotInsertCount, other.m_spotInsertCount);
+}
+
+bool SqliteRepository::openLogFile(const QString &path, QString *error)
+{
+    clearError(error);
+    const QFileInfo file(path);
+    if (!file.isFile()) {
+        setError(error, QStringLiteral("Log file does not exist: %1").arg(path));
+        return false;
+    }
+    if (m_standaloneLog
+        && file.canonicalFilePath() == QFileInfo(databasePath()).canonicalFilePath()) {
+        return true;
+    }
+    SqliteRepository candidate{QSqlDatabase()};
+    candidate.m_fileConnection = std::make_shared<FileConnection>();
+    candidate.m_fileConnection->lock =
+        std::make_unique<QLockFile>(file.canonicalFilePath() + QStringLiteral(".lock"));
+    if (!candidate.m_fileConnection->lock->tryLock(0)) {
+        setError(error, QStringLiteral("Log file is already open or cannot be locked: %1")
+                            .arg(path));
+        return false;
+    }
+    candidate.m_database = QSqlDatabase::addDatabase(
+        QStringLiteral("QSQLITE"), candidate.m_fileConnection->name);
+    candidate.m_database.setDatabaseName(file.canonicalFilePath());
+    // Validate before initialization so an unrelated SQLite file is never migrated.
+    candidate.m_database.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+    if (!candidate.m_database.open()) {
+        setError(error, candidate.m_database.lastError().text());
+        return false;
+    }
+    if (!verifyLoggerDatabase(candidate.m_database, error)) {
+        return false;
+    }
+    {
+        QSqlQuery check(candidate.m_database);
+        if (!check.exec(QStringLiteral(
+                "SELECT version FROM log_file WHERE id = 1"))
+            || !check.next() || check.value(0).toInt() != 1) {
+            setError(error, QStringLiteral(
+                "This is not a standalone log file. The legacy shared database "
+                "is unchanged; export its logs with the previous version and import "
+                "them into new log files."));
+            return false;
+        }
+    }
+    candidate.m_database.close();
+    candidate.m_database.setConnectOptions();
+    if (!candidate.m_database.open() || !candidate.initialize(error)) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = candidate.m_database.lastError().text();
+        }
+        return false;
+    }
+    if (!candidate.validateStandaloneLog(error)) {
+        return false;
+    }
+    swap(candidate);
+    return true;
+}
+
+bool SqliteRepository::validateStandaloneLog(QString *error) const
+{
+    QString localError;
+    if (error == nullptr) {
+        error = &localError;
+    }
+    const auto logs = contests(error);
+    if ((error != nullptr && !error->isEmpty()) || logs.size() != 1) {
+        setError(error, QStringLiteral("A standalone file must contain exactly one log."));
+        return false;
+    }
+    const QString yaml = contestDefinitionYaml(logs.first().id, error);
+    ContestDefinition definition;
+    if ((error != nullptr && !error->isEmpty())
+        || !ContestDefinitionLoader().loadText(yaml, databasePath(), definition, error)) {
+        return false;
+    }
+    logSettings(error);
+    if (error != nullptr && !error->isEmpty()) {
+        return false;
+    }
+    const auto assets = logAssets(error);
+    if (error != nullptr && !error->isEmpty()) {
+        return false;
+    }
+    for (auto it = assets.cbegin(); it != assets.cend(); ++it) {
+        const QString contents = QString::fromUtf8(it.value());
+        QStringList callsigns;
+        QVector<CtyPrefixEntry> prefixes;
+        QHash<QString, CallHistoryEntry> history;
+        bool valid = true;
+        if (it.key().startsWith(QLatin1String("support/master/"))) {
+            valid = SupportDataParser::parseMasterCpy(contents, callsigns, error);
+        } else if (it.key() == QLatin1String("support/cty")) {
+            valid = SupportDataParser::parseCtyDat(contents, prefixes, error);
+        } else if (it.key().startsWith(QLatin1String("support/history/"))) {
+            valid = SupportDataParser::parseCallHistory(contents, history, error);
+        } else if (it.key().startsWith(QLatin1String("definitions/"))) {
+            valid = ContestDefinitionLoader().loadText(contents, it.key(), definition, error);
+        }
+        if (!valid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SqliteRepository::createLogFile(
+    const QString &path, const ContestDefinition &definition, const QString &yaml,
+    const Contest &log, const QVariantMap &settings,
+    const QMap<QString, QByteArray> &assets, const QVector<Qso> &qsos, QString *error)
+{
+    clearError(error);
+    const QFileInfo destination(path);
+    if (path.isEmpty() || destination.exists() || !destination.dir().exists()) {
+        setError(error, QStringLiteral("Choose a new log file in an existing directory."));
+        return false;
+    }
+    QTemporaryFile staging(destination.dir().filePath(QStringLiteral(".new-log-XXXXXX")));
+    if (!staging.open()) {
+        setError(error, staging.errorString());
+        return false;
+    }
+    const QString stagedPath = staging.fileName();
+    staging.close();
+    {
+        SqliteRepository candidate{QSqlDatabase()};
+        candidate.m_fileConnection = std::make_shared<FileConnection>();
+        candidate.m_database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), candidate.m_fileConnection->name);
+        candidate.m_database.setDatabaseName(stagedPath);
+        if (!candidate.m_database.open()) {
+            setError(error, candidate.m_database.lastError().text());
+            return false;
+        }
+        if (!candidate.initialize(error)
+            || !candidate.withTransaction([&](QString *failure) {
+                Contest stored = log;
+                stored.name = destination.completeBaseName();
+                const qint64 id = candidate.createContestLog(definition, yaml, stored, failure);
+                if (id <= 0) {
+                    return false;
+                }
+                QSqlQuery marker(candidate.m_database);
+                if (!marker.exec(QStringLiteral("INSERT INTO log_file VALUES(1, 1)"))) {
+                    setError(failure, queryError(marker));
+                    return false;
+                }
+                for (auto it = settings.cbegin(); it != settings.cend(); ++it) {
+                    if (!candidate.setLogSetting(it.key(), it.value(), failure)) {
+                        return false;
+                    }
+                }
+                for (auto it = assets.cbegin(); it != assets.cend(); ++it) {
+                    if (!candidate.setLogAsset(it.key(), it.value(), failure)) {
+                        return false;
+                    }
+                }
+                for (Qso qso : qsos) {
+                    qso.id = 0;
+                    qso.contestId = id;
+                    if (!candidate.saveQso(qso, failure)) {
+                        return false;
+                    }
+                }
+                return true;
+            }, error)) {
+            return false;
+        }
+        if (!candidate.validateStandaloneLog(error)) {
+            return false;
+        }
+        QSqlQuery checkpoint(candidate.m_database);
+        if (!checkpoint.exec(QStringLiteral("PRAGMA journal_mode = DELETE"))) {
+            setError(error, queryError(checkpoint));
+            return false;
+        }
+    }
+    // rename never overwrites an existing destination, including a concurrent creator.
+    if (!QFile::rename(stagedPath, destination.absoluteFilePath())) {
+        setError(error, QStringLiteral("Could not install the new log file: %1").arg(path));
+        return false;
+    }
+    if (!openLogFile(destination.absoluteFilePath(), error)) {
+        return false;
+    }
+    return true;
+}
+
+QVariantMap SqliteRepository::logSettings(QString *error) const
+{
+    clearError(error);
+    QVariantMap result;
+    QSqlQuery query(m_database);
+    if (!query.exec(QStringLiteral("SELECT key, value FROM log_settings"))) {
+        setError(error, queryError(query));
+        return {};
+    }
+    while (query.next()) {
+        const QByteArray bytes = query.value(1).toByteArray();
+        QDataStream stream(bytes);
+        stream.setVersion(QDataStream::Qt_6_0);
+        QVariant value;
+        stream >> value;
+        if (stream.status() != QDataStream::Ok) {
+            setError(error, QStringLiteral("Invalid log setting: %1").arg(query.value(0).toString()));
+            return {};
+        }
+        result.insert(query.value(0).toString(), value);
+    }
+    return result;
+}
+
+bool SqliteRepository::setLogSetting(const QString &key, const QVariant &value, QString *error)
+{
+    clearError(error);
+    QByteArray bytes;
+    QDataStream stream(&bytes, QIODevice::WriteOnly);
+    stream.setVersion(QDataStream::Qt_6_0);
+    stream << value;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("INSERT OR REPLACE INTO log_settings(key, value) VALUES(?, ?)"));
+    query.addBindValue(key);
+    query.addBindValue(bytes);
+    if (stream.status() != QDataStream::Ok || !query.exec()) {
+        setError(error, stream.status() != QDataStream::Ok
+                            ? QStringLiteral("Could not serialize log setting: %1").arg(key)
+                            : queryError(query));
+        return false;
+    }
+    return true;
+}
+
+QMap<QString, QByteArray> SqliteRepository::logAssets(QString *error) const
+{
+    clearError(error);
+    QMap<QString, QByteArray> result;
+    QSqlQuery query(m_database);
+    if (!query.exec(QStringLiteral("SELECT key, contents FROM log_assets"))) {
+        setError(error, queryError(query));
+        return {};
+    }
+    while (query.next()) {
+        result.insert(query.value(0).toString(), query.value(1).toByteArray());
+    }
+    return result;
+}
+
+bool SqliteRepository::setLogAsset(const QString &key, const QByteArray &contents, QString *error)
+{
+    clearError(error);
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("INSERT OR REPLACE INTO log_assets(key, contents) VALUES(?, ?)"));
+    query.addBindValue(key);
+    query.addBindValue(contents);
+    if (!query.exec()) {
+        setError(error, queryError(query));
+        return false;
+    }
+    return true;
+}
+
 int SqliteRepository::currentSchemaVersion()
 {
     return CurrentSchemaVersion;
@@ -1061,6 +1423,13 @@ bool SqliteRepository::initialize(QString *error)
             migration = &MigrationNineteen;
         } else if (version == 20) {
             migration = &MigrationTwenty;
+        } else if (version == 21) {
+            static const QStringList fileMigration{
+                QStringLiteral("CREATE TABLE log_file (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)"),
+                QStringLiteral("CREATE TABLE log_settings (key TEXT PRIMARY KEY, value BLOB NOT NULL)"),
+                QStringLiteral("CREATE TABLE log_assets (key TEXT PRIMARY KEY, contents BLOB NOT NULL)")
+            };
+            migration = &fileMigration;
         }
         if (migration == nullptr) {
             setError(error, QStringLiteral("No migration is available for schema version %1.")
@@ -1113,6 +1482,12 @@ bool SqliteRepository::initialize(QString *error)
         }
     }
 
+    QSqlQuery marker(m_database);
+    if (!marker.exec(QStringLiteral("SELECT version FROM log_file WHERE id = 1"))) {
+        setError(error, queryError(marker));
+        return false;
+    }
+    m_standaloneLog = marker.next();
     return true;
 }
 
@@ -1196,6 +1571,11 @@ bool SqliteRepository::restoreFromBackup(const QString &databasePath,
         setError(error, QStringLiteral("Backup or destination path is invalid."));
         return false;
     }
+    QLockFile targetLock(targetInfo.absoluteFilePath() + QStringLiteral(".lock"));
+    if (!targetLock.tryLock(0)) {
+        setError(error, QStringLiteral("Close the log before restoring its backup."));
+        return false;
+    }
     const QString validationConnection = QStringLiteral("logger-restore-check-%1")
         .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     bool valid = false;
@@ -1272,6 +1652,9 @@ bool SqliteRepository::restoreFromBackup(const QString &databasePath,
 bool SqliteRepository::ensureGeneralLog(QString *error)
 {
     clearError(error);
+    if (m_standaloneLog) {
+        return validateStandaloneLog(error);
+    }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "INSERT INTO contests(code, name, description, log_uuid) "
@@ -1381,6 +1764,139 @@ bool SqliteRepository::setSynchronizationEnabled(
     }, error);
 }
 
+bool SqliteRepository::setHostedLog(const QString &logUuid, QString *error)
+{
+    clearError(error);
+    if (logUuid.isEmpty()) {
+        m_hostedLogUuid.clear();
+        return true;
+    }
+    if (!isSyncUuid(logUuid)) {
+        setError(error, QStringLiteral("Invalid hosted log UUID."));
+        return false;
+    }
+    const bool success = withTransaction([this, &logUuid](QString *operationError) {
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral(
+            "SELECT q.*, c.log_uuid, c.definition_yaml, '' AS sync_status "
+            "FROM qsos q JOIN contests c ON c.id = q.contest_id "
+            "WHERE c.log_uuid = ? AND NOT EXISTS (SELECT 1 FROM qso_history h "
+            "WHERE h.log_uuid = c.log_uuid AND h.qso_uuid = q.qso_uuid "
+            "AND h.qso_version = q.qso_version) ORDER BY q.id"));
+        query.addBindValue(logUuid);
+        if (!query.exec()) {
+            setError(operationError, queryError(query));
+            return false;
+        }
+        QVector<QPair<Qso, bool>> pending;
+        while (query.next()) {
+            pending.append({readQso(query),
+                            query.value(QStringLiteral("is_deleted")).toBool()});
+        }
+        query.finish();
+        for (const auto &entry : pending) {
+            if (!enqueueQsoOperation(m_database, entry.first,
+                    entry.second ? QStringLiteral("qso.delete")
+                                 : QStringLiteral("qso.create"),
+                    0, operationError, true)) {
+                return false;
+            }
+        }
+        QSqlQuery accepted(m_database);
+        accepted.prepare(QStringLiteral(
+            "UPDATE sync_outbox SET status = 'accepted' "
+            "WHERE log_uuid = ? AND status IN ('pending', 'in-flight')"));
+        accepted.addBindValue(logUuid);
+        if (!accepted.exec()) {
+            setError(operationError, queryError(accepted));
+            return false;
+        }
+        return true;
+    }, error);
+    if (success) {
+        m_hostedLogUuid = logUuid;
+    }
+    return success;
+}
+
+bool SqliteRepository::bindToServerLog(
+    const QString &localLogUuid, const QString &serverLogUuid, QString *error)
+{
+    clearError(error);
+    if (!isSyncUuid(localLogUuid) || !isSyncUuid(serverLogUuid)) {
+        setError(error, QStringLiteral("Invalid local or server log UUID."));
+        return false;
+    }
+    if (localLogUuid == serverLogUuid) {
+        return true;
+    }
+    return withTransaction([this, &localLogUuid, &serverLogUuid](QString *operationError) {
+        QSqlQuery existing(m_database);
+        existing.prepare(QStringLiteral(
+            "SELECT 1 FROM contests WHERE log_uuid = ? UNION ALL "
+            "SELECT 1 FROM sync_log_state WHERE log_uuid = ? AND current_revision > 0 "
+            "UNION ALL SELECT 1 FROM sync_state WHERE log_uuid = ? AND cursor > 0"));
+        existing.addBindValue(serverLogUuid);
+        existing.addBindValue(localLogUuid);
+        existing.addBindValue(localLogUuid);
+        if (!existing.exec()) {
+            setError(operationError, queryError(existing));
+            return false;
+        }
+        if (existing.next()) {
+            setError(operationError, QStringLiteral(
+                "This log already belongs to another server, or the server log "
+                "is already open locally. Open the corresponding log."));
+            return false;
+        }
+        existing.finish();
+        QSqlQuery defer(m_database);
+        if (!defer.exec(QStringLiteral("PRAGMA defer_foreign_keys = ON"))) {
+            setError(operationError, queryError(defer));
+            return false;
+        }
+        // Keep local rows, pending operations and audit records in the same log.
+        for (const QString &table : m_database.tables()) {
+            QSqlQuery columns(m_database);
+            if (!columns.exec(QStringLiteral("PRAGMA table_info(\"%1\")").arg(table))) {
+                setError(operationError, queryError(columns));
+                return false;
+            }
+            QStringList jsonColumns;
+            bool hasLogUuid = false;
+            while (columns.next()) {
+                const QString name = columns.value(1).toString();
+                hasLogUuid = hasLogUuid || name == QStringLiteral("log_uuid");
+                if (name.endsWith(QStringLiteral("_json"))) {
+                    jsonColumns.append(name);
+                }
+            }
+            columns.finish();
+            if (!hasLogUuid) {
+                continue;
+            }
+            QStringList assignments{QStringLiteral("log_uuid = ?")};
+            for (const QString &column : jsonColumns) {
+                assignments.append(QStringLiteral("\"%1\" = replace(\"%1\", ?, ?)").arg(column));
+            }
+            QSqlQuery update(m_database);
+            update.prepare(QStringLiteral("UPDATE \"%1\" SET %2 WHERE log_uuid = ?")
+                               .arg(table, assignments.join(QStringLiteral(", "))));
+            update.addBindValue(serverLogUuid);
+            for (qsizetype i = 0; i < jsonColumns.size(); ++i) {
+                update.addBindValue(localLogUuid);
+                update.addBindValue(serverLogUuid);
+            }
+            update.addBindValue(localLogUuid);
+            if (!update.exec()) {
+                setError(operationError, queryError(update));
+                return false;
+            }
+        }
+        return enqueueExistingQsosForSync(serverLogUuid, operationError);
+    }, error);
+}
+
 bool SqliteRepository::enqueueExistingQsosForSync(
     const QString &logUuid, QString *error)
 {
@@ -1389,7 +1905,7 @@ bool SqliteRepository::enqueueExistingQsosForSync(
         setError(error, QStringLiteral("Log UUID is invalid."));
         return false;
     }
-    return withTransaction([this, &logUuid](QString *operationError) {
+    return withSavepoint(m_database, [this, &logUuid](QString *operationError) {
         QSqlQuery contest(m_database);
         contest.prepare(QStringLiteral(
             "SELECT id FROM contests WHERE log_uuid = ?"));
@@ -3541,6 +4057,10 @@ qint64 SqliteRepository::createContestLog(
     QString *error)
 {
     clearError(error);
+    if (m_standaloneLog) {
+        setError(error, QStringLiteral("Create a separate file for each new log."));
+        return 0;
+    }
     if (log.name.trimmed().isEmpty()) {
         setError(error, QStringLiteral("Log name is required."));
         return 0;
@@ -3607,6 +4127,10 @@ bool SqliteRepository::saveContestDefinition(
     const ContestDefinition &definition, const QString &yaml, QString *error)
 {
     clearError(error);
+    if (m_standaloneLog) {
+        setError(error, QStringLiteral("The contest definition of a standalone log is fixed."));
+        return false;
+    }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "INSERT INTO contests(code, name, description, definition_yaml, log_uuid) "
@@ -3754,7 +4278,7 @@ bool SqliteRepository::saveQso(Qso &qso, QString *error)
             }
         }
         return enqueueQsoOperation(m_database, qso, QStringLiteral("qso.create"),
-                                   0, operationError);
+                                   0, operationError, qso.logUuid == m_hostedLogUuid);
     }, error);
     if (saved) {
         qso.id = savedId;
@@ -3861,7 +4385,8 @@ bool SqliteRepository::updateQso(const Qso &qso, QString *error)
             return false;
         }
         return enqueueQsoOperation(m_database, updated, QStringLiteral("qso.update"),
-                                   currentVersion, operationError);
+                                   currentVersion, operationError,
+                                   updated.logUuid == m_hostedLogUuid);
     }, error);
 }
 
@@ -3952,7 +4477,8 @@ bool SqliteRepository::deleteQso(qint64 id, QString *error)
             return false;
         }
         return enqueueQsoOperation(m_database, deleted, QStringLiteral("qso.delete"),
-                                   expectedVersion, operationError);
+                                   expectedVersion, operationError,
+                                   deleted.logUuid == m_hostedLogUuid);
     }, error);
 }
 
@@ -4168,7 +4694,7 @@ bool SqliteRepository::undoLastQsoChange(qint64 contestId, QString *error)
         return enqueueQsoOperation(
             m_database, restored,
             deleted ? QStringLiteral("qso.delete") : QStringLiteral("qso.update"),
-            currentVersion, operationError);
+            currentVersion, operationError, logUuid == m_hostedLogUuid);
     }, error);
 }
 

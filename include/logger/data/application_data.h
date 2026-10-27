@@ -8,6 +8,9 @@
 
 namespace logger {
 
+class SqliteRepository;
+bool backupLogIfDue(SqliteRepository &repository, QString *error);
+
 QString applicationDataDirectory();
 QString contestDefinitionsDirectory();
 QString contestDefinitionVersionsDirectory();

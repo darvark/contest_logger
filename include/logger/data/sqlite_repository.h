@@ -8,8 +8,10 @@
 #include <QSqlDatabase>
 #include <QString>
 #include <QVector>
+#include <QVariantMap>
 
 #include <functional>
+#include <memory>
 
 namespace logger {
 
@@ -17,6 +19,21 @@ class SqliteRepository final {
 public:
     explicit SqliteRepository(QSqlDatabase database);
 
+    QString databasePath() const;
+    bool isStandaloneLog() const;
+    bool openLogFile(const QString &path, QString *error = nullptr);
+    void swap(SqliteRepository &other);
+    bool createLogFile(const QString &path, const ContestDefinition &definition,
+                       const QString &yaml, const Contest &log,
+                       const QVariantMap &settings,
+                       const QMap<QString, QByteArray> &assets,
+                       const QVector<Qso> &qsos = {}, QString *error = nullptr);
+    QVariantMap logSettings(QString *error = nullptr) const;
+    bool setLogSetting(const QString &key, const QVariant &value,
+                       QString *error = nullptr);
+    QMap<QString, QByteArray> logAssets(QString *error = nullptr) const;
+    bool setLogAsset(const QString &key, const QByteArray &contents,
+                     QString *error = nullptr);
     static int currentSchemaVersion();
     bool initialize(QString *error = nullptr);
     bool ensureGeneralLog(QString *error = nullptr);
@@ -38,6 +55,9 @@ public:
                                    QString *error = nullptr);
     bool enqueueExistingQsosForSync(const QString &logUuid,
                                     QString *error = nullptr);
+    bool setHostedLog(const QString &logUuid, QString *error = nullptr);
+    bool bindToServerLog(const QString &localLogUuid, const QString &serverLogUuid,
+                         QString *error = nullptr);
     bool synchronizationEnabled(const QString &logUuid,
                                 QString *error = nullptr) const;
     qint64 syncCursor(const QString &logUuid, QString *error = nullptr) const;
@@ -121,11 +141,17 @@ public:
                          QString *error = nullptr);
 
 private:
+    struct FileConnection;
+    bool validateStandaloneLog(QString *error) const;
+    friend class CentralRepository;
     bool resolveSyncConflictWithValues(const QString &operationUuid,
                                        const QJsonObject *mergedQso,
                                        QString *error);
 
+    std::shared_ptr<FileConnection> m_fileConnection;
     QSqlDatabase m_database;
+    bool m_standaloneLog = false;
+    QString m_hostedLogUuid;
     int m_spotInsertCount = 0;
 };
 

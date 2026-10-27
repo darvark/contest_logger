@@ -85,25 +85,28 @@ Budowanie bez Hamlib: `-DLOGGER_ENABLE_HAMLIB=OFF`. Instrukcja dla Windows
 
 ## 2. Pliki programu i ich położenie
 
-Program używa nazwy organizacji i aplikacji `ContestLogger`. Konkretne katalogi
-wyznacza Qt (`QStandardPaths::AppDataLocation`):
+Program używa katalogu danych Qt (`QStandardPaths::GenericDataLocation`) i nazwy
+aplikacji `ContestLogger`:
 
 | Dane | Linux | Windows |
 |---|---|---|
-| Baza danych | `~/.local/share/ContestLogger/ContestLogger/contest-logger.sqlite` | `%APPDATA%\ContestLogger\ContestLogger\contest-logger.sqlite` |
-| Kopie automatyczne | `…/backups/automatic-RRRR-MM-DD.sqlite` | jw. |
+| Logi SQLite | pliki `.sqlite` w wybranych lokalizacjach | jw. |
+| Kopie automatyczne | `…/backups/<identyfikator-pliku>/automatic-RRRR-MM-DD.sqlite` | jw. |
 | Pobrane `master.scp`, `wl_cty.dat` | katalog danych aplikacji | jw. |
 | Ustawienia (QSettings, INI) | `…/config/ContestLogger/ContestLogger.ini` | jw. |
 | Definicje zawodów YAML | `…/contests/*.yaml`, `…/contests/*.yml` | jw. |
 
 Przy pierwszym uruchomieniu, również po instalacji pakietu, program tworzy
-katalog danych, bazę, plik konfiguracji i podkatalog `contests`. Dawne ustawienia
+katalog danych, plik konfiguracji i podkatalog `contests`, ale nie zakłada logu. Dawne ustawienia
 z `~/.config/ContestLogger/ContestLogger.conf` (Linux) lub rejestru
 `HKEY_CURRENT_USER\Software\ContestLogger\ContestLogger` (Windows) są jednorazowo
 kopiowane do nowego pliku INI. Oryginały pozostają bez zmian.
 
-Pliki call history i list znaków wczytane „z pliku” **nie są kopiowane** —
-program zapamiętuje ich ścieżki i wczytuje je przy każdym starcie.
+Nowy log zawiera kopie aktualnie używanych danych SCP, call history i CTY oraz
+definicji zawodów. Import lub pobranie danych aktualizuje również kopię w otwartym
+logu. Przy otwieraniu logu program używa wyłącznie danych z jego pliku, bez
+odczytywania oryginalnych plików pomocniczych. Jeżeli nie zaimportowano jeszcze
+SCP/CTY, nowy log nie zawiera tych opcjonalnych danych.
 
 Wbudowane definicje zawodów (18 plików z `contests/examples/`) są wkompilowane
 w program i kopiowane do podkatalogu `contests`, jeśli ich brakuje. Istniejące
@@ -135,7 +138,7 @@ Elementy okna (od lewej, od góry):
 
 | Element | Opis |
 |---|---|
-| Pasek narzędzi | **Log** — wybór aktywnego logu; **Active radio** — Radio A/B; **Run / S&P** — tryb pracy; **SO2V (dual VFO)**, **SO2R (two radios)**. |
+| Pasek narzędzi | **Log** — nazwa otwartego logu i przycisk **Open log…**; **Active radio** — Radio A/B; **Run / S&P** — tryb pracy; **SO2V (dual VFO)**, **SO2R (two radios)**. |
 | Żółta linia statusu | Czas UTC, znak (i operator), nazwa logu, liczba QSO, punkty, mnożniki i wynik. |
 | Okno logu (środek) | Kolumny `Nr, UTC, Band, Mode, kHz, Call, Snt, Rcv, Mult, Pts`. Nowe mnożniki oznaczone na czerwono. Dwuklik otwiera edycję QSO. |
 | Panel wprowadzania QSO | Nagłówek z VFO/radiem, częstotliwością, pasmem, emisją i znacznikiem `◀ TX`; pola Band, Mode, Call, wymiana nadawana (Snt) i odbierana; znacznik `DUPE`/`NEW MULT`/`NEW`; przycisk **Log ↵**; przycisk **RX focus**. Aktywny panel ma czerwoną ramkę. |
@@ -161,9 +164,34 @@ i układ docków zapisywane są przy zamknięciu programu.
 
 ## 5. Nowy log i właściwości logu
 
-**File → New log…** (`Ctrl+N`) otwiera okno wzorowane na DXLog:
+**File → New log…** (`Ctrl+N`) otwiera okno wzorowane na DXLog. Wybór zawodów
+(definicji YAML) odbywa się wyłącznie tutaj, przy zakładaniu logu:
 
 ![Okno New log](./images/new-log.png)
+
+### Otwieranie istniejącego logu
+
+**File → Open log…** (`Ctrl+O`, także przycisk na pasku narzędzi) otwiera
+okno wyboru pliku `.sqlite` z dysku. Każdy plik zawiera dokładnie jeden log.
+Otwarty log jest zapamiętywany i wczytywany przy następnym uruchomieniu.
+Zmiana pliku zatrzymuje aktywną pracę w sieci i Auto CQ. Plik już otwarty
+przez inną instancję nie może zostać otwarty ponownie. Anulowanie wyboru albo
+błąd pliku pozostawia dotychczasowy log otwarty.
+
+Po **Create log** pojawia się okno **Save new log**: wskaż katalog i nazwę
+pliku. Rozszerzenie `.sqlite` jest dodawane automatycznie, a nazwa pliku bez
+rozszerzenia zostaje nazwą logu. Istniejące pliki nie są nadpisywane.
+Do nazwy nie jest dopisywana data; kolejne edycje zawodów można umieszczać
+w osobnych katalogach lub nazywać samodzielnie.
+
+Plik zawiera także ustawienia stacji i operatora, wymianę, kategorie Cabrillo,
+makra CW/ESM i opcje pracy operatorskiej. Konfiguracja sprzętu, sieci,
+języka i układu okien pozostaje lokalna.
+
+Dawna wspólna baza nie jest usuwana ani automatycznie konwertowana. Do przeniesienia
+starszych logów użyj eksportu ADIF/Cabrillo w poprzedniej wersji i importu
+**Create a new log…** w nowej. Import tworzy niezależny plik; nie przenosi
+historii audytu ani stanu synchronizacji starej bazy.
 
 ### Grupa *Contest*
 
@@ -184,7 +212,7 @@ i układ docków zapisywane są przy zamknięciu programu.
 | Club | Klub (Cabrillo `CLUB`), zapamiętywany dla kolejnych logów. |
 | Location | Cabrillo `LOCATION` (np. `DX`, sekcja ARRL, stan), zapamiętywane. |
 | Soapbox | Cabrillo `SOAPBOX`. |
-| Log name | Nazwa logu (proponowana jako `ZNAK Zawody ROK`); musi być unikalna. |
+| Log name | Proponowana nazwa `ZNAK Zawody`, bez daty. Ostateczną nazwę określa plik wybrany w kolejnym oknie. Właściwości istniejącego logu nie zmieniają nazwy pliku. |
 
 ### Grupa *Category*
 
@@ -587,9 +615,11 @@ wymianę nadaną i odebraną.
 - **File → Automatic backup settings…** pozwala włączyć/wyłączyć automatyczne
   kopie, ustawić minimalny odstęp (1–365 dni) i liczbę zachowywanych najnowszych
   plików (1–365). Domyślnie kopia powstaje codziennie i zachowywanych jest 30
-  plików. Kopia jest tworzona przy starcie aplikacji, gdy minął ustawiony odstęp.
+  plików na log. Kopia jest tworzona przy otwieraniu pliku (także przy starcie
+  aplikacji), gdy minął ustawiony odstęp. Każdy plik ma osobny katalog kopii.
 - **Contest → Restore previous YAML definition…** przywraca wybraną poprzednią
-  wersję definicji; bieżąca wersja jest wcześniej zachowywana.
+  wersję definicji w katalogu szablonów; bieżąca wersja jest wcześniej zachowywana.
+  Reguły już utworzonego logu pozostają niezmienione.
 - **File → Support data → Restore previous downloaded support data…** umożliwia
   rollback pobranego Master.SCP lub wl_cty.dat. Pliki są walidowane przed zmianą.
 - Poprzednie wersje definicji są w `contests/versions/`, a pobranych danych
@@ -599,16 +629,19 @@ wymianę nadaną i odebraną.
 - Odtwarzanie (przy zamkniętym programie):
 
   ```sh
-  contest_logger --restore-backup ~/.local/share/ContestLogger/ContestLogger/backups/automatic-2026-10-16.sqlite
+  contest_logger --restore-backup ~/.local/share/ContestLogger/backups/<identyfikator-pliku>/automatic-2026-10-16.sqlite
   ```
 
-  Poprzednia baza jest zachowywana obok odtworzonej.
+  Odtwarzany jest ostatnio otwarty plik logu. Poprzednia baza jest zachowywana
+  obok odtworzonej. Aby przenieść log, zamknij program przed kopiowaniem pliku
+  lub skorzystaj z kopii online, która nie wymaga plików WAL/SHM.
 
 ## 13. Menu — pełna lista poleceń
 
 | Menu | Polecenie | Skrót |
 |---|---|---|
 | **File** | New log… | `Ctrl+N` |
+| | Open log… | `Ctrl+O` |
 | | Log properties… | |
 | | Export Cabrillo… | |
 | | Export ADIF… | |
@@ -637,46 +670,39 @@ wymianę nadaną i odebraną.
 | | Abort CW transmission | `Ctrl+Esc` (także `Esc` podczas nadawania) |
 | **Options** | Operator and station… | |
 | | N1MM UDP broadcast settings… | |
-| | Central network connection… | |
-| | Host central server on this station… / Stop central server on this station | |
-| | Create central log / import local log… (aktywny Host) | |
-| | Disconnect central network | |
+| | Network operation… (Praca w sieci…) — wybór serwer/klient | |
+| | Start/stop network server… | |
+| | Disconnect network | |
 | | Network status and queue… | |
 | | CW function key messages… | |
 | **Window** | Pokaż/ukryj każde okno narzędziowe; Restore default layout | |
 
-### Połączenie z centralnym logiem
+### Praca w sieci — serwer i klienci
 
-Tryb Local pozostaje domyślny. **Options → Central network connection...**
-konfiguruje adres IP i port serwera (domyślnie TCP 7443) oraz wybór logu.
-UUID stacji i nazwa komputera są przekazywane automatycznie przy rejestracji;
-nie wpisuje się tokenu ani certyfikatu. Automatyczne łączenie z zapisanym
-logiem jest opcjonalne i domyślnie wyłączone.
+Na każdej stacji otwórz log tego samego typu, z identyczną definicją zawodów
+YAML. Wybierz **Opcje → Praca w sieci... / Options → Network operation...**,
+a następnie rolę **Server / Serwer** albo **Client / Klient** i nazwę stacji.
+Nazwa musi być unikalna wśród serwera i wszystkich jego klientów; wielkość liter
+i spacje na początku/końcu nie odróżniają nazw.
 
-Tryb sieciowy używa trusted TCP: ruch nie jest szyfrowany, a serwer nie
-uwierzytelnia klientów ani nie weryfikuje przekazanej nazwy komputera i znaku
-stacji. Każda stacja, która może połączyć się z serwerem, otrzymuje dostęp do
-odczytu i zapisu. Sieć LAN/VPN i reguły firewall są jedyną granicą dostępu.
-Używaj go wyłącznie w zaufanej, zamkniętej sieci; nie wystawiaj portu do
-Internetu. Operacje administracyjne, w tym import historycznego logu, wykonuj
-lokalnie na stacji Host.
+Serwer pyta o adres nasłuchu, port (domyślnie TCP 7443) i limit klientów
+(1–256). Udostępnia aktualnie otwarty log i zapisuje w nim QSO klientów.
+Nie ma osobnej bazy ani potrzeby tworzenia lub importowania „centralnego logu”.
 
-**Options → Host central server on this station...** uruchamia serwer
-w procesie GUI z osobną bazą i ustawieniami adresu nasłuchu, portu oraz
-maksymalnej liczby klientów (1–256, domyślnie 16).
-Serwer nie używa TLS ani pliku poświadczeń; rejestruje każdą stację osiągalną
-w wybranej sieci, bez sprawdzenia jej tożsamości. Host może mieć włączony
-autostart, ale zatrzymuje się przy zamknięciu aplikacji. Do stałej usługi
-służy oddzielny `contest_logger_server`; konfigurację opisuje
-[runbook](./NETWORKING_OPERATIONS.md). Nie współdziel aktywnego pliku SQLite
-między komputerami.
+Klient podaje IP serwera i port. Używany jest jego obecnie otwarty log;
+po sprawdzeniu definicji jego UUID zostaje powiązany z logiem serwera.
+Nazwa logu może być inna. Lokalne QSO są zachowane i wysyłane automatycznie.
+Logu z historią synchronizacji z innym serwerem nie przepina się automatycznie.
+Zmiany, także edycje i usunięcia, są przekazywane na bieżąco.
 
-**Disconnect central network** rozłącza Clienta bez kasowania lokalnych
-logów i kolejki. W bieżącym trybie trusted TCP nie ma ról ani ograniczeń
-`read`/`write`: każda połączona stacja ma prawo odczytu i zapisu. Nowy numer
-seryjny wymaga potwierdzenia serwera; wcześniej potwierdzoną rezerwację można
-wykorzystać offline. Synchronizacja pozostaje przed pilotażem — nie traktuj
-jej jeszcze jako zatwierdzonej do pracy w zawodach.
+Panel **Network stations** i okno statusu pokazują serwer oraz klientów.
+**Disconnect network** rozłącza klienta lub zatrzymuje serwer bez kasowania
+logu i kolejki. Zmiana otwartego logu również zatrzymuje pracę w sieci.
+Opcjonalny autostart dotyczy zapisanego, aktualnie otwartego logu.
+
+Połączenie używa zwykłego TCP: bez TLS, certyfikatów, tokenów i logowania.
+Używaj wyłącznie zaufanej sieci LAN; nie wystawiaj portu w Internecie
+i nie współdziel pliku SQLite między komputerami.
 
 ### Status sieci i podłączone stacje
 
@@ -726,6 +752,8 @@ pokazywana jest liczba 0.
 | Skrót | Działanie |
 |---|---|
 | `Ctrl+N` | Nowy log |
+| `Ctrl+O` | Otwórz log |
+| `Alt+O` | Ustaw znak bieżącego operatora, niezależnie od znaku stacji |
 | `Ctrl+Q` | Zakończ program |
 | `F1`–`F8` | Wyślij komunikat CW Fn (tylko emisja CW) |
 | `Ctrl+K` | Otwórz okno nadawania CW na bieżąco |
@@ -759,6 +787,13 @@ pokazywana jest liczba 0.
 | Okno CW, pole tekstu | `Enter` | Wyślij tekst |
 | Log | Dwuklik | Edycja QSO |
 | Pasek F1–F8 | Prawy klik | Edycja etykiety i tekstu komunikatu |
+
+**Options → Operator callsign…** (`Alt+O`) pozwala szybko ustawić znak operatora,
+np. przy pracy pod znakiem klubowym. Znak jest zapamiętywany na tej instancji
+programu i wyświetlany obok znaku stacji. Jest używany przez makro `{OPERATOR}`,
+N1MM UDP i identyfikację klienta sieciowego. Nie zmienia znaku stacji, danych
+kontaktowych Cabrillo ani właściwości `OPERATORS` logu. Puste pole usuwa osobny
+znak i przywraca dotychczasowe użycie nazwy operatora z ustawień stacji.
 | Check partial | Klik | Wstaw znak do pola Call |
 
 ## 15. Opcje konfiguracji (QSettings)

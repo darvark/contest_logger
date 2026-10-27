@@ -30,6 +30,7 @@ struct SyncClientConfiguration {
     QString operatingBand;
     QString operatingMode;
     bool trustedNetworkMode = false;
+    bool useServerActiveLog = false;
     QString token;
     QString logUuid;
     QString contestDefinitionSha256;
@@ -65,6 +66,7 @@ public:
                               QString *error = nullptr);
     void stopSynchronization();
     bool synchronizeNow();
+    void flushPendingChanges();
     bool selectRemoteLog(const QString &logUuid,
                          const QString &contestDefinitionSha256);
     QString createRemoteLog(const Contest &log, const QString &definitionYaml);
@@ -103,6 +105,7 @@ signals:
     void requestFailed(const QString &requestId, const QString &code,
                        const QString &message, bool retryable);
     void logsDiscovered(const QJsonArray &logs);
+    void logBound(const QString &logUuid);
     void synchronizationStarted();
     void synchronizationFinished(int uploadedOperations, int downloadedEvents,
                                  qint64 elapsedMs, bool success,

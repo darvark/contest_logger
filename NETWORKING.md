@@ -1,4 +1,38 @@
-## Aktualne tryby i granica bezpieczeństwa
+## Aktualna praca w sieci (2026-10-27)
+
+1. Na wszystkich komputerach otwórz log tego samego typu, z identyczną
+   definicją zawodów YAML. Nazwy logów i początkowe UUID nie muszą być jednakowe.
+   Każda stacja tworzy własny plik `.sqlite` na lokalnym dysku; **Open log…**
+   wybiera ten plik, a nie wspólny plik serwera.
+2. Wybierz **Opcje → Praca w sieci... / Options → Network operation...**,
+   rolę **Serwer / Server** albo **Klient / Client** i unikalną nazwę stacji.
+3. Na serwerze ustaw adres nasłuchu i port (domyślnie TCP 7443).
+   Udostępniany jest wyłącznie obecnie otwarty log. Wszystkie QSO klientów
+   są zapisywane bezpośrednio w nim; nie twórz ani nie importuj „logu centralnego”.
+4. Na klientach podaj IP serwera i ten sam port. Sprawdzana jest zgodność
+   definicji, a istniejący log klienta zostaje powiązany z logiem serwera.
+   Nie jest tworzony dodatkowy log. Lokalna historia i oczekujące operacje
+   pozostają zachowane. Log już zsynchronizowany z innym serwerem nie jest
+   automatycznie przepinany.
+5. Zapis, edycje, usunięcia i cofnięcia zmian są przesyłane automatycznie.
+   Panel **Network stations** oraz okno statusu pokazują serwer i klientów.
+   Serwer odrzuca powtórzone nazwy, także własną; porównuje je bez rozróżniania
+   wielkości liter i spacji na początku/końcu.
+
+Nie ma TLS, certyfikatów, tokenów ani logowania. Jest to zwykły TCP do pracy
+w zaufanej sieci LAN. Kontrola nazwy nie stanowi uwierzytelniania.
+Nie udostępniaj portu w Internecie ani pliku SQLite przez udział sieciowy.
+Zmiana otwartego logu rozłącza sieć; zamknięcie aplikacji zatrzymuje serwer.
+Autostart jest opcjonalny i działa tylko dla zapisanego, otwartego logu.
+
+## Archiwalna specyfikacja i wariant headless
+
+Poniższy opis zachowano jako historię protokołu i serwera CLI.
+Fragmenty o osobnej centralnej bazie, tworzeniu/importowaniu centralnego logu
+i dołączaniu nowej kopii **nie opisują aktualnej pracy sieciowej GUI**.
+Obowiązują instrukcje powyżej.
+
+### Dawne tryby i granica bezpieczeństwa
 
 - **Local** — domyślna praca bez połączenia z centralnym serwerem.
 - **Client/Host w GUI** oraz **`contest_logger_server --listen`** — bieżące

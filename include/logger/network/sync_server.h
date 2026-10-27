@@ -37,6 +37,12 @@ public:
     quint16 serverPort() const;
     int activeConnections() const;
     QJsonArray connectedStations(const QString &logUuid) const;
+    bool hostOpenLog(const QString &logUuid, const QString &stationName,
+                     QString *error = nullptr);
+    void setHostOperatingState(const QString &band, const QString &mode);
+
+signals:
+    void logChanged();
 
 private:
     struct ClientSession;
@@ -67,6 +73,10 @@ private:
     QSslKey m_privateKey;
     int m_maximumConnections = 0;
     bool m_trustedNetworkMode = false;
+    QString m_hostedLogUuid;
+    QJsonObject m_hostIdentity;
+    QTimer *m_hostTimer = nullptr;
+    qint64 m_hostRevision = -1;
 };
 
 } // namespace logger

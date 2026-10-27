@@ -428,6 +428,9 @@ bool SyncServer::listenTrustedNetwork(const QString &address, quint16 port,
 void SyncServer::close()
 {
     m_eventRetentionTimer->stop();
+    if (m_hostTimer) {
+        m_hostTimer->stop();
+    }
     if (m_server) {
         m_server->close();
     }
@@ -489,6 +492,9 @@ QJsonArray SyncServer::connectedStations(const QString &logUuid) const
     if (logUuid.isEmpty()) {
         return stations;
     }
+    if (logUuid == m_hostedLogUuid) {
+        stations.append(m_hostIdentity);
+    }
     for (const ClientSession *session : m_sessions) {
         if (session->authenticated && session->activeLogUuid == logUuid) {
             stations.append(QJsonObject{
@@ -512,10 +518,68 @@ QJsonArray SyncServer::connectedStations(const QString &logUuid) const
     return stations;
 }
 
+bool SyncServer::hostOpenLog(const QString &logUuid, const QString &stationName,
+                             QString *error)
+{
+    const auto logs = m_repository.repository()->contests(error);
+    if ((error && !error->isEmpty()) || m_hostTimer
+        || stationName.trimmed().isEmpty() || stationName.trimmed().size() > 255
+        || std::any_of(stationName.cbegin(), stationName.cend(), [](QChar c) {
+               return c.category() == QChar::Other_Control;
+           })
+        || std::none_of(logs.cbegin(), logs.cend(), [&logUuid](const Contest &log) {
+               return log.logUuid == logUuid;
+           })) {
+        if (error && error->isEmpty()) {
+            *error = QStringLiteral("An open log and a non-empty station name are required.");
+        }
+        return false;
+    }
+    m_hostedLogUuid = logUuid;
+    m_hostIdentity.insert(QStringLiteral("computer_name"), stationName.trimmed());
+    const QString stationUuid = m_repository.repository()->localStationUuid(error);
+    if (stationUuid.isEmpty()) {
+        return false;
+    }
+    m_hostIdentity.insert(QStringLiteral("station_uuid"), stationUuid);
+    m_hostIdentity.insert(QStringLiteral("session_uuid"), uuidString());
+    const auto hostedLog = std::find_if(logs.cbegin(), logs.cend(),
+        [&logUuid](const Contest &log) { return log.logUuid == logUuid; });
+    m_hostIdentity.insert(QStringLiteral("station_callsign"), hostedLog->stationCallsign);
+    m_hostTimer = new QTimer(this);
+    m_hostTimer->setInterval(100);
+    connect(m_hostTimer, &QTimer::timeout, this, [this] {
+        QString error;
+        const qint64 revision = m_repository.currentRevision(m_hostedLogUuid, &error);
+        if (!error.isEmpty()) {
+            qWarning().noquote() << "Cannot read hosted log revision:" << error;
+            return;
+        }
+        if (revision != m_hostRevision) {
+            m_hostRevision = revision;
+            notifyLogRevision(m_hostedLogUuid, revision);
+            emit logChanged();
+        }
+    });
+    m_hostTimer->start();
+    return true;
+}
+
+void SyncServer::setHostOperatingState(const QString &band, const QString &mode)
+{
+    m_hostIdentity.insert(QStringLiteral("operating_band"), band);
+    m_hostIdentity.insert(QStringLiteral("operating_mode"), mode);
+    m_hostIdentity.insert(QStringLiteral("operating_state_updated_utc"),
+                         QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+}
+
 bool SyncServer::stationCanAccessLog(
     const ClientSession *session, const QString &logUuid) const
 {
     if (session == nullptr || !isUuid(logUuid)) {
+        return false;
+    }
+    if (!m_hostedLogUuid.isEmpty() && logUuid != m_hostedLogUuid) {
         return false;
     }
     if (session->permissions.contains(QStringLiteral("admin"))) {
@@ -778,16 +842,36 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                 closeSession(socket);
                 return;
             }
-            const bool duplicateStation = std::any_of(
+            const bool duplicateStation =
+                (!m_hostedLogUuid.isEmpty()
+                 && stationUuid == m_hostIdentity.value(QStringLiteral("station_uuid")).toString())
+                || std::any_of(
                 m_sessions.cbegin(), m_sessions.cend(),
                 [session, &stationUuid](const ClientSession *other) {
                     return other != session && other->authenticated
                         && other->stationUuid == stationUuid;
                 });
-            if (duplicateStation) {
+            const QString stationName =
+                identity.value(QStringLiteral("computer_name")).toString().trimmed();
+            const bool duplicateName =
+                (!m_hostedLogUuid.isEmpty()
+                 && stationName.compare(m_hostIdentity.value(QStringLiteral("computer_name"))
+                                            .toString().trimmed(),
+                                        Qt::CaseInsensitive) == 0)
+                || std::any_of(m_sessions.cbegin(), m_sessions.cend(),
+                    [session, &stationName](const ClientSession *other) {
+                        return other != session && other->authenticated
+                            && !stationName.isEmpty()
+                            && stationName.compare(
+                                other->identity.value(QStringLiteral("computer_name"))
+                                    .toString().trimmed(), Qt::CaseInsensitive) == 0;
+                    });
+            if (duplicateStation || duplicateName
+                || (!m_hostedLogUuid.isEmpty() && stationName.isEmpty())) {
                 sendError(socket, protocolVersion, requestId,
                           QStringLiteral("STATION_ALREADY_CONNECTED"),
-                          QStringLiteral("This station UUID is already connected."));
+                          QStringLiteral("Station name or UUID is already in use. "
+                                         "Choose a unique, non-empty station name."));
                 closeSession(socket);
                 return;
             }
@@ -861,6 +945,14 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("INVALID_MESSAGE"),
                       QStringLiteral("Station identity is invalid."));
+            return;
+        }
+        if (m_trustedNetworkMode
+            && payload.value(QStringLiteral("computer_name"))
+                != session->identity.value(QStringLiteral("computer_name"))) {
+            sendError(socket, protocolVersion, requestId,
+                      QStringLiteral("INVALID_MESSAGE"),
+                      QStringLiteral("Reconnect to change the station name."));
             return;
         }
         session->identity = payload;
@@ -1286,13 +1378,13 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
                       QStringLiteral("FORBIDDEN"), QStringLiteral("Read permission is required."));
             return;
         }
-        if (logValue.isNull()) {
+        if (logValue.isNull() && m_hostedLogUuid.isEmpty()) {
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("UNKNOWN_LOG"),
                       QStringLiteral("Creating a central log is not available yet."));
             return;
         }
-        const QString logUuid = logValue.toString();
+        const QString logUuid = logValue.isNull() ? m_hostedLogUuid : logValue.toString();
         if (!isUuid(logUuid)) {
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("UNKNOWN_LOG"), QStringLiteral("Log UUID is invalid."));
@@ -1328,8 +1420,9 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
         }
         const QByteArray definitionHashBytes = QCryptographicHash::hash(
             yaml.toUtf8(), QCryptographicHash::Sha256).toHex();
-        if (!definitionHash.isNull()
-            && definitionHash.toString().toLatin1() != definitionHashBytes) {
+        if ((!m_hostedLogUuid.isEmpty() && definitionHash.isNull())
+            || (!definitionHash.isNull()
+                && definitionHash.toString().toLatin1() != definitionHashBytes)) {
             sendError(socket, protocolVersion, requestId,
                       QStringLiteral("CONTEST_MISMATCH"),
                       QStringLiteral("Contest definition hash does not match."));

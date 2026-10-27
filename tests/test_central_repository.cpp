@@ -182,8 +182,10 @@ void CentralRepositoryTest::backsUpBeforeSchemaMigration()
         QVERIFY(database.open());
         QSqlQuery query(database);
         QVERIFY(query.exec(QStringLiteral(
-            "DELETE FROM schema_migrations WHERE version IN "
-            "(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)")));
+            "DELETE FROM schema_migrations WHERE version >= 9")));
+        QVERIFY(query.exec(QStringLiteral("DROP TABLE log_file")));
+        QVERIFY(query.exec(QStringLiteral("DROP TABLE log_settings")));
+        QVERIFY(query.exec(QStringLiteral("DROP TABLE log_assets")));
         QVERIFY(query.exec(QStringLiteral("ALTER TABLE qsos DROP COLUMN qtc_json")));
         QVERIFY(query.exec(QStringLiteral("DROP TABLE qso_change_audit")));
         QVERIFY(query.exec(QStringLiteral(

@@ -27,10 +27,40 @@ private slots:
     void reportsInvalidAndDuplicateDefinitions();
     void importsPersistAndReplaceTheExistingFile();
     void reportsDirectoryAndSettingsCreationFailures();
+    void automaticBackupsAreIndependentForEachLogFile();
 
 private:
     QTemporaryDir m_legacySettings;
 };
+
+void ApplicationDataTest::automaticBackupsAreIndependentForEachLogFile()
+{
+    QString error;
+    QVERIFY2(initializeApplicationData(&error), qPrintable(error));
+    QVERIFY2(installBundledContestDefinitions(&error), qPrintable(error));
+    QVector<ContestDefinitionFile> definitions;
+    QVERIFY2(loadContestDefinitionFiles(&definitions, &error), qPrintable(error));
+    QVERIFY(!definitions.isEmpty());
+    const auto &definition = definitions.first();
+    const QDir directory(applicationDataDirectory());
+    SqliteRepository repository{QSqlDatabase()};
+    Contest log;
+    log.name = QStringLiteral("Backup test");
+    for (const QString &name : {QStringLiteral("First"), QStringLiteral("Second")}) {
+        QVERIFY2(repository.createLogFile(directory.filePath(name + QStringLiteral(".sqlite")),
+                                           definition.definition, definition.yaml, log, {}, {}, {},
+                                           &error), qPrintable(error));
+        QVERIFY2(backupLogIfDue(repository, &error), qPrintable(error));
+        QVERIFY2(backupLogIfDue(repository, &error), qPrintable(error));
+    }
+    const QDir backupDirectory(directory.filePath(QStringLiteral("backups")));
+    const auto folders = backupDirectory.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(folders.size(), 2);
+    for (const QString &folder : folders) {
+        const QDir backups(backupDirectory.filePath(folder));
+        QCOMPARE(backups.entryList({QStringLiteral("automatic-*.sqlite")}, QDir::Files).size(), 1);
+    }
+}
 
 void ApplicationDataTest::initTestCase()
 {
@@ -51,19 +81,38 @@ void ApplicationDataTest::init()
 
 void ApplicationDataTest::cleanup()
 {
-    const QString directory = applicationDataDirectory();
-    if (QFileInfo(directory).isDir()) {
-        QVERIFY(QDir(directory).removeRecursively());
-    } else if (QFileInfo::exists(directory)) {
-        QVERIFY(QFile::remove(directory));
+    const QStringList directories{
+        applicationDataDirectory(),
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)};
+    for (const QString &directory : directories) {
+        if (QFileInfo(directory).isDir()) {
+            QVERIFY(QDir(directory).removeRecursively());
+        } else if (QFileInfo::exists(directory)) {
+            QVERIFY(QFile::remove(directory));
+        }
     }
 }
 
 void ApplicationDataTest::firstStartCreatesSettingsDatabaseAndDefinitions()
 {
+    QCOMPARE(applicationDataDirectory(),
+             QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+                 .filePath(QCoreApplication::applicationName()));
     QVERIFY(!QFileInfo::exists(applicationDataDirectory()));
+    const QString legacyDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QVERIFY(QDir().mkpath(legacyDirectory));
+    QFile legacyMarker(QDir(legacyDirectory).filePath(
+        QStringLiteral("legacy-marker.txt")));
+    QVERIFY(legacyMarker.open(QIODevice::WriteOnly));
+    QCOMPARE(legacyMarker.write(QByteArrayLiteral("legacy data")), 11);
+    legacyMarker.close();
     QString error;
     QVERIFY2(initializeApplicationData(&error), qPrintable(error));
+    QFile migratedMarker(QDir(applicationDataDirectory()).filePath(
+        QStringLiteral("legacy-marker.txt")));
+    QVERIFY(migratedMarker.open(QIODevice::ReadOnly));
+    QCOMPARE(migratedMarker.readAll(), QByteArrayLiteral("legacy data"));
     QVERIFY(QFileInfo::exists(QSettings().fileName()));
     QVERIFY(QSettings().fileName().startsWith(
         applicationDataDirectory() + QLatin1Char('/')));

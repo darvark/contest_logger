@@ -274,7 +274,7 @@ CentralRepository::CentralRepository() = default;
 CentralRepository::~CentralRepository()
 {
     m_repository.reset();
-    if (m_database.isValid()) {
+    if (m_ownsDatabase && m_database.isValid()) {
         m_database.close();
     }
     m_database = QSqlDatabase();
@@ -284,6 +284,24 @@ CentralRepository::~CentralRepository()
     if (m_lockFile) {
         m_lockFile->unlock();
     }
+}
+
+bool CentralRepository::attach(SqliteRepository &repository, QString *error)
+{
+    if (m_repository || !repository.m_database.isOpen()) {
+        setError(error, QStringLiteral("Cannot attach the open log database."));
+        return false;
+    }
+    m_ownsDatabase = false;
+    m_database = repository.m_database;
+    m_databasePath = m_database.databaseName();
+    m_repository = std::make_unique<SqliteRepository>(m_database);
+    return true;
+}
+
+void CentralRepository::setCtyPrefixes(const QVector<CtyPrefixEntry> &prefixes)
+{
+    m_ctyPrefixes = prefixes;
 }
 
 bool CentralRepository::initialize(const QString &dataDirectory, QString *error)

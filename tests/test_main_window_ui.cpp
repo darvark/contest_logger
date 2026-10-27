@@ -11,6 +11,7 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QColor>
+#include <QCryptographicHash>
 #include <QComboBox>
 #include <QCompleter>
 #include <QCheckBox>
@@ -66,8 +67,10 @@ private slots:
     void init();
     void cleanup();
     void contestDefinitionConstrainsBandAndModeSelectors();
+    void operatorCallsignShortcutPreservesStationAndPersists_data();
+    void operatorCallsignShortcutPreservesStationAndPersists();
     void connectionMenuReconnectsAndDisconnects();
-    void remoteCentralLogJoinOptionIsAvailable();
+    void networkDialogSelectsRoleAndUsesOpenLog();
     void networkConnectionRejectsNonNumericServerAddress();
     void hostImportRequiresServerMode();
     void networkStationsDockLayoutPersists();
@@ -82,6 +85,7 @@ private slots:
     void esmSendsCallAndLogsOnExchangeEnter();
     void esmMessagesAreConfiguredPerContest();
     void autoCqRequiresRunAndStopsWhenEnteringCallsign();
+    void frequencyEnteredInCallsignFieldTunesRadioInKilohertz();
     void frequencyChangeWithinBandSwitchesRunToSearchAndPounce();
     void runFrequencyThreshold_data();
     void runFrequencyThreshold();
@@ -116,6 +120,9 @@ private slots:
     void serverSerialReservationRequiresConnectionAndReservation();
     void newLogDialogRequiresCallsignAndContest();
     void newLogActionCreatesLogWithStationCallsign();
+    void openLogActionOpensIndependentFile();
+    void cancellingFileDialogsPreservesOpenLog();
+    void startsWithoutImplicitLog();
     void newLogReadsDefinitionsFromApplicationDirectory();
     void importsAdifToCurrentOrNewLog_data();
     void importsAdifToCurrentOrNewLog();
@@ -205,6 +212,16 @@ void MainWindowUiTest::init()
     m_repository = std::make_unique<SqliteRepository>(database);
     QString error;
     QVERIFY2(m_repository->initialize(&error), qPrintable(error));
+    const QDir definitions(QStringLiteral(":/contests"));
+    for (const QString &name : definitions.entryList({QStringLiteral("*.yaml")})) {
+        QFile source(definitions.filePath(name));
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const QString yaml = QString::fromUtf8(source.readAll());
+        ContestDefinition definition;
+        QVERIFY2(ContestDefinitionLoader().loadText(yaml, name, definition, &error),
+                 qPrintable(error));
+        QVERIFY2(m_repository->saveContestDefinition(definition, yaml, &error), qPrintable(error));
+    }
 
     m_window = std::make_unique<MainWindow>(*m_repository);
     m_window->show();
@@ -219,6 +236,76 @@ void MainWindowUiTest::init()
     QVERIFY(exchangeEdit(QStringLiteral("report")) == nullptr);
     auto *band = panelA()->findChildren<QComboBox *>().first();
     band->setCurrentText(QStringLiteral("40m"));
+}
+
+void MainWindowUiTest::operatorCallsignShortcutPreservesStationAndPersists_data()
+{
+    QTest::addColumn<QString>("languageAction");
+    QTest::newRow("english") << QStringLiteral("languageEnglishAction");
+    QTest::newRow("polish") << QStringLiteral("languagePolishAction");
+}
+
+void MainWindowUiTest::operatorCallsignShortcutPreservesStationAndPersists()
+{
+    QFETCH(QString, languageAction);
+    auto *language = m_window->findChild<QAction *>(languageAction);
+    QVERIFY(language != nullptr);
+    language->trigger();
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("operatorCallsignAction"));
+    QVERIFY(action != nullptr);
+    QCOMPARE(action->shortcut(), QKeySequence(QStringLiteral("Alt+O")));
+    const qint64 logId = m_window->findChild<QComboBox *>(
+        QStringLiteral("contestSelector"))->currentData().toLongLong();
+    bool dialogSeen = false;
+    runWhenModalAppears([&](QDialog *dialog) {
+        QCOMPARE(dialog->objectName(), QStringLiteral("operatorCallsignDialog"));
+        dialogSeen = true;
+        auto *edit = dialog->findChild<QLineEdit *>(QStringLiteral("activeOperatorCallsign"));
+        QVERIFY(edit != nullptr);
+        auto *buttons = dialog->findChild<QDialogButtonBox *>();
+        edit->setText(QStringLiteral("invalid call!"));
+        QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        edit->setText(QStringLiteral(" sp9abc/p "));
+        QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        buttons->button(QDialogButtonBox::Ok)->click();
+    });
+    m_window->activateWindow();
+    callEdit()->setFocus();
+    QTest::qWait(50);
+    QTest::keyClick(callEdit(), Qt::Key_O, Qt::AltModifier);
+    QVERIFY(dialogSeen);
+    QCOMPARE(QSettings().value(QStringLiteral("station/operatorCallsign")).toString(),
+             QStringLiteral("SP9ABC/P"));
+    QCOMPARE(QSettings().value(QStringLiteral("station/callsign")).toString(),
+             QStringLiteral("SP9TEST"));
+    auto *status = m_window->findChild<QLabel *>(QStringLiteral("topStatus"));
+    QVERIFY(status->text().contains(QStringLiteral("SP9TEST (SP9ABC/P)")));
+    QCOMPARE(m_window->findChild<QComboBox *>(
+                 QStringLiteral("contestSelector"))->currentData().toLongLong(), logId);
+
+    m_window.reset();
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    status = m_window->findChild<QLabel *>(QStringLiteral("topStatus"));
+    QVERIFY(status->text().contains(QStringLiteral("SP9TEST (SP9ABC/P)")));
+    action = m_window->findChild<QAction *>(QStringLiteral("operatorCallsignAction"));
+    runWhenModalAppears([](QDialog *dialog) {
+        auto *edit = dialog->findChild<QLineEdit *>(QStringLiteral("activeOperatorCallsign"));
+        QCOMPARE(edit->text(), QStringLiteral("SP9ABC/P"));
+        edit->setText(QStringLiteral("K1ABC"));
+        dialog->reject();
+    });
+    action->trigger();
+    QCOMPARE(QSettings().value(QStringLiteral("station/operatorCallsign")).toString(),
+             QStringLiteral("SP9ABC/P"));
+    runWhenModalAppears([](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>(QStringLiteral("activeOperatorCallsign"))->clear();
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action->trigger();
+    QVERIFY(QSettings().value(QStringLiteral("station/operatorCallsign")).toString().isEmpty());
+    QVERIFY(!status->text().contains(QStringLiteral("SP9ABC/P")));
+    QVERIFY(status->text().contains(QStringLiteral("SP9TEST")));
+    m_window->findChild<QAction *>(QStringLiteral("languageEnglishAction"))->trigger();
 }
 
 void MainWindowUiTest::cleanup()
@@ -348,36 +435,48 @@ void MainWindowUiTest::connectionMenuReconnectsAndDisconnects()
     QTRY_VERIFY(cwStatus->text().contains(QStringLiteral("CW: Disconnected")));
 }
 
-void MainWindowUiTest::remoteCentralLogJoinOptionIsAvailable()
+void MainWindowUiTest::networkDialogSelectsRoleAndUsesOpenLog()
 {
     auto *configure = m_window->findChild<QAction *>(
         QStringLiteral("configureNetworkConnectionAction"));
     QVERIFY(configure != nullptr);
     runWhenModalAppears([this](QDialog *dialog) {
-        auto *logSelector =
-            dialog->findChild<QComboBox *>(QStringLiteral("syncLogSelector"));
-        QVERIFY(logSelector != nullptr);
-        QVERIFY(logSelector->findData(QStringLiteral("@remote")) >= 0);
-        QCOMPARE(logSelector->findData(QStringLiteral("@create")), -1);
-        QVERIFY(dialog->findChild<QLineEdit *>(
-                    QStringLiteral("syncServerHost")) != nullptr);
-        QVERIFY(dialog->findChild<QSpinBox *>(
-                    QStringLiteral("syncServerPort")) != nullptr);
-        auto *port = dialog->findChild<QSpinBox *>(
-            QStringLiteral("syncServerPort"));
-        QCOMPARE(port->minimum(), 1);
-        QCOMPARE(port->maximum(), 65535);
-        QVERIFY(dialog->findChild<QLineEdit *>(
-                    QStringLiteral("syncCustomCaPath")) == nullptr);
-        auto *autoStart = dialog->findChild<QCheckBox *>(
-            QStringLiteral("autoStartSyncClientCheck"));
-        QVERIFY(autoStart != nullptr);
-        QVERIFY(!autoStart->isChecked());
-        QVERIFY(dialog->findChild<QCheckBox *>(
-                    QStringLiteral("saveSyncTokenCheck")) == nullptr);
-        auto *buttons = dialog->findChild<QDialogButtonBox *>();
-        QVERIFY(buttons != nullptr);
-        buttons->button(QDialogButtonBox::Cancel)->click();
+        auto *role = dialog->findChild<QComboBox *>(QStringLiteral("networkRoleSelector"));
+        QVERIFY(role != nullptr);
+        QCOMPARE(role->count(), 2);
+        QVERIFY(role->findData(QStringLiteral("server")) >= 0);
+        role->setCurrentIndex(role->findData(QStringLiteral("client")));
+        auto *name = dialog->findChild<QLineEdit *>(QStringLiteral("networkStationName"));
+        QVERIFY(name != nullptr);
+        name->setText(QStringLiteral("TEST-CLIENT"));
+        runWhenModalAppears([this](QDialog *dialog) {
+            auto *logSelector =
+                dialog->findChild<QComboBox *>(QStringLiteral("syncLogSelector"));
+            QVERIFY(logSelector != nullptr);
+            QVERIFY(!logSelector->isEnabled());
+            QCOMPARE(logSelector->findData(QStringLiteral("@remote")), -1);
+            QCOMPARE(logSelector->findData(QStringLiteral("@create")), -1);
+            QVERIFY(dialog->findChild<QLineEdit *>(
+                        QStringLiteral("syncServerHost")) != nullptr);
+            QVERIFY(dialog->findChild<QSpinBox *>(
+                        QStringLiteral("syncServerPort")) != nullptr);
+            auto *port = dialog->findChild<QSpinBox *>(
+                QStringLiteral("syncServerPort"));
+            QCOMPARE(port->minimum(), 1);
+            QCOMPARE(port->maximum(), 65535);
+            QVERIFY(dialog->findChild<QLineEdit *>(
+                        QStringLiteral("syncCustomCaPath")) == nullptr);
+            auto *autoStart = dialog->findChild<QCheckBox *>(
+                QStringLiteral("autoStartSyncClientCheck"));
+            QVERIFY(autoStart != nullptr);
+            QVERIFY(!autoStart->isChecked());
+            QVERIFY(dialog->findChild<QCheckBox *>(
+                        QStringLiteral("saveSyncTokenCheck")) == nullptr);
+            auto *buttons = dialog->findChild<QDialogButtonBox *>();
+            QVERIFY(buttons != nullptr);
+            buttons->button(QDialogButtonBox::Cancel)->click();
+        });
+        dialog->accept();
     });
     configure->trigger();
 }
@@ -403,7 +502,8 @@ void MainWindowUiTest::networkConnectionRejectsNonNumericServerAddress()
         dialog->findChild<QDialogButtonBox *>()->button(
             QDialogButtonBox::Ok)->click();
     });
-    configure->trigger();
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "configureClientConnection",
+                                      Qt::DirectConnection));
 
     const QSettings settings;
     QVERIFY(settings.value(QStringLiteral("network/client/host")).toString().isEmpty());
@@ -452,7 +552,8 @@ void MainWindowUiTest::hostImportRequiresServerMode()
             QDialogButtonBox::Ok)->click();
     });
     hostAction->trigger();
-    QTRY_VERIFY(importAction->isEnabled());
+    QVERIFY(!importAction->isEnabled());
+    QVERIFY(!importAction->isVisible());
     QSettings settings;
     QCOMPARE(settings.value(QStringLiteral("network/host/address")).toString(),
              QStringLiteral("127.0.0.1"));
@@ -665,6 +766,8 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
     QVERIFY2(central.createLog(definition, yaml, *log, &error) > 0, qPrintable(error));
     const QString peerUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     SyncServer server(central);
+    QVERIFY2(server.hostOpenLog(log->logUuid, QStringLiteral("HOST"), &error),
+             qPrintable(error));
     QVERIFY2(server.listenTrustedNetwork(
         QStringLiteral("127.0.0.1"), 0, 4, &error), qPrintable(error));
     SyncClientConfiguration configuration;
@@ -676,6 +779,8 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
     configuration.stationCallsign = QStringLiteral("SP9PEER");
     configuration.operatorName = QStringLiteral("Anna SP9ABC");
     configuration.logUuid = log->logUuid;
+    configuration.contestDefinitionSha256 = QString::fromLatin1(
+        QCryptographicHash::hash(yaml.toUtf8(), QCryptographicHash::Sha256).toHex());
     SyncClient peer;
     peer.connectToServer(configuration);
     QTRY_COMPARE(peer.state(), SyncClient::State::Ready);
@@ -693,8 +798,9 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
         logSelector->setCurrentIndex(logSelector->findData(log->logUuid));
         dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
     });
-    configure->trigger();
-    QTRY_COMPARE(server.connectedStations(log->logUuid).size(), 2);
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "configureClientConnection",
+                                      Qt::DirectConnection));
+    QTRY_COMPARE(server.connectedStations(log->logUuid).size(), 3);
     QSettings connectionSettings;
     QCOMPARE(connectionSettings.value(QStringLiteral("network/client/host")).toString(),
              QStringLiteral("127.0.0.1"));
@@ -738,8 +844,8 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
         QVERIFY(label != nullptr);
         QVERIFY(timer != nullptr);
         QCOMPARE(timer->interval(), 5000);
-        QTRY_COMPARE(stations->rowCount(), 2);
-        QCOMPARE(label->text(), QStringLiteral("Connected stations for this log: 2"));
+        QTRY_COMPARE(stations->rowCount(), 3);
+        QCOMPARE(label->text(), QStringLiteral("Connected stations for this log: 3"));
         QSet<QString> computers;
         for (int row = 0; row < stations->rowCount(); ++row) {
             computers.insert(stations->item(row, 0)->text());
@@ -748,7 +854,7 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
                          QStringLiteral("Connected (this station)"));
                 QCOMPARE(stations->item(row, 1)->text(), QStringLiteral("SP9TEST"));
                 QCOMPARE(stations->item(row, 2)->text(), QStringLiteral("Not provided"));
-            } else {
+            } else if (stations->item(row, 0)->text() == QStringLiteral("RADIO-B")) {
                 QCOMPARE(stations->item(row, 1)->text(), QStringLiteral("SP9PEER"));
                 QCOMPARE(stations->item(row, 2)->text(), QStringLiteral("Anna SP9ABC"));
                 QCOMPARE(stations->item(row, 3)->text(), QStringLiteral("20m"));
@@ -759,7 +865,7 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
             }
         }
         QCOMPARE(computers, (QSet<QString>{QHostInfo::localHostName(),
-                                          QStringLiteral("RADIO-B")}));
+                                          QStringLiteral("RADIO-B"), QStringLiteral("HOST")}));
         peer.setStationIdentity(QStringLiteral("SP9NEW"), QStringLiteral("Jan SP9XYZ"));
         dialog->findChild<QPushButton *>(QStringLiteral("refreshNetworkStatusButton"))->click();
         QTRY_VERIFY([&] {
@@ -772,14 +878,13 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
         }());
         timer->setInterval(20);
         peer.disconnectFromServer();
-        QTRY_COMPARE(stations->rowCount(), 1);
-        QCOMPARE(stations->item(0, 0)->text(), QHostInfo::localHostName());
+        QTRY_COMPARE(stations->rowCount(), 2);
 
         timer->stop();
         peer.connectToServer(configuration);
         QTRY_COMPARE(peer.state(), SyncClient::State::Ready);
         dialog->findChild<QPushButton *>(QStringLiteral("refreshNetworkStatusButton"))->click();
-        QTRY_COMPARE(stations->rowCount(), 2);
+        QTRY_COMPARE(stations->rowCount(), 3);
         auto *disconnect = m_window->findChild<QAction *>(
             QStringLiteral("disconnectNetworkConnectionAction"));
         QVERIFY(disconnect != nullptr);
@@ -790,6 +895,18 @@ void MainWindowUiTest::networkStatusListsConnectedStations()
     });
     statusAction->trigger();
     QVERIFY(dialogSeen);
+    connectionSettings.setValue(QStringLiteral("network/client/autoStart"), true);
+    connectionSettings.sync();
+    m_window.reset();
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    QTRY_COMPARE(server.connectedStations(log->logUuid).size(), 3);
+    auto *reopenedSelector = m_window->findChild<QComboBox *>(
+        QStringLiteral("contestSelector"));
+    QVERIFY(reopenedSelector->count() > 1);
+    reopenedSelector->setCurrentIndex(
+        (reopenedSelector->currentIndex() + 1) % reopenedSelector->count());
+    QTRY_COMPARE(server.connectedStations(log->logUuid).size(), 2);
 }
 
 void MainWindowUiTest::dxClusterDialogSelectsDirectoryOrCustomServer()
@@ -1150,6 +1267,37 @@ void MainWindowUiTest::autoCqRequiresRunAndStopsWhenEnteringCallsign()
 
     callEdit()->setText(QStringLiteral("K1ABC"));
     QVERIFY(!autoCq->isChecked());
+}
+
+void MainWindowUiTest::frequencyEnteredInCallsignFieldTunesRadioInKilohertz()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("radio/A/backend"),
+                      static_cast<int>(RadioBackendType::Mock));
+    m_window->findChild<QAction *>(QStringLiteral("reconnectRadioAAction"))->trigger();
+
+    auto *radioStatus = m_window->findChild<QLabel *>(QStringLiteral("radioStatus"));
+    auto *header = m_window->findChild<QLabel *>(QStringLiteral("entryHeader"));
+    auto *band = m_window->findChild<QComboBox *>(QStringLiteral("bandSelectorA"));
+    QVERIFY(radioStatus != nullptr);
+    QVERIFY(header != nullptr);
+    QVERIFY(band != nullptr);
+    QTRY_VERIFY(radioStatus->text().contains(QStringLiteral("Radio A: "))
+                && radioStatus->text().contains(QStringLiteral(" MHz ")));
+
+    callEdit()->setText(QStringLiteral("14200"));
+    QTest::keyClick(callEdit(), Qt::Key_Return);
+    QTRY_VERIFY(header->text().contains(QStringLiteral("14200.00 kHz")));
+    QCOMPARE(band->currentText(), QStringLiteral("20m"));
+    QVERIFY(callEdit()->text().isEmpty());
+    QCOMPARE(table()->rowCount(), 0);
+
+    callEdit()->setText(QStringLiteral("3720"));
+    QTest::keyClick(callEdit(), Qt::Key_Return);
+    QTRY_VERIFY(header->text().contains(QStringLiteral("3720.00 kHz")));
+    QCOMPARE(band->currentText(), QStringLiteral("80m"));
+    QVERIFY(callEdit()->text().isEmpty());
+    QCOMPARE(table()->rowCount(), 0);
 }
 
 void MainWindowUiTest::frequencyChangeWithinBandSwitchesRunToSearchAndPounce()
@@ -2227,6 +2375,44 @@ dupe_key: [callsign, band, mode]
     QVERIFY(message().contains(QStringLiteral("central connection")));
     QCOMPARE(table()->rowCount(), 0);
     QCOMPARE(callEdit()->text(), QStringLiteral("W1AW"));
+
+    QTcpServer portProbe;
+    QVERIFY(portProbe.listen(QHostAddress::LocalHost, 0));
+    const quint16 port = portProbe.serverPort();
+    portProbe.close();
+    runWhenModalAppears([port](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>(QStringLiteral("hostBindAddress"))
+            ->setText(QStringLiteral("127.0.0.1"));
+        dialog->findChild<QSpinBox *>(QStringLiteral("hostBindPort"))->setValue(port);
+        dialog->accept();
+    });
+    m_window->findChild<QAction *>(QStringLiteral("configureHostModeAction"))->trigger();
+    QTest::mouseClick(reserve, Qt::LeftButton);
+    QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QStringLiteral("001"));
+    QVERIFY(cancel->isEnabled());
+    runWhenModalAppears([](QDialog *dialog) {
+        auto *confirmation = qobject_cast<QMessageBox *>(dialog);
+        QVERIFY(confirmation != nullptr);
+        confirmation->button(QMessageBox::Yes)->click();
+    });
+    QTest::mouseClick(cancel, Qt::LeftButton);
+    QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QString());
+    QTest::mouseClick(reserve, Qt::LeftButton);
+    QCOMPARE(sentEdit(QStringLiteral("serial"))->text(), QStringLiteral("002"));
+    exchangeEdit(QStringLiteral("serial"))->setText(QStringLiteral("7"));
+    QVERIFY(QMetaObject::invokeMethod(m_window.get(), "logQso", Qt::DirectConnection));
+    QCOMPARE(table()->rowCount(), 1);
+    const auto qsos = m_repository->qsosForContest(logId, 0, &error);
+    QCOMPARE(qsos.size(), 1);
+    QCOMPARE(qsos.first().sentExchangeFields.value(QStringLiteral("serial")),
+             QStringLiteral("002"));
+    const auto logs = m_repository->contests();
+    CentralRepository attached;
+    QVERIFY2(attached.attach(*m_repository, &error), qPrintable(error));
+    const auto savedLog = std::find_if(logs.cbegin(), logs.cend(),
+        [logId](const Contest &log) { return log.id == logId; });
+    QVERIFY(savedLog != logs.cend());
+    QCOMPARE(attached.currentRevision(savedLog->logUuid, &error), qint64(1));
 }
 
 void MainWindowUiTest::newLogDialogRequiresCallsignAndContest()
@@ -2243,7 +2429,7 @@ void MainWindowUiTest::newLogDialogRequiresCallsignAndContest()
          true, false, {}, {}, 0, 1, 40}};
     option.source = QStringLiteral("test");
     Station station;
-    NewLogDialog dialog({option}, station, {QStringLiteral("SP9ABC Zone Test 2026")});
+    NewLogDialog dialog({option}, station, {});
     auto *callsign = dialog.findChild<QLineEdit *>(QStringLiteral("newLogCallsign"));
     auto *name = dialog.findChild<QLineEdit *>(QStringLiteral("newLogName"));
     auto *ok = dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
@@ -2262,7 +2448,10 @@ void MainWindowUiTest::newLogDialogRequiresCallsignAndContest()
     startDate->setDate(QDate(2026, 3, 1));
     callsign->setText(QStringLiteral("SP9ABC"));
     QVERIFY(ok->isEnabled());
-    QCOMPARE(name->text(), QStringLiteral("SP9ABC Zone Test 2026 (2)"));
+    QCOMPARE(name->text(), QStringLiteral("SP9ABC Zone Test"));
+    startDate->setDate(QDate(2025, 3, 1));
+    QCOMPARE(name->text(), QStringLiteral("SP9ABC Zone Test"));
+    startDate->setDate(QDate(2026, 3, 1));
     dialog.findChild<QComboBox *>(QStringLiteral("newLogCategoryOperator"))
         ->setCurrentText(QStringLiteral("MULTI-OP"));
     QVERIFY(transmitter->isEnabled());
@@ -2288,7 +2477,7 @@ void MainWindowUiTest::importsAdifToCurrentOrNewLog_data()
     QTest::newRow("cancel-new") << true << QStringLiteral("cancel") << false;
     QTest::newRow("invalid-record") << false << QStringLiteral("invalid") << false;
     QTest::newRow("rollback-current") << false << QStringLiteral("database-error") << false;
-    QTest::newRow("rollback-new") << true << QStringLiteral("database-error") << false;
+    QTest::newRow("existing-file-new") << true << QStringLiteral("file-error") << false;
 }
 
 void MainWindowUiTest::importsAdifToCurrentOrNewLog()
@@ -2352,8 +2541,13 @@ void MainWindowUiTest::importsAdifToCurrentOrNewLog()
             if (!picker->property("importTestSelected").toBool()) {
                 picker->setProperty("importTestSelected", true);
                 picker->setDirectory(QFileInfo(path).absolutePath());
-                QTimer::singleShot(150, picker, [picker, path] {
-                    picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(path);
+                const QString selectedPath = picker->objectName() == QLatin1String("newLogFileDialog")
+                    ? (scenario == QLatin1String("file-error")
+                        ? QSqlDatabase::database(m_connectionName).databaseName()
+                        : m_dataDir.filePath(m_connectionName + QStringLiteral("-import.sqlite")))
+                    : path;
+                QTimer::singleShot(150, picker, [picker, selectedPath] {
+                    picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(selectedPath);
                     QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
                 });
             }
@@ -2393,7 +2587,12 @@ void MainWindowUiTest::importsAdifToCurrentOrNewLog()
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QVERIFY(confirmationSeen);
         const qint64 targetId = selector->currentData().toLongLong();
-        QCOMPARE(targetId != originalId, newLog);
+        if (newLog) {
+            QCOMPARE(m_repository->contests().size(), 1);
+            QVERIFY(m_repository->isStandaloneLog());
+        } else {
+            QCOMPARE(targetId, originalId);
+        }
         const auto qsos = m_repository->qsosForContest(targetId, 0, &error);
         QCOMPARE(qsos.size(), 2);
         QCOMPARE(table()->rowCount(), 2);
@@ -2416,6 +2615,8 @@ void MainWindowUiTest::importsAdifToCurrentOrNewLog()
         QVERIFY(m_repository->qsosForContest(originalId).isEmpty());
         if (scenario == QLatin1String("database-error")) {
             QVERIFY2(failure.contains(QStringLiteral("import test failure")), qPrintable(failure));
+        } else if (scenario == QLatin1String("file-error")) {
+            QVERIFY2(failure.contains(QStringLiteral("new log file")), qPrintable(failure));
         } else if (scenario == QLatin1String("invalid")) {
             QVERIFY(!failure.isEmpty());
             QVERIFY(!confirmationSeen);
@@ -2428,10 +2629,21 @@ void MainWindowUiTest::importsAdifToCurrentOrNewLog()
 
 void MainWindowUiTest::newLogActionCreatesLogWithStationCallsign()
 {
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    const QString scpPath = m_dataDir.filePath(m_connectionName + QStringLiteral("-master.scp"));
+    {
+        QFile scp(scpPath);
+        QVERIFY(scp.open(QIODevice::WriteOnly));
+        scp.write("SP9PORTABLE\nW1AW\n");
+    }
+    QSettings().setValue(QStringLiteral("supportData/masterCpyFiles"), QStringList{scpPath});
     auto *action = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
     QVERIFY(action != nullptr);
     bool dialogSeen = false;
-    runWhenModalAppears([&dialogSeen](QDialog *dialog) {
+    const QString fileName = QStringLiteral("SN9X CQ WW DX Contest");
+    const QString filePath = m_dataDir.filePath(m_connectionName + QLatin1Char('-') + fileName
+                                               + QStringLiteral(".sqlite"));
+    runWhenModalAppears([this, &dialogSeen, filePath](QDialog *dialog) {
         auto *newLog = qobject_cast<NewLogDialog *>(dialog);
         if (newLog == nullptr) {
             dialog->reject();
@@ -2450,14 +2662,23 @@ void MainWindowUiTest::newLogActionCreatesLogWithStationCallsign()
             ->setText(QStringLiteral("15"));
         dialog->findChild<QComboBox *>(QStringLiteral("newLogCategoryPower"))
             ->setCurrentText(QStringLiteral("LOW"));
+        runWhenModalAppears([filePath](QDialog *picker) {
+            auto *fileDialog = qobject_cast<QFileDialog *>(picker);
+            QVERIFY(fileDialog != nullptr);
+            QCOMPARE(fileDialog->objectName(), QStringLiteral("newLogFileDialog"));
+            fileDialog->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(filePath);
+            QMetaObject::invokeMethod(fileDialog, "accept", Qt::DirectConnection);
+        });
         dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
     });
     action->trigger();
     QVERIFY(dialogSeen);
 
     auto *selector = m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
-    QVERIFY2(selector->currentText().startsWith(QStringLiteral("SN9X CQ WW DX Contest")),
-             qPrintable(selector->currentText()));
+    QCOMPARE(selector->currentText(), QFileInfo(filePath).completeBaseName());
+    QCOMPARE(m_repository->databasePath(), filePath);
+    QVERIFY(m_repository->isStandaloneLog());
+    QCOMPARE(m_repository->contests().size(), 1);
     QCOMPARE(sentEdit(QStringLiteral("zone"))->text(), QStringLiteral("15"));
     auto *topStatus = m_window->findChild<QLabel *>(QStringLiteral("topStatus"));
     QVERIFY2(topStatus->text().contains(QStringLiteral("SN9X")),
@@ -2473,10 +2694,158 @@ void MainWindowUiTest::newLogActionCreatesLogWithStationCallsign()
     QCOMPARE(created->properties.value(QStringLiteral("CATEGORY-MODE")),
              QStringLiteral("CW"));
 
-    // Switching back to a log without its own callsign restores the station default.
-    selector->setCurrentIndex(selector->findText(QStringLiteral("Serial Sprint"),
-                                                 Qt::MatchContains));
-    QVERIFY(topStatus->text().contains(QStringLiteral("SP9TEST")));
+    QCOMPARE(QSettings().value(QStringLiteral("session/logFile")).toString(), filePath);
+    QVERIFY(QFile::remove(scpPath));
+    const auto assets = m_repository->logAssets();
+    QVERIFY(std::any_of(assets.cbegin(), assets.cend(), [](const QByteArray &contents) {
+        return contents == QByteArray("SP9PORTABLE\nW1AW\n");
+    }));
+    m_window->close();
+    m_window.reset();
+    QSettings().remove(QStringLiteral("supportData"));
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    QCOMPARE(sentEdit(QStringLiteral("zone"))->text(), QStringLiteral("15"));
+    callEdit()->setText(QStringLiteral("SP9PORT"));
+    QCoreApplication::processEvents();
+    QVERIFY(callEdit()->completer()->completionModel()->rowCount() > 0);
+}
+
+void MainWindowUiTest::openLogActionOpensIndependentFile()
+{
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    auto *selector = m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QVERIFY(selector != nullptr);
+    QVERIFY(!selector->isVisible());
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("openLogAction"));
+    QVERIFY(action != nullptr);
+    QFile source(QStringLiteral(":/contests/serial-sprint.yaml"));
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    const QString yaml = QString::fromUtf8(source.readAll());
+    ContestDefinition definition;
+    QString error;
+    QVERIFY(ContestDefinitionLoader().loadText(yaml, {}, definition, &error));
+    const QString filePath = m_dataDir.filePath(m_connectionName + QStringLiteral("-opened.sqlite"));
+    {
+        SqliteRepository candidate{QSqlDatabase()};
+        Contest log;
+        log.stationCallsign = QStringLiteral("SN9FILE");
+        const QVariantMap settings{
+            {QStringLiteral("station/operatorCallsign"), QStringLiteral("SP9OP")},
+            {QStringLiteral("cw/functionKeys/F1/label"), QStringLiteral("Portable CQ")},
+            {QStringLiteral("cw/functionKeys/F1/text"), QStringLiteral("CQ {OPERATOR}")}};
+        const QMap<QString, QByteArray> assets{
+            {QStringLiteral("support/master/test"), QByteArray("W1AW\nSP9SCP\n")},
+            {QStringLiteral("support/cty"), QByteArray("Poland: 15: 28: EU: 52: -18: -1: SP:\n SP;\n")}};
+        QVERIFY2(candidate.createLogFile(filePath, definition, yaml, log, settings, assets,
+                                          {}, &error), qPrintable(error));
+    }
+    bool dialogSeen = false;
+    runWhenModalAppears([&](QDialog *dialog) {
+        QCOMPARE(dialog->objectName(), QStringLiteral("openLogFileDialog"));
+        dialogSeen = true;
+        auto *picker = qobject_cast<QFileDialog *>(dialog);
+        QVERIFY(picker != nullptr);
+        picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(filePath);
+        QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+    });
+    action->trigger();
+    QVERIFY(dialogSeen);
+    QCOMPARE(m_repository->databasePath(), filePath);
+    QCOMPARE(m_repository->contests().size(), 1);
+    QCOMPARE(selector->currentData().toLongLong(), qint64(1));
+    QCOMPARE(QSettings().value(QStringLiteral("session/logFile")).toString(), filePath);
+    auto *label = m_window->findChild<QLabel *>(QStringLiteral("openLogLabel"));
+    QVERIFY(label != nullptr);
+    QCOMPARE(label->text(), QFileInfo(filePath).completeBaseName());
+    QVERIFY(m_window->findChild<QLabel *>(QStringLiteral("topStatus"))->text()
+                .contains(QStringLiteral("SN9FILE (SP9OP)")));
+    auto *functionKey = m_window->findChild<QPushButton *>(QStringLiteral("functionKey1"));
+    QVERIFY(functionKey != nullptr);
+    QVERIFY(functionKey->text().contains(QStringLiteral("Portable CQ")));
+    QCOMPARE(m_repository->logAssets().value(QStringLiteral("support/master/test")),
+             QByteArray("W1AW\nSP9SCP\n"));
+    auto *allowDupes = m_window->findChild<QAction *>(QStringLiteral("allowDupeLoggingAction"));
+    allowDupes->setChecked(true);
+    QVERIFY(m_repository->logSettings().value(QStringLiteral("operating/allowDupeLogging")).toBool());
+    QVERIFY(!QSettings().value(QStringLiteral("operating/allowDupeLogging"), false).toBool());
+    m_window->close();
+    m_window.reset();
+    QSettings().remove(QStringLiteral("station"));
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    QVERIFY(m_window->findChild<QAction *>(QStringLiteral("allowDupeLoggingAction"))->isChecked());
+    QVERIFY(m_window->findChild<QLabel *>(QStringLiteral("topStatus"))->text()
+                .contains(QStringLiteral("SN9FILE (SP9OP)")));
+    callEdit()->setText(QStringLiteral("SP9"));
+    QCoreApplication::processEvents();
+    auto *completer = callEdit()->completer();
+    QVERIFY(completer != nullptr);
+    QVERIFY(completer->completionModel()->rowCount() > 0);
+}
+
+void MainWindowUiTest::cancellingFileDialogsPreservesOpenLog()
+{
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    const QString originalPath = m_repository->databasePath();
+    const auto originalLogs = m_repository->contests();
+    auto *newAction = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
+    runWhenModalAppears([this](QDialog *dialog) {
+        auto *properties = qobject_cast<NewLogDialog *>(dialog);
+        QVERIFY(properties != nullptr);
+        QVERIFY(properties->selectContest(QStringLiteral("serial-sprint")));
+        runWhenModalAppears([](QDialog *picker) {
+            QCOMPARE(picker->objectName(), QStringLiteral("newLogFileDialog"));
+            picker->reject();
+        });
+        properties->accept();
+    });
+    newAction->trigger();
+    QCOMPARE(m_repository->databasePath(), originalPath);
+    QCOMPARE(m_repository->contests().size(), originalLogs.size());
+    auto *openAction = m_window->findChild<QAction *>(QStringLiteral("openLogAction"));
+    runWhenModalAppears([](QDialog *picker) { picker->reject(); });
+    openAction->trigger();
+    QCOMPARE(m_repository->databasePath(), originalPath);
+    const QString invalidPath = m_dataDir.filePath(m_connectionName + QStringLiteral("-invalid.sqlite"));
+    {
+        QFile invalid(invalidPath);
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        invalid.write("not a database");
+    }
+    bool errorShown = false;
+    runWhenModalAppears([this, invalidPath, &errorShown](QDialog *dialog) {
+        auto *picker = qobject_cast<QFileDialog *>(dialog);
+        QVERIFY(picker != nullptr);
+        picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"))->setText(invalidPath);
+        runWhenModalAppears([&errorShown](QDialog *message) {
+            auto *box = qobject_cast<QMessageBox *>(message);
+            QVERIFY(box != nullptr);
+            QCOMPARE(box->windowTitle(), QStringLiteral("Unable to open log"));
+            errorShown = true;
+            box->accept();
+        });
+        QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+    });
+    openAction->trigger();
+    QVERIFY(errorShown);
+    QCOMPARE(m_repository->databasePath(), originalPath);
+    QCOMPARE(m_repository->contests().size(), originalLogs.size());
+}
+
+void MainWindowUiTest::startsWithoutImplicitLog()
+{
+    m_window.reset();
+    QSqlQuery query(QSqlDatabase::database(m_connectionName));
+    QVERIFY(query.exec(QStringLiteral("DELETE FROM contests")));
+    m_window = std::make_unique<MainWindow>(*m_repository);
+    m_window->show();
+    QVERIFY(m_repository->contests().isEmpty());
+    auto *selector = m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QCOMPARE(selector->count(), 0);
+    QCOMPARE(selector->currentIndex(), -1);
+    QVERIFY(m_window->findChild<QAction *>(QStringLiteral("newLogAction"))->isEnabled());
+    QVERIFY(m_window->findChild<QAction *>(QStringLiteral("openLogAction"))->isEnabled());
 }
 
 QTEST_MAIN(MainWindowUiTest)

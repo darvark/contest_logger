@@ -1,5 +1,10 @@
 # Operacje serwera synchronizacji
 
+> Ten dokument dotyczy osobnego, starszego serwera CLI. W aktualnej pracy
+> sieciowej GUI wybierz **Opcje → Praca w sieci...**: serwer udostępnia
+> obecnie otwarty log, bez osobnej bazy centralnej. Instrukcja:
+> [praca w sieci](./USER_GUIDE.md#praca-w-sieci--serwer-i-klienci).
+
 **Tryb sieciowy:** aktualne GUI Client/Host i `contest_logger_server --listen`
 korzystają z trusted TCP. Połączenie jest nieszyfrowane i nie uwierzytelnia
 klientów; każda osiągalna stacja może się zarejestrować i uzyskuje odczyt oraz
@@ -12,8 +17,8 @@ specyfikacji protokołu nie są konfigurowane ani używane przez bieżące GUI/C
 Procedura dotyczy centralnego serwera TCP. Serwer przechowuje dane w
 `central-log.sqlite` w katalogu podanym przez `--data-dir`; pliki pomocnicze i
 backupy migracyjne znajdują się obok w `backups/`. Nie udostępniaj katalogu
-SQLite przez udział sieciowy. To runbook headless serwera CLI; GUI Host może
-używać innej domyślnej lokalizacji danych. Nie zakładaj, że CLI i GUI Host
+SQLite przez udział sieciowy. To runbook headless serwera CLI; serwer GUI
+używa bazy aktualnie otwartego logu. Nie zakładaj, że CLI i serwer GUI
 korzystają z tej samej bazy ani nie uruchamiaj obu procesów na tym samym
 katalogu.
 
@@ -92,8 +97,9 @@ SQLite bez jego WAL/SHM. W razie potrzeby osobno skopiuj katalog
 `/var/lib/contest-logger/backups/`, który zawiera automatyczne kopie sprzed
 migracji. Backup i cały katalog `backups/` zawierają dane zawodów, identyfikatory i
 historię rezerwacji — chroń je jako dane operacyjne.
-Jeśli używasz dodatkowego `wl_cty.dat`, zabezpiecz go osobno; baza go nie
-zawiera. Bieżący serwer trusted TCP nie wymaga certyfikatów TLS ani pliku
+W wariancie headless, jeśli używasz dodatkowego `wl_cty.dat`, zabezpiecz go osobno;
+baza go nie zawiera. Niezależne pliki logów GUI zawierają kopię używanych danych CTY.
+Bieżący serwer trusted TCP nie wymaga certyfikatów TLS ani pliku
 poświadczeń.
 
 ## Odtwarzanie backupu centralnego

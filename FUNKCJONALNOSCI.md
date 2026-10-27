@@ -5,6 +5,7 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 ## Logowanie i contesty
 
 - Definicje contestów w YAML z walidacją schematu, pól wymiany, zakresów, wzorców i reguł.
+- Każdy log to osobny plik SQLite zawierający QSO, definicje zawodów, ustawienia stacji i wymiany, makra CW/ESM oraz kopie używanych danych SCP, CTY i call history. **File → New log...** po wyborze zawodów pyta o nazwę i lokalizację pliku; **File → Open log...** (`Ctrl+O`) wybiera plik z dysku. Nazwa logu odpowiada nazwie pliku, bez automatycznie dopisywanej daty.
 - Logowanie QSO z walidacją callsign, dupe-checkiem, numeracją serial odtwarzaną z zapisanych wartości oraz edycją QSO. Opcjonalnie można zapisać dupe; taki kontakt ma 0 punktów i nie przyznaje mnożnika.
 - Oznaczanie QSO jako nieważnego i przywracanie go z menu kontekstowego. Rekord pozostaje w historii i synchronizacji; nieważne QSO nie wpływa na punktację, mnożniki ani eksport.
 - Podpowiedzi callsign z listy Super Check Partial, call history i zalogowanych QSO. Wyboru można dokonać klawiaturą; wpisywanie nie podmienia automatycznie tekstu pola.
@@ -60,11 +61,12 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 
 ## Synchronizacja sieciowa i status stacji
 
-- Domyślny tryb Local oraz opcjonalne Client i GUI Host; oddzielny serwer headless `contest_logger_server`. Każda instalacja używa własnej bazy SQLite, bez współdzielenia pliku przez sieć.
+- Domyślna praca lokalna; **Opcje → Praca w sieci...** pozwala wybrać rolę serwer/klient i nazwę stacji. Serwer GUI udostępnia tylko aktualnie otwarty log, używając jego bazy SQLite, bez osobnego logu centralnego. Zmiana otwartego logu zatrzymuje pracę sieciową. Oddzielny serwer headless `contest_logger_server` pozostaje narzędziem legacy.
 - Bieżące połączenie GUI Client/Host i serwera CLI używa trusted TCP bez TLS i uwierzytelniania klientów. Wszystkie osiągalne stacje mają odczyt i zapis; bezpieczeństwo zależy wyłącznie od zaufanej sieci LAN/VPN i firewall. Nie wystawiać serwera do Internetu.
 - Kod zachowuje wewnętrzną ścieżkę TLS/tokenów, magazyn sekretów i role `read`/`write`/`admin`, ale nie są one dostępne w bieżącej konfiguracji GUI ani CLI i nie opisują aktualnego trybu wdrożeniowego.
 - Trwały outbox, idempotentny replay, synchronizacja przyrostowa, snapshot, retencja zdarzeń i powiadomienia push z pollingiem awaryjnym.
-- Dołączanie do centralnego logu, tworzenie logu i addytywne scalanie/import lokalnego logu przez GUI Host z historią rezerwacji i audytem.
+- Klient musi mieć otwarty log z identyczną definicją YAML (SHA-256); lokalny UUID jest automatycznie wiązany z UUID logu serwera, bez tworzenia nowego logu. Istniejące lokalne QSO pozostają zachowane i trafiają do kolejki wysyłkowej.
+- Serwer odrzuca drugą stację o tej samej nazwie (także nazwie serwera), bez rozróżniania wielkości liter i skrajnych spacji; zachowana jest również kontrola powtórzonego UUID.
 - Porównywanie konfliktów QSO: przyjęcie serwera, ponowienie lokalnej zmiany lub ręczne scalanie pól z trwałym audytem. Role serwerowe oraz klient tylko do odczytu dotyczą wyłącznie zachowanej ścieżki legacy TLS/token, nie bieżącego trusted TCP.
 - Centralne rezerwacje numerów seryjnych, lokalny cache i trwała kolejka żądań; nowe numery wymagają serwera, a potwierdzona rezerwacja pozostaje używalna offline. Operacje administracyjne z wariantu TLS/token nie są dostępne w bieżącym trusted TCP.
 - **Options → Network status and queue...** pokazuje stan połączenia, rewizje, ostatni kontakt, outbox, konflikty i rezerwacje oraz listę aktywnie podłączonych stacji wybranego logu.

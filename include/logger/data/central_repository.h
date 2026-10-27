@@ -24,6 +24,8 @@ public:
     CentralRepository &operator=(const CentralRepository &) = delete;
 
     bool initialize(const QString &dataDirectory, QString *error = nullptr);
+    bool attach(SqliteRepository &repository, QString *error = nullptr);
+    void setCtyPrefixes(const QVector<CtyPrefixEntry> &prefixes);
     SqliteRepository *repository();
     qint64 createLog(const ContestDefinition &definition, const QString &yaml,
                      const Contest &log, QString *error = nullptr);
@@ -99,6 +101,7 @@ private:
     QString m_backupDirectory;
     QVector<CtyPrefixEntry> m_ctyPrefixes;
     QSqlDatabase m_database;
+    bool m_ownsDatabase = true;
     std::unique_ptr<SqliteRepository> m_repository;
     std::unique_ptr<QLockFile> m_lockFile;
 };

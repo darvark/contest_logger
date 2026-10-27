@@ -121,9 +121,14 @@ int main(int argc, char *argv[])
         return 1;
     }
     const QString databasePath =
-        dataDirectory + QStringLiteral("/contest-logger.sqlite");
+        QSettings().value(QStringLiteral("session/logFile")).toString();
     if (parser.isSet(restoreOption)) {
         QString error;
+        if (databasePath.isEmpty()) {
+            showStartupError(nullptr, QObject::tr("Database restore failed"),
+                             QObject::tr("Open a log file before restoring its backup."));
+            return 1;
+        }
         updateSplash(QObject::tr("Restoring database backup..."));
         if (!logger::SqliteRepository::restoreFromBackup(
                 databasePath, parser.value(restoreOption), &error)) {
@@ -142,7 +147,7 @@ int main(int argc, char *argv[])
         updateSplash(QObject::tr("Opening database..."));
         QSqlDatabase database = QSqlDatabase::addDatabase(
             QStringLiteral("QSQLITE"), connectionName);
-        database.setDatabaseName(databasePath);
+        database.setDatabaseName(QStringLiteral(":memory:"));
         if (!database.open()) {
             showStartupError(nullptr, QObject::tr("Database error"),
                              database.lastError().text());
@@ -151,79 +156,38 @@ int main(int argc, char *argv[])
 
         logger::SqliteRepository repository(database);
         QString error;
-        const QFileInfo currentDatabase(databasePath);
-        QSettings backupSettings;
-        const bool automaticBackupsEnabled = backupSettings.value(
-            QStringLiteral("backups/automaticEnabled"), true).toBool();
-        const int backupIntervalDays = qBound(
-            1, backupSettings.value(
-                   QStringLiteral("backups/automaticIntervalDays"), 1).toInt(), 365);
-        const int backupRetentionCount = qBound(
-            1, backupSettings.value(
-                   QStringLiteral("backups/automaticRetentionCount"), 30).toInt(), 365);
-        if (automaticBackupsEnabled && currentDatabase.exists()
-            && currentDatabase.size() > 0) {
-            const QString backupDirectory = dataDirectory + QStringLiteral("/backups");
-            if (!QDir().mkpath(backupDirectory)) {
-                showStartupError(
-                    nullptr, QObject::tr("Backup directory error"),
-                    QObject::tr("Could not create the automatic backup directory."));
-                return 1;
-            }
-            QDir backupDir(backupDirectory);
-            QFileInfoList backups = backupDir.entryInfoList(
-                {QStringLiteral("automatic-*.sqlite")}, QDir::Files, QDir::Name);
-            static const QRegularExpression backupName(
-                QStringLiteral("^automatic-(\\d{4}-\\d{2}-\\d{2})\\.sqlite$"));
-            QDate latestBackupDate;
-            for (const QFileInfo &backup : backups) {
-                const auto match = backupName.match(backup.fileName());
-                const QDate backupDate = match.hasMatch()
-                    ? QDate::fromString(match.captured(1), QStringLiteral("yyyy-MM-dd"))
-                    : QDate();
-                if (backupDate.isValid() && backupDate > latestBackupDate) {
-                    latestBackupDate = backupDate;
-                }
-            }
-            const QDate today = QDate::currentDate();
-            if (!latestBackupDate.isValid()
-                || latestBackupDate.daysTo(today) >= backupIntervalDays) {
-                const QString backupPath = backupDir.filePath(
-                    QStringLiteral("automatic-%1.sqlite")
-                        .arg(today.toString(QStringLiteral("yyyy-MM-dd"))));
-                if (!QFileInfo::exists(backupPath)
-                    && !repository.backupTo(backupPath, &error)) {
-                    showStartupError(
-                        nullptr, QObject::tr("Automatic database backup failed"),
-                        QObject::tr("A safety backup could not be created; the database "
-                                    "was not opened for writing.\n\n%1").arg(error));
-                    return 1;
-                }
-            }
-            backups = backupDir.entryInfoList(
-                {QStringLiteral("automatic-*.sqlite")},
-                QDir::Files, QDir::Name | QDir::Reversed);
-            for (qsizetype index = backupRetentionCount; index < backups.size(); ++index) {
-                if (!QFile::remove(backups.at(index).absoluteFilePath())) {
-                    QMessageBox::warning(
-                        nullptr, QObject::tr("Automatic backup retention failed"),
-                        QObject::tr("Could not remove old backup %1.")
-                            .arg(backups.at(index).absoluteFilePath()));
-                }
-            }
-        }
-        updateSplash(QObject::tr("Checking database..."));
         if (!repository.initialize(&error)) {
             showStartupError(nullptr, QObject::tr("Database initialization failed"), error);
             return 1;
         }
+        bool openedLog = false;
+        if (!databasePath.isEmpty()) {
+            openedLog = repository.openLogFile(databasePath, &error);
+            if (!openedLog) {
+                splash.hide();
+                QMessageBox::warning(
+                    nullptr, QObject::tr("Unable to reopen log"),
+                    error + QObject::tr("\nChoose File > Open log or create a new log."));
+            }
+        }
+        if (openedLog && !logger::backupLogIfDue(repository, &error)) {
+            showStartupError(nullptr, QObject::tr("Automatic database backup failed"), error);
+            return 1;
+        }
 
         updateSplash(QObject::tr("Preparing the main window..."));
-        logger::MainWindow window(repository);
-        window.show();
-        splash.finish(&window);
-        const int result = application.exec();
-        repository = logger::SqliteRepository(QSqlDatabase());
+        int result = 0;
+        {
+            logger::MainWindow window(repository);
+            window.show();
+            splash.finish(&window);
+            result = application.exec();
+        }
+        {
+            // Release every handle to the connection before removeDatabase().
+            logger::SqliteRepository empty{QSqlDatabase()};
+            repository.swap(empty);
+        }
         database.close();
         database = QSqlDatabase();
         QSqlDatabase::removeDatabase(connectionName);

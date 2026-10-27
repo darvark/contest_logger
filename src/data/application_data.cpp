@@ -1,16 +1,19 @@
 #include "logger/data/application_data.h"
 #include "logger/contest/contest_definition_loader.h"
+#include "logger/data/sqlite_repository.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QSettings>
 #include <QSet>
 #include <QStandardPaths>
+#include <QRegularExpression>
 
 #include <utility>
 
@@ -28,11 +31,95 @@ bool writeDefinition(const QString &path, const QByteArray &contents, QString *e
     return true;
 }
 
+bool copyLegacyApplicationData(const QString &directory, QString *error)
+{
+    const QString legacyDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (legacyDirectory.isEmpty()
+        || QDir::cleanPath(legacyDirectory) == QDir::cleanPath(directory)
+        || !QFileInfo(legacyDirectory).isDir()) {
+        return true;
+    }
+
+    const QDir legacy(legacyDirectory);
+    QDirIterator iterator(legacyDirectory, QDir::Files, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString source = iterator.next();
+        const QString destination = QDir(directory).filePath(
+            legacy.relativeFilePath(source));
+        if (QFileInfo::exists(destination)) {
+            continue;
+        }
+        if (!QDir().mkpath(QFileInfo(destination).path())
+            || !QFile::copy(source, destination)) {
+            *error = QStringLiteral("%1: could not migrate application data.")
+                         .arg(source);
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
+
+bool backupLogIfDue(SqliteRepository &repository, QString *error)
+{
+    error->clear();
+    QSettings settings;
+    if (!repository.isStandaloneLog()
+        || !settings.value(QStringLiteral("backups/automaticEnabled"), true).toBool()) {
+        return true;
+    }
+    const int interval = qBound(1, settings.value(
+        QStringLiteral("backups/automaticIntervalDays"), 1).toInt(), 365);
+    const int retention = qBound(1, settings.value(
+        QStringLiteral("backups/automaticRetentionCount"), 30).toInt(), 365);
+    const QString key = QString::fromLatin1(QCryptographicHash::hash(
+        QFileInfo(repository.databasePath()).canonicalFilePath().toUtf8(),
+        QCryptographicHash::Sha256).toHex());
+    const QDir directory(QDir(applicationDataDirectory()).filePath(
+        QStringLiteral("backups/") + key));
+    if (!QDir().mkpath(directory.path())) {
+        *error = QStringLiteral("Could not create automatic backup directory: %1")
+                     .arg(directory.path());
+        return false;
+    }
+    const auto files = directory.entryInfoList(
+        {QStringLiteral("automatic-*.sqlite")}, QDir::Files, QDir::Name | QDir::Reversed);
+    static const QRegularExpression pattern(
+        QStringLiteral("^automatic-(\\d{4}-\\d{2}-\\d{2})\\.sqlite$"));
+    QDate latest;
+    for (const QFileInfo &file : files) {
+        const auto match = pattern.match(file.fileName());
+        const QDate date = QDate::fromString(match.captured(1), QStringLiteral("yyyy-MM-dd"));
+        if (date.isValid() && date > latest) {
+            latest = date;
+        }
+    }
+    const QDate today = QDate::currentDate();
+    if (!latest.isValid() || latest.daysTo(today) >= interval) {
+        const QString path = directory.filePath(QStringLiteral("automatic-%1.sqlite")
+            .arg(today.toString(QStringLiteral("yyyy-MM-dd"))));
+        if (!QFileInfo::exists(path) && !repository.backupTo(path, error)) {
+            return false;
+        }
+    }
+    const auto backups = directory.entryInfoList(
+        {QStringLiteral("automatic-*.sqlite")}, QDir::Files, QDir::Name | QDir::Reversed);
+    for (qsizetype index = retention; index < backups.size(); ++index) {
+        if (!QFile::remove(backups.at(index).absoluteFilePath())) {
+            *error = QStringLiteral("Could not remove old backup: %1")
+                         .arg(backups.at(index).absoluteFilePath());
+            return false;
+        }
+    }
+    return true;
+}
 
 QString applicationDataDirectory()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+        .filePath(QCoreApplication::applicationName());
 }
 
 QString contestDefinitionsDirectory()
@@ -49,7 +136,16 @@ bool initializeApplicationData(QString *error)
 {
     error->clear();
     const QString directory = applicationDataDirectory();
-    if (directory.isEmpty() || !QDir().mkpath(contestDefinitionsDirectory())) {
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+        *error = QCoreApplication::translate(
+            "ApplicationData", "Could not create the application data directory: %1")
+                     .arg(directory);
+        return false;
+    }
+    if (!copyLegacyApplicationData(directory, error)) {
+        return false;
+    }
+    if (!QDir().mkpath(contestDefinitionsDirectory())) {
         *error = QCoreApplication::translate(
             "ApplicationData", "Could not create the application data directory: %1")
                      .arg(directory);

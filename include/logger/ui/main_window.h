@@ -60,6 +60,7 @@ protected:
 
 private slots:
     void configureOperator();
+    void configureOperatorCallsign();
     void configureFunctionKeys();
     void configureEsmMessages();
     void configureRadio();
@@ -71,6 +72,7 @@ private slots:
     void configureAutomaticBackups();
     void configureDxCluster();
     void configureNetworkConnection();
+    void configureClientConnection(bool automatic = false);
     void completeRemoteLogMerge();
     void configureHostMode();
     void configureN1mmBroadcast();
@@ -84,6 +86,7 @@ private slots:
     void configureCwKeyer();
     void selectContest(int index);
     void createNewLog();
+    void openLog();
     void editLogProperties();
     void importContestDefinition();
     void restoreContestDefinitionVersion();
@@ -141,6 +144,7 @@ private:
     bool saveDxClusterConfigs();
     const Contest *activeContest() const;
     void applyActiveLogStation();
+    QString operatorIdentity() const;
     void updateSentExchangeVisibility(int vfo);
     QStringList logNames(qint64 excludedId = 0) const;
     void saveSentExchangeValues(qint64 contestId,
@@ -152,6 +156,13 @@ private:
     void refreshRecentQsoTable();
     void exportCurrentLog(LogExportFormat format);
     bool newLogOptions(QVector<NewLogContestOption> *options, QString *error) const;
+    QString chooseNewLogPath(const QString &name);
+    bool createLogFile(Contest log, const NewLogContestOption &option,
+                       const QMap<QString, QString> &sentValues,
+                       const QVector<Qso> &qsos = {});
+    void activateLogFile(SqliteRepository &candidate);
+    bool supportDataAssets(QMap<QString, QByteArray> *assets, QString *error) const;
+    bool storeSupportAsset(const QString &key, const QByteArray &contents);
     void configureRadioContext(int radio);
     void autoConnectRadios();
     void updateSerialFields();
@@ -176,6 +187,7 @@ private:
     void updateTopStatus();
     void updateEntryHeaders();
     void showOperatorMessage(const QString &message, bool alert = false);
+    bool tuneFrequencyFromCallsign(int context);
     bool sendCwTemplate(QString message, int context, QString *problem,
                         QString callsignOverride = {});
     int cwRadioForContext(int context) const;
@@ -203,6 +215,7 @@ private:
     std::unique_ptr<SyncClient> m_syncClient;
     std::unique_ptr<CentralRepository> m_hostRepository;
     std::unique_ptr<SyncServer> m_hostServer;
+    qint64 m_networkLogId = 0;
     Contest m_pendingRemoteContest;
     QString m_pendingRemoteDefinitionYaml;
     QString m_pendingSerialHistoryRequestId;
@@ -218,9 +231,12 @@ private:
     Station m_defaultStation;
     QHash<QString, QString> m_builtInCabrilloContests;
     Station m_station;
+    QString m_operatorCallsign;
     QVector<Contest> m_contests;
     QHash<qint64, ContestDefinition> m_definitions;
+    // Hidden model of open-able logs; users switch logs through File > Open log.
     QComboBox *m_contestSelector = nullptr;
+    QLabel *m_openLogLabel = nullptr;
     QCheckBox *m_so2vToggle = nullptr;
     QCheckBox *m_so2rToggle = nullptr;
     QComboBox *m_activeRadioSelector = nullptr;

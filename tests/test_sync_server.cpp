@@ -168,6 +168,9 @@ private slots:
     void trustedServerEnforcesConfiguredConnectionLimit();
     void connectsWithVerifiedTlsClient();
     void registersTrustedNetworkStationWithoutCredentials();
+    void hostsOpenLogAndBindsIndependentClientLog();
+    void rejectsDuplicateStationNames();
+    void rejectsDifferentOpenLogType();
     void trustedClientReconnectsAfterNetworkLoss();
     void trustedNetworkThreeStationPilotRecoversAfterHostRestart();
     void reportsConnectedStationsForSelectedLog();
@@ -615,6 +618,190 @@ void SyncServerTest::servesTlsProtocolWithFragmentedFrames()
     QCOMPARE(snapshotQsos.size(), 1);
     QCOMPARE(snapshotQsos.first().toObject()
                  .value(QStringLiteral("qso_uuid")).toString(), qsoUuid);
+}
+
+void SyncServerTest::hostsOpenLogAndBindsIndependentClientLog()
+{
+    QString error;
+    auto &hostRepository = *m_repository->repository();
+    const auto hostLog = hostRepository.contests().first();
+    logger::Qso hostQso;
+    hostQso.contestId = hostLog.id;
+    hostQso.callsign = QStringLiteral("W1AW");
+    hostQso.stationCallsign = QStringLiteral("SP1HOST");
+    hostQso.band = QStringLiteral("20m");
+    hostQso.timestampUtc = QDateTime::currentDateTimeUtc();
+    hostQso.frequencyHz = 14025000;
+    hostQso.mode = QStringLiteral("CW");
+    hostQso.sentExchange = QStringLiteral("599");
+    hostQso.receivedExchange = QStringLiteral("599");
+    hostQso.points = 1;
+    QVERIFY2(hostRepository.saveQso(hostQso, &error), qPrintable(error));
+    QVERIFY2(hostRepository.setHostedLog(hostLog.logUuid, &error), qPrintable(error));
+
+    {
+        logger::CentralRepository attached;
+        QVERIFY2(attached.attach(hostRepository, &error), qPrintable(error));
+        QCOMPARE(attached.databasePath(), m_repository->databasePath());
+        logger::SyncServer server(attached);
+        QVERIFY2(server.hostOpenLog(hostLog.logUuid, QStringLiteral("SERVER"), &error),
+                 qPrintable(error));
+        QVERIFY2(server.listenTrustedNetwork(QStringLiteral("127.0.0.1"), 0, 8, &error),
+                 qPrintable(error));
+
+        const QString connection = QStringLiteral("independent-open-log");
+        auto database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(m_directory->filePath(QStringLiteral("independent.sqlite")));
+        QVERIFY(database.open());
+        {
+            logger::SqliteRepository local(database);
+            QVERIFY2(local.initialize(&error), qPrintable(error));
+            QVERIFY2(local.ensureGeneralLog(&error), qPrintable(error));
+            const auto localLog = local.contests().first();
+            QVERIFY(localLog.logUuid != hostLog.logUuid);
+            logger::Qso localQso = hostQso;
+            localQso.id = 0;
+            localQso.contestId = localLog.id;
+            localQso.qsoUuid.clear();
+            localQso.logUuid.clear();
+            localQso.stationUuid.clear();
+            localQso.callsign = QStringLiteral("K2CLIENT");
+            QVERIFY2(local.saveQso(localQso, &error), qPrintable(error));
+            QVERIFY2(local.setSynchronizationEnabled(localLog.logUuid, true, &error),
+                     qPrintable(error));
+
+            logger::SyncClientConfiguration config;
+            config.host = QStringLiteral("127.0.0.1");
+            config.port = server.serverPort();
+            config.stationUuid = local.localStationUuid(&error);
+            config.computerName = QStringLiteral("CLIENT");
+            config.logUuid = localLog.logUuid;
+            config.trustedNetworkMode = true;
+            config.useServerActiveLog = true;
+            config.contestDefinitionSha256 = QString::fromLatin1(
+                QCryptographicHash::hash(
+                    local.contestDefinitionYaml(localLog.id).toUtf8(),
+                    QCryptographicHash::Sha256).toHex());
+            logger::SyncClient client;
+            QSignalSpy states(&client, &logger::SyncClient::stateChanged);
+            QSignalSpy bound(&client, &logger::SyncClient::logBound);
+            client.connectToServer(config);
+            QVERIFY2(client.startSynchronization(local, &error), qPrintable(error));
+            QTRY_VERIFY2_WITH_TIMEOUT(client.state() == logger::SyncClient::State::Ready,
+                qPrintable(states.isEmpty() ? QStringLiteral("No state")
+                                            : states.last().at(1).toString()), 5000);
+            QCOMPARE(bound.size(), 1);
+            QCOMPARE(local.contests().first().id, localLog.id);
+            QCOMPARE(local.contests().first().logUuid, hostLog.logUuid);
+            QTRY_COMPARE_WITH_TIMEOUT(hostRepository.qsosForContest(hostLog.id).size(), 2, 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(local.qsosForContest(localLog.id).size(), 2, 5000);
+            QCOMPARE(server.connectedStations(hostLog.logUuid).size(), 2);
+
+            auto clientEdit = local.qsoById(localQso.id, &error);
+            QVERIFY(clientEdit.has_value());
+            clientEdit->callsign = QStringLiteral("K2CLIENT/P");
+            QVERIFY2(local.updateQso(*clientEdit, &error), qPrintable(error));
+            client.flushPendingChanges();
+            QTRY_VERIFY_WITH_TIMEOUT([&] {
+                const auto qsos = hostRepository.qsosForContest(hostLog.id);
+                return std::any_of(qsos.cbegin(), qsos.cend(), [](const logger::Qso &qso) {
+                    return qso.callsign == QStringLiteral("K2CLIENT/P");
+                });
+            }(), 2000);
+
+            auto edited = hostRepository.qsoById(hostQso.id, &error);
+            QVERIFY(edited.has_value());
+            edited->callsign = QStringLiteral("W1AW/P");
+            QVERIFY2(hostRepository.updateQso(*edited, &error), qPrintable(error));
+            QTRY_VERIFY_WITH_TIMEOUT([&] {
+                const auto qsos = local.qsosForContest(localLog.id);
+                return std::any_of(qsos.cbegin(), qsos.cend(), [](const logger::Qso &qso) {
+                    return qso.callsign == QStringLiteral("W1AW/P");
+                });
+            }(), 5000);
+            QVERIFY2(hostRepository.deleteQso(hostQso.id, &error), qPrintable(error));
+            QTRY_COMPARE_WITH_TIMEOUT(local.qsosForContest(localLog.id).size(), 1, 5000);
+            QVERIFY2(hostRepository.undoLastQsoChange(hostLog.id, &error), qPrintable(error));
+            QTRY_COMPARE_WITH_TIMEOUT(local.qsosForContest(localLog.id).size(), 2, 5000);
+            client.disconnectFromServer();
+        }
+        database.close();
+        database = {};
+        QSqlDatabase::removeDatabase(connection);
+    }
+    // Destroying the server adapter must not close the application's database.
+    QVERIFY2(!hostRepository.contests(&error).isEmpty(), qPrintable(error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY2(hostRepository.setHostedLog(QString(), &error), qPrintable(error));
+}
+
+void SyncServerTest::rejectsDuplicateStationNames()
+{
+    QString error;
+    const auto log = m_repository->repository()->contests().first();
+    logger::SyncServer server(*m_repository);
+    QVERIFY2(server.hostOpenLog(log.logUuid, QStringLiteral("SERVER"), &error), qPrintable(error));
+    QVERIFY2(server.listenTrustedNetwork(QStringLiteral("127.0.0.1"), 0, 8, &error),
+             qPrintable(error));
+    logger::SyncClientConfiguration config;
+    config.host = QStringLiteral("127.0.0.1");
+    config.port = server.serverPort();
+    config.stationUuid = QString::fromLatin1(StationUuid);
+    config.computerName = QStringLiteral("Radio-A");
+    config.logUuid = log.logUuid;
+    config.contestDefinitionSha256 = QString::fromLatin1(QCryptographicHash::hash(
+        m_repository->repository()->contestDefinitionYaml(log.id).toUtf8(),
+        QCryptographicHash::Sha256).toHex());
+    config.trustedNetworkMode = true;
+    logger::SyncClient first;
+    first.connectToServer(config);
+    QTRY_COMPARE(first.state(), logger::SyncClient::State::Ready);
+    logger::SyncClient duplicate;
+    config.stationUuid = QString::fromLatin1(ThirdStationUuid);
+    config.computerName = QStringLiteral("  RADIO-a ");
+    QSignalSpy failures(&duplicate, &logger::SyncClient::requestFailed);
+    duplicate.connectToServer(config);
+    QTRY_COMPARE(duplicate.state(), logger::SyncClient::State::Error);
+    QCOMPARE(failures.first().at(1).toString(), QStringLiteral("STATION_ALREADY_CONNECTED"));
+    config.computerName = QStringLiteral("server");
+    duplicate.connectToServer(config);
+    QTRY_COMPARE(duplicate.state(), logger::SyncClient::State::Error);
+    QCOMPARE(server.connectedStations(log.logUuid).size(), 2);
+    config.computerName = QStringLiteral("ANOTHER-NAME");
+    config.stationUuid = m_repository->repository()->localStationUuid(&error);
+    duplicate.connectToServer(config);
+    QTRY_COMPARE(duplicate.state(), logger::SyncClient::State::Error);
+    first.disconnectFromServer();
+    QTRY_COMPARE(server.activeConnections(), 0);
+    config.stationUuid = QString::fromLatin1(ThirdStationUuid);
+    config.computerName = QStringLiteral("RADIO-A");
+    duplicate.connectToServer(config);
+    QTRY_COMPARE(duplicate.state(), logger::SyncClient::State::Ready);
+}
+
+void SyncServerTest::rejectsDifferentOpenLogType()
+{
+    QString error;
+    const auto log = m_repository->repository()->contests().first();
+    logger::SyncServer server(*m_repository);
+    QVERIFY2(server.hostOpenLog(log.logUuid, QStringLiteral("SERVER"), &error), qPrintable(error));
+    QVERIFY2(server.listenTrustedNetwork(QStringLiteral("127.0.0.1"), 0, 8, &error),
+             qPrintable(error));
+    logger::SyncClientConfiguration config;
+    config.host = QStringLiteral("127.0.0.1");
+    config.port = server.serverPort();
+    config.stationUuid = QString::fromLatin1(StationUuid);
+    config.computerName = QStringLiteral("CLIENT");
+    config.logUuid = log.logUuid;
+    config.trustedNetworkMode = true;
+    config.useServerActiveLog = true;
+    config.contestDefinitionSha256 = QString(64, QLatin1Char('0'));
+    logger::SyncClient client;
+    QSignalSpy failures(&client, &logger::SyncClient::requestFailed);
+    client.connectToServer(config);
+    QTRY_COMPARE(client.state(), logger::SyncClient::State::Error);
+    QCOMPARE(failures.first().at(1).toString(), QStringLiteral("CONTEST_MISMATCH"));
+    QCOMPARE(server.connectedStations(log.logUuid).size(), 1);
 }
 
 void SyncServerTest::registersTrustedNetworkStationWithoutCredentials()

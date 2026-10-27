@@ -479,6 +479,24 @@ QString SyncClient::checkConsistency()
     });
 }
 
+void SyncClient::flushPendingChanges()
+{
+    if (!m_synchronizationEnabled || !m_repository || m_state != State::Ready) {
+        return;
+    }
+    QString error;
+    const auto pending = m_repository->syncOutbox(
+        m_configuration.logUuid, false, &error, 1);
+    if (!error.isEmpty()) {
+        emit requestFailed({}, QStringLiteral("LOCAL_STORAGE_ERROR"), error, false);
+        return;
+    }
+    if (!pending.isEmpty() && pending.first().status == QStringLiteral("pending")) {
+        m_syncPending = true;
+        pumpSynchronization();
+    }
+}
+
 void SyncClient::setStationIdentity(
     const QString &stationCallsign, const QString &operatorName)
 {
@@ -691,7 +709,8 @@ void SyncClient::selectLog()
         ? QJsonValue(QJsonValue::Null)
         : QJsonValue(m_configuration.contestDefinitionSha256);
     sendRequest(QStringLiteral("select_log"), QJsonObject{
-        {QStringLiteral("log_uuid"), m_configuration.logUuid},
+        {QStringLiteral("log_uuid"), m_configuration.useServerActiveLog
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(m_configuration.logUuid)},
         {QStringLiteral("contest_definition_sha256"), definitionHash}
     }, true);
 }
@@ -987,6 +1006,22 @@ void SyncClient::processResponse(const QJsonObject &message)
         }
         if (pending.type == QStringLiteral("select_log")
             && type == QStringLiteral("welcome")) {
+            if (m_configuration.useServerActiveLog) {
+                QString error;
+                const QString serverLogUuid =
+                    payload.value(QStringLiteral("log_uuid")).toString();
+                if (!m_repository || !m_repository->bindToServerLog(
+                        m_configuration.logUuid, serverLogUuid, &error)) {
+                    m_manualDisconnect = true;
+                    closeSocket();
+                    setState(State::Error, error.isEmpty()
+                        ? tr("The open local log could not be connected to the server log.")
+                        : error);
+                    return;
+                }
+                m_configuration.logUuid = serverLogUuid;
+                emit logBound(serverLogUuid);
+            }
             m_serverUuid = payload.value(QStringLiteral("server_uuid")).toString();
             m_currentRevision =
                 payload.value(QStringLiteral("current_revision")).toInteger(-1);
