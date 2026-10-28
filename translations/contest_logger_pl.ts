@@ -3,6 +3,9 @@
 <TS version="2.1" language="pl_PL" sourcelanguage="en_US">
 <context>
     <name>logger::MainWindow</name>
+    <message><source>Unable to export diagnostics</source><translation>Nie można wyeksportować diagnostyki</translation></message>
+    <message><source>Invalid stored payload for operation %1: %2</source><translation>Nieprawidłowe zapisane dane operacji %1: %2</translation></message>
+    <message><source>Expected a QSO object.</source><translation>Oczekiwano obiektu QSO.</translation></message>
     <message><source>Save new log</source><translation>Zapisz nowy log</translation></message>
     <message><source>Log databases (*.sqlite)</source><translation>Bazy logów (*.sqlite)</translation></message>
     <message><source>Log databases (*.sqlite);;All files (*)</source><translation>Bazy logów (*.sqlite);;Wszystkie pliki (*)</translation></message>

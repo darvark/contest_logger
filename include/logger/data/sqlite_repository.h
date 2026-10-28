@@ -65,7 +65,7 @@ public:
                        QString *error = nullptr);
     QVector<SyncOutboxOperation> syncOutbox(
         const QString &logUuid, bool includeTerminal = false,
-        QString *error = nullptr, int limit = 0) const;
+        QString *error = nullptr, int limit = 0, bool readyOnly = false) const;
     QVector<SyncConflict> syncConflicts(const QString &logUuid,
                                         QString *error = nullptr) const;
     bool setSyncOperationState(const QString &operationUuid, const QString &state,

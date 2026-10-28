@@ -25,6 +25,23 @@ Nie udostępniaj portu w Internecie ani pliku SQLite przez udział sieciowy.
 Zmiana otwartego logu rozłącza sieć; zamknięcie aplikacji zatrzymuje serwer.
 Autostart jest opcjonalny i działa tylko dla zapisanego, otwartego logu.
 
+### Częstotliwość QSO i odrzucone operacje
+
+- `frequency_hz = 0` oznacza nieznaną częstotliwość (np. praca bez CAT).
+  Jest zachowywane w synchronizacji, snapshotach i rozwiązywaniu konfliktów.
+  Program nie podstawia fikcyjnej częstotliwości na podstawie pasma.
+- Odrzucona operacja lub konflikt blokuje kolejne zmiany tego samego QSO,
+  ale nie zatrzymuje wysyłania niezależnych QSO. Zmiany jednego QSO zachowują
+  kolejność; oczekujące zmiany mogą być zatwierdzane w atomowej paczce.
+- Eksport diagnostyki zawiera `frequency_hz` i `points` z zapisanej operacji,
+  nie z aktualnej wersji QSO. Serwer osobno wskazuje błędy tych pól i podaje
+  UUID operacji oraz QSO.
+- Po aktualizacji **serwera i klientów** odrzucone wcześniej QSO z `0 Hz`
+  można wysłać przyciskiem **Ponów / Retry**. Samo ponowienie nie zmienia
+  danych operacji. Nie należy modyfikować kolejki bezpośrednio w SQLite.
+- `Connected` opisuje połączenie, nie brak błędów synchronizacji; sprawdź
+  również status kolejki. Starszy serwer może nadal odrzucać `0 Hz`.
+
 ## Archiwalna specyfikacja i wariant headless
 
 Poniższy opis zachowano jako historię protokołu i serwera CLI.

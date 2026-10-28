@@ -623,15 +623,23 @@ bool CentralRepository::submitBatch(
         const double frequencyNumber = frequencyValue.toDouble(-1);
         double pointsNumber = pointsValue.toDouble(-1);
         if (!frequencyValue.isDouble() || !std::isfinite(frequencyNumber)
-            || frequencyNumber <= 0
-            || frequencyNumber > static_cast<double>(
+            || frequencyNumber < 0
+            || frequencyNumber >= static_cast<double>(
                    std::numeric_limits<qint64>::max())
-            || frequencyNumber != static_cast<qint64>(frequencyNumber)
-            || !pointsValue.isDouble() || !std::isfinite(pointsNumber)
+            || frequencyNumber != static_cast<qint64>(frequencyNumber)) {
+            return rollback(QStringLiteral(
+                "INVALID_MESSAGE: frequency_hz must be a non-negative integer "
+                "(0 means unknown); operation_uuid=%1, qso_uuid=%2.")
+                .arg(operationUuid, stringValue(qso, QStringLiteral("qso_uuid"))));
+        }
+        if (!pointsValue.isDouble() || !std::isfinite(pointsNumber)
             || pointsNumber < 0
             || pointsNumber > std::numeric_limits<int>::max()
             || pointsNumber != static_cast<int>(pointsNumber)) {
-            return rollback(QStringLiteral("INVALID_MESSAGE: frequency or points are invalid."));
+            return rollback(QStringLiteral(
+                "INVALID_MESSAGE: points must be a non-negative integer within "
+                "the supported range; operation_uuid=%1, qso_uuid=%2.")
+                .arg(operationUuid, stringValue(qso, QStringLiteral("qso_uuid"))));
         }
         const int expectedVersion = static_cast<int>(expectedVersionNumber);
         const QString qsoUuid = stringValue(qso, QStringLiteral("qso_uuid"));

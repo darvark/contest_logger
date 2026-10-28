@@ -121,6 +121,8 @@ private slots:
     void restoresCentralBackupWithRevisionAndIdempotency();
     void recordsResumableLogImportAudit();
     void commitsIdempotentRevisionsAtomically();
+    void validatesNetworkFrequencyAndPoints_data();
+    void validatesNetworkFrequencyAndPoints();
     void synchronizesWaeQtcWithItsPartnerQso();
     void persistsClientAndTransactionDiagnostics();
     void compactsAcknowledgedEventsAndKeepsSnapshotsAvailable();
@@ -465,6 +467,68 @@ void CentralRepositoryTest::commitsIdempotentRevisionsAtomically()
              qint64(3));
     QCOMPARE(events.last().toObject().value(QStringLiteral("payload")).toObject()
                  .value(QStringLiteral("is_deleted")).toBool(), true);
+}
+
+void CentralRepositoryTest::validatesNetworkFrequencyAndPoints_data()
+{
+    QTest::addColumn<QJsonValue>("frequency");
+    QTest::addColumn<QJsonValue>("points");
+    QTest::addColumn<QString>("invalidField");
+    QTest::newRow("unknown-frequency") << QJsonValue(0) << QJsonValue(1) << QString();
+    QTest::newRow("known-frequency") << QJsonValue(14025000) << QJsonValue(0) << QString();
+    QTest::newRow("negative-frequency") << QJsonValue(-1) << QJsonValue(1)
+                                      << QStringLiteral("frequency_hz");
+    QTest::newRow("fractional-frequency") << QJsonValue(1.5) << QJsonValue(1)
+                                        << QStringLiteral("frequency_hz");
+    QTest::newRow("overflow-frequency") << QJsonValue(9223372036854775808.0)
+                                      << QJsonValue(1) << QStringLiteral("frequency_hz");
+    QTest::newRow("string-frequency") << QJsonValue(QStringLiteral("0")) << QJsonValue(1)
+                                     << QStringLiteral("frequency_hz");
+    QTest::newRow("null-frequency") << QJsonValue(QJsonValue::Null) << QJsonValue(1)
+                                   << QStringLiteral("frequency_hz");
+    QTest::newRow("negative-points") << QJsonValue(0) << QJsonValue(-1)
+                                   << QStringLiteral("points");
+    QTest::newRow("fractional-points") << QJsonValue(0) << QJsonValue(1.5)
+                                     << QStringLiteral("points");
+    QTest::newRow("overflow-points") << QJsonValue(0) << QJsonValue(2147483648.0)
+                                   << QStringLiteral("points");
+    QTest::newRow("string-points") << QJsonValue(0) << QJsonValue(QStringLiteral("1"))
+                                 << QStringLiteral("points");
+}
+
+void CentralRepositoryTest::validatesNetworkFrequencyAndPoints()
+{
+    QFETCH(QJsonValue, frequency);
+    QFETCH(QJsonValue, points);
+    QFETCH(QString, invalidField);
+    QTemporaryDir directory;
+    logger::CentralRepository central;
+    QString error;
+    QVERIFY2(central.initialize(directory.path(), &error), qPrintable(error));
+    const QString logUuid = central.repository()->contests().first().logUuid;
+    const QString operationUuid = newUuid();
+    const QString qsoUuid = newUuid();
+    QJsonObject operation = sampleOperation(
+        logUuid, newUuid(), operationUuid, qsoUuid,
+        QStringLiteral("qso.create"), 0, QStringLiteral("W1AW"));
+    QJsonObject qso = operation.value(QStringLiteral("qso")).toObject();
+    qso.insert(QStringLiteral("frequency_hz"), frequency);
+    qso.insert(QStringLiteral("points"), points);
+    operation.insert(QStringLiteral("qso"), qso);
+    QJsonArray results;
+    const bool submitted = central.submitBatch(logUuid, {operation}, &results, &error);
+    QCOMPARE(submitted, invalidField.isEmpty());
+    if (submitted) {
+        QCOMPARE(results.first().toObject().value(QStringLiteral("qso")).toObject()
+                     .value(QStringLiteral("frequency_hz")), frequency);
+        QCOMPARE(central.currentRevision(logUuid), qint64(1));
+    } else {
+        QVERIFY2(error.startsWith(QStringLiteral("INVALID_MESSAGE: ") + invalidField),
+                 qPrintable(error));
+        QVERIFY(error.contains(operationUuid));
+        QVERIFY(error.contains(qsoUuid));
+        QCOMPARE(central.currentRevision(logUuid), qint64(0));
+    }
 }
 
 void CentralRepositoryTest::synchronizesWaeQtcWithItsPartnerQso()

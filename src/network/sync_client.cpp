@@ -1567,7 +1567,7 @@ void SyncClient::pumpSynchronization()
     QString error;
     QVector<SyncOutboxOperation> operations =
         m_repository->syncOutbox(m_configuration.logUuid, false, &error,
-                                 m_outboxBatchSize);
+                                 m_outboxBatchSize, true);
     if (!error.isEmpty()) {
         setState(State::Error, error);
         emit requestFailed({}, QStringLiteral("LOCAL_STORAGE_ERROR"), error, false);
@@ -1603,7 +1603,7 @@ void SyncClient::pumpSynchronization()
             emit requestFailed(operation.operationUuid,
                                QStringLiteral("INVALID_OUTBOX_OPERATION"),
                                invalidOperation, false);
-            continue;
+            break;
         }
         if (!m_repository->setSyncOperationState(
                 operation.operationUuid, QStringLiteral("in-flight"), {}, &error)) {

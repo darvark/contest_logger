@@ -3992,7 +3992,7 @@ void MainWindow::importLocalLogToHost()
             && ContestEngine::isValidCallsign(qso.callsign)
             && !qso.stationCallsign.trimmed().isEmpty()
             && (qso.stationUuid.isEmpty() || validImportUuid(qso.stationUuid))
-            && qso.timestampUtc.isValid() && qso.frequencyHz > 0 && qso.points >= 0;
+            && qso.timestampUtc.isValid() && qso.frequencyHz >= 0 && qso.points >= 0;
         const bool validBand = definition.bands.contains(
             qso.band, Qt::CaseInsensitive);
         const bool validMode = definition.modes.contains(
@@ -6434,13 +6434,33 @@ void MainWindow::showNetworkStatus()
                 }
                 QJsonArray operationSummary;
                 for (const SyncOutboxOperation &operation : operations) {
+                    QJsonParseError parseError;
+                    const QJsonDocument payload = QJsonDocument::fromJson(
+                        operation.payloadJson.toUtf8(), &parseError);
+                    if (parseError.error != QJsonParseError::NoError
+                        || !payload.isObject()
+                        || !payload.object().value(QStringLiteral("qso")).isObject()) {
+                        QMessageBox::critical(
+                            &dialog, tr("Unable to export diagnostics"),
+                            tr("Invalid stored payload for operation %1: %2")
+                                .arg(operation.operationUuid,
+                                     parseError.error != QJsonParseError::NoError
+                                         ? parseError.errorString()
+                                         : tr("Expected a QSO object.")));
+                        return;
+                    }
+                    const QJsonObject qso =
+                        payload.object().value(QStringLiteral("qso")).toObject();
                     operationSummary.append(QJsonObject{
                         {QStringLiteral("operation_uuid"), operation.operationUuid},
                         {QStringLiteral("entity_uuid"), operation.entityUuid},
                         {QStringLiteral("operation"), operation.operation},
                         {QStringLiteral("status"), operation.status},
                         {QStringLiteral("attempts"), operation.attempts},
-                        {QStringLiteral("last_error"), operation.lastError}
+                        {QStringLiteral("last_error"), operation.lastError},
+                        {QStringLiteral("frequency_hz"),
+                         qso.value(QStringLiteral("frequency_hz"))},
+                        {QStringLiteral("points"), qso.value(QStringLiteral("points"))}
                     });
                 }
                 QString cursorError;

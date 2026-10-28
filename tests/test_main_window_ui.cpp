@@ -76,6 +76,7 @@ private slots:
     void networkStationsDockLayoutPersists();
     void networkStationPresenceFreshnessExpires();
     void networkStatusShowsQueueAndOfflineState();
+    void exportsStoredFrequencyAndPointsInDiagnostics();
     void networkStatusListsConnectedStations();
     void dxClusterDialogSelectsDirectoryOrCustomServer();
     void dxClusterConnectionsPersistAndRestore();
@@ -741,6 +742,83 @@ void MainWindowUiTest::networkStatusShowsQueueAndOfflineState()
     QCOMPARE(QJsonDocument::fromJson(
                  mergedOperations.first().payloadJson.toUtf8()).object()
                  .value(QStringLiteral("expected_version")).toInt(), 2);
+}
+
+void MainWindowUiTest::exportsStoredFrequencyAndPointsInDiagnostics()
+{
+    const auto *selector =
+        m_window->findChild<QComboBox *>(QStringLiteral("contestSelector"));
+    QVERIFY(selector != nullptr);
+    const qint64 contestId = selector->currentData().toLongLong();
+    const auto contests = m_repository->contests();
+    const auto contest = std::find_if(contests.cbegin(), contests.cend(),
+        [contestId](const Contest &item) { return item.id == contestId; });
+    QVERIFY(contest != contests.cend());
+    QString error;
+    QVERIFY2(m_repository->setSynchronizationEnabled(contest->logUuid, true, &error),
+             qPrintable(error));
+    Qso qso;
+    qso.contestId = contestId;
+    qso.callsign = QStringLiteral("SP6MI/M");
+    qso.stationCallsign = QStringLiteral("SN6U");
+    qso.band = QStringLiteral("160m");
+    qso.timestampUtc = QDateTime::currentDateTimeUtc();
+    qso.mode = QStringLiteral("CW");
+    qso.frequencyHz = 0;
+    qso.points = 1;
+    qso.sentExchange = QStringLiteral("599");
+    qso.receivedExchange = QStringLiteral("599");
+    QVERIFY2(m_repository->saveQso(qso, &error), qPrintable(error));
+    const auto original = m_repository->syncOutbox(contest->logUuid).first();
+    QVERIFY2(m_repository->setSyncOperationState(
+        original.operationUuid, QStringLiteral("failed"),
+        QStringLiteral("INVALID_MESSAGE: frequency or points are invalid."), &error),
+        qPrintable(error));
+    qso.frequencyHz = 1825000;
+    qso.points = 2;
+    QVERIFY2(m_repository->updateQso(qso, &error), qPrintable(error));
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("diagnostics.json"));
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    bool pickerSeen = false;
+    runWhenModalAppears([&](QDialog *dialog) {
+        QCOMPARE(dialog->objectName(), QStringLiteral("networkStatusDialog"));
+        auto *exportButton = dialog->findChild<QPushButton *>(
+            QStringLiteral("exportSyncDiagnosticsButton"));
+        QVERIFY(exportButton != nullptr);
+        runWhenModalAppears([&](QDialog *modal) {
+            auto *picker = qobject_cast<QFileDialog *>(modal);
+            QVERIFY(picker != nullptr);
+            pickerSeen = true;
+            picker->setDirectory(directory.path());
+            QTimer::singleShot(150, picker, [picker, path] {
+                auto *name = picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"));
+                QVERIFY(name != nullptr);
+                name->setText(path);
+                QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+            });
+        });
+        exportButton->click();
+        dialog->accept();
+    });
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("networkStatusAction"));
+    QVERIFY(action != nullptr);
+    action->trigger();
+    QVERIFY(pickerSeen);
+    QFile file(path);
+    QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(file.errorString()));
+    const QJsonArray operations = QJsonDocument::fromJson(file.readAll()).object()
+        .value(QStringLiteral("operations")).toArray();
+    QCOMPARE(operations.size(), 2);
+    const QJsonObject first = operations.first().toObject();
+    QCOMPARE(first.value(QStringLiteral("operation_uuid")).toString(), original.operationUuid);
+    QCOMPARE(first.value(QStringLiteral("frequency_hz")).toInteger(-1), qint64(0));
+    QCOMPARE(first.value(QStringLiteral("points")).toInt(-1), 1);
+    QCOMPARE(operations.last().toObject().value(QStringLiteral("frequency_hz")).toInteger(),
+             qint64(1825000));
+    QCOMPARE(operations.last().toObject().value(QStringLiteral("points")).toInt(), 2);
 }
 
 void MainWindowUiTest::networkStatusListsConnectedStations()

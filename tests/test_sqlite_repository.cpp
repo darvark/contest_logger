@@ -153,8 +153,11 @@ private slots:
     void createsAndUpdatesLogProperties();
     void updatesQsoAndPersistsExchangeFields();
     void resolvesSyncConflictByAcceptingServer();
+    void resolvesSyncConflictByAcceptingServer_data();
     void resolvesSyncConflictByKeepingLocalAsNewUpdate();
+    void resolvesSyncConflictByKeepingLocalAsNewUpdate_data();
     void resolvesSyncConflictByMergingSelectedFields();
+    void resolvesSyncConflictByMergingSelectedFields_data();
     void loadsAllQsosForDupeChecking();
     void savesAndReadsSpot();
     void savesSpotWithoutMode();
@@ -1097,8 +1100,26 @@ void SqliteRepositoryTest::persistsQtcWithQsoAndQueuesItForSynchronization()
              transfer.qtcUuid);
 }
 
+void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer_data()
+{
+    QTest::addColumn<qint64>("frequencyHz");
+    QTest::newRow("known-frequency") << qint64(14025000);
+    QTest::newRow("unknown-frequency") << qint64(0);
+}
+
+void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate_data()
+{
+    resolvesSyncConflictByAcceptingServer_data();
+}
+
+void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields_data()
+{
+    resolvesSyncConflictByAcceptingServer_data();
+}
+
 void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
 {
+    QFETCH(qint64, frequencyHz);
     TestDatabase database;
     auto &repository = database.repository();
     QString error;
@@ -1108,6 +1129,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
              qPrintable(error));
 
     logger::Qso qso = sampleQso();
+    qso.frequencyHz = frequencyHz;
     QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
     QVector<logger::SyncOutboxOperation> operations =
         repository.syncOutbox(contest.logUuid, false, &error);
@@ -1143,6 +1165,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
     const auto stored = repository.qsoById(qso.id, &error);
     QVERIFY2(stored.has_value(), qPrintable(error));
     QCOMPARE(stored->callsign, QStringLiteral("W1SERVER"));
+    QCOMPARE(stored->frequencyHz, frequencyHz);
     QCOMPARE(stored->qsoVersion, 2);
     QCOMPARE(stored->syncStatus, logger::QsoSyncStatus::Synced);
     QVERIFY2(repository.syncConflicts(contest.logUuid, &error).isEmpty(),
@@ -1163,6 +1186,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByAcceptingServer()
 
 void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
 {
+    QFETCH(qint64, frequencyHz);
     TestDatabase database;
     auto &repository = database.repository();
     QString error;
@@ -1172,6 +1196,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
              qPrintable(error));
 
     logger::Qso qso = sampleQso();
+    qso.frequencyHz = frequencyHz;
     QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
     QVector<logger::SyncOutboxOperation> operations =
         repository.syncOutbox(contest.logUuid, false, &error);
@@ -1208,6 +1233,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
     const auto stored = repository.qsoById(qso.id, &error);
     QVERIFY2(stored.has_value(), qPrintable(error));
     QCOMPARE(stored->callsign, QStringLiteral("N0LOCAL"));
+    QCOMPARE(stored->frequencyHz, frequencyHz);
     QCOMPARE(stored->qsoVersion, 3);
     QCOMPARE(stored->syncStatus, logger::QsoSyncStatus::Pending);
 
@@ -1238,6 +1264,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByKeepingLocalAsNewUpdate()
 
 void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
 {
+    QFETCH(qint64, frequencyHz);
     TestDatabase database;
     auto &repository = database.repository();
     QString error;
@@ -1247,6 +1274,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
              qPrintable(error));
 
     logger::Qso qso = sampleQso();
+    qso.frequencyHz = frequencyHz;
     QVERIFY2(repository.saveQso(qso, &error), qPrintable(error));
     QVector<logger::SyncOutboxOperation> operations =
         repository.syncOutbox(contest.logUuid, false, &error);
@@ -1299,6 +1327,7 @@ void SqliteRepositoryTest::resolvesSyncConflictByMergingSelectedFields()
     const auto stored = repository.qsoById(qso.id, &error);
     QVERIFY2(stored.has_value(), qPrintable(error));
     QCOMPARE(stored->callsign, QStringLiteral("K2MERGED"));
+    QCOMPARE(stored->frequencyHz, frequencyHz);
     QCOMPARE(stored->sentExchange, QStringLiteral("599 101"));
     QCOMPARE(stored->receivedExchange, QStringLiteral("599 202"));
     QCOMPARE(stored->qsoVersion, 3);
@@ -1667,10 +1696,25 @@ void SqliteRepositoryTest::atomicallyReplacesDataFromVerifiedSnapshot()
         logUuid, stationUuid, remoteQsoUuid, QUuid::createUuid()
             .toString(QUuid::WithoutBraces).toLower(), 1,
         QStringLiteral("W1REMOTE")).value(QStringLiteral("payload")).toObject();
+    snapshotQso.insert(QStringLiteral("frequency_hz"), 0);
     snapshotQso.insert(QStringLiteral("qtc_transfers"),
                        sampleQtcTransfers(remoteQsoUuid,
                                           QStringLiteral("W1REMOTE")));
     const QJsonArray snapshot{snapshotQso};
+    for (const QJsonValue invalidFrequency : {
+             QJsonValue(-1), QJsonValue(0.5), QJsonValue(9223372036854775808.0)}) {
+        QJsonObject invalidQso = snapshotQso;
+        invalidQso.insert(QStringLiteral("frequency_hz"), invalidFrequency);
+        const QJsonArray invalidSnapshot{invalidQso};
+        const QString invalidChecksum = QString::fromLatin1(QCryptographicHash::hash(
+            QJsonDocument(invalidSnapshot).toJson(QJsonDocument::Compact),
+            QCryptographicHash::Sha256).toHex());
+        QVERIFY(!repository.applySyncSnapshot(
+            logUuid, invalidSnapshot, 3, invalidChecksum, &error));
+        QVERIFY(error.contains(QStringLiteral("invalid QSO")));
+        QCOMPARE(repository.syncCursor(logUuid), qint64(0));
+        QCOMPARE(repository.qsosForContest(1).size(), 1);
+    }
     const QString checksum = QString::fromLatin1(QCryptographicHash::hash(
         QJsonDocument(snapshot).toJson(QJsonDocument::Compact),
         QCryptographicHash::Sha256).toHex());
@@ -1687,6 +1731,7 @@ void SqliteRepositoryTest::atomicallyReplacesDataFromVerifiedSnapshot()
                 && qso.callsign == QStringLiteral("W1REMOTE");
         });
     QVERIFY(remote != qsos.cend());
+    QCOMPARE(remote->frequencyHz, qint64(0));
     QCOMPARE(remote->qtcTransfers.size(), 1);
     QCOMPARE(remote->qtcTransfers.first().messages.first().serialNumber, 18);
     QVERIFY(std::any_of(qsos.cbegin(), qsos.cend(),

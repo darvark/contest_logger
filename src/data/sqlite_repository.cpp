@@ -2044,7 +2044,8 @@ bool SqliteRepository::setSyncCursor(
 }
 
 QVector<SyncOutboxOperation> SqliteRepository::syncOutbox(
-    const QString &logUuid, bool includeTerminal, QString *error, int limit) const
+    const QString &logUuid, bool includeTerminal, QString *error, int limit,
+    bool readyOnly) const
 {
     clearError(error);
     QVector<SyncOutboxOperation> result;
@@ -2055,13 +2056,21 @@ QVector<SyncOutboxOperation> SqliteRepository::syncOutbox(
     QSqlQuery query(m_database);
     const QString select = QStringLiteral(
         "SELECT operation_uuid, log_uuid, entity_uuid, operation, payload_json, "
-        "created_at_utc, status, attempts, last_error FROM sync_outbox "
+        "created_at_utc, status, attempts, last_error FROM sync_outbox AS candidate "
         "WHERE log_uuid = ? ");
     if (limit < 0) {
         setError(error, QStringLiteral("Sync outbox limit cannot be negative."));
         return result;
     }
-    query.prepare(select + (includeTerminal
+    query.prepare(select + (readyOnly
+        ? QStringLiteral(
+            "AND status = 'pending' AND NOT EXISTS ("
+            "SELECT 1 FROM sync_outbox AS predecessor "
+            "WHERE predecessor.log_uuid = candidate.log_uuid "
+            "AND predecessor.entity_uuid = candidate.entity_uuid "
+            "AND predecessor.rowid < candidate.rowid "
+            "AND predecessor.status NOT IN ('accepted', 'pending')) ORDER BY rowid")
+        : includeTerminal
         ? QStringLiteral("ORDER BY rowid")
         : QStringLiteral("AND status <> 'accepted' "
                          "ORDER BY rowid"))
@@ -2904,8 +2913,8 @@ bool SqliteRepository::resolveSyncConflictAcceptServer(
                 || !remote.value(QStringLiteral("is_deleted")).isBool()
                 || !remote.value(QStringLiteral("is_invalid")).isBool()
                 || !frequencyValue.isDouble() || !std::isfinite(frequency)
-                || frequency <= 0
-                || frequency > static_cast<double>(
+                || frequency < 0
+                || frequency >= static_cast<double>(
                     std::numeric_limits<qint64>::max())
                 || frequency != static_cast<qint64>(frequency)
                 || version < 1 || !versionValue.isDouble()
@@ -3174,7 +3183,7 @@ bool SqliteRepository::resolveSyncConflictWithValues(
             const qint64 frequency = frequencyValue.toVariant().toLongLong(&frequencyOk);
             const int points = pointsValue.toInt(-1);
             pointsOk = points >= 0 && pointsValue.isDouble();
-            if (!timestamp.isValid() || !frequencyOk || frequency <= 0
+            if (!timestamp.isValid() || !frequencyOk || frequency < 0
                 || !pointsOk
                 || !readFields(localQso.value(
                                    QStringLiteral("sent_exchange_fields")),
@@ -3264,7 +3273,7 @@ bool SqliteRepository::resolveSyncConflictWithValues(
                     || !mergedQso->value(QStringLiteral("station_callsign")).isString()
                     || !mergedQso->value(QStringLiteral("band")).isString()
                     || !parsedTimestamp.isValid()
-                    || !mergedFrequencyOk || parsedFrequency <= 0
+                    || !mergedFrequencyOk || parsedFrequency < 0
                     || !mergedFrequency.isDouble()
                     || parsedPoints < 0 || !mergedPoints.isDouble()
                     || !mergedQso->value(QStringLiteral("mode")).isString()
@@ -3502,8 +3511,8 @@ bool SqliteRepository::applySyncChanges(
                 }
                 return true;
             };
-            if (!frequencyValue.isDouble() || !std::isfinite(frequency) || frequency <= 0
-                || frequency > static_cast<double>(
+            if (!frequencyValue.isDouble() || !std::isfinite(frequency) || frequency < 0
+                || frequency >= static_cast<double>(
                     std::numeric_limits<qint64>::max())
                 || frequency != static_cast<qint64>(frequency)
                 || !pointsValue.isDouble() || !std::isfinite(points) || points < 0
@@ -3780,6 +3789,10 @@ bool SqliteRepository::applySyncSnapshot(
             const QDateTime timestamp = QDateTime::fromString(
                 qso.value(QStringLiteral("timestamp_utc")).toString(),
                 Qt::ISODateWithMs);
+            const QJsonValue frequencyValue = qso.value(QStringLiteral("frequency_hz"));
+            const double frequency = frequencyValue.toDouble(-1);
+            const QJsonValue pointsValue = qso.value(QStringLiteral("points"));
+            const double points = pointsValue.toDouble(-1);
             if (qso.keys() != requiredKeys || !isSyncUuid(qsoUuid)
                 || snapshotUuids.contains(qsoUuid)
                 || qso.value(QStringLiteral("log_uuid")).toString() != logUuid
@@ -3788,8 +3801,13 @@ bool SqliteRepository::applySyncSnapshot(
                 || !qso.value(QStringLiteral("is_deleted")).isBool()
                 || !qso.value(QStringLiteral("is_invalid")).isBool()
                 || qso.value(QStringLiteral("qso_version")).toInt(-1) < 1
-                || !qso.value(QStringLiteral("frequency_hz")).isDouble()
-                || !qso.value(QStringLiteral("points")).isDouble()
+                || !frequencyValue.isDouble() || !std::isfinite(frequency)
+                || frequency < 0
+                || frequency >= static_cast<double>(std::numeric_limits<qint64>::max())
+                || frequency != static_cast<qint64>(frequency)
+                || !pointsValue.isDouble() || !std::isfinite(points) || points < 0
+                || points > std::numeric_limits<int>::max()
+                || points != static_cast<int>(points)
                 || !qso.value(QStringLiteral("received_exchange_fields")).isObject()
                 || !qso.value(QStringLiteral("sent_exchange_fields")).isObject()
                 || !qso.value(QStringLiteral("qtc_transfers")).isArray()

@@ -178,6 +178,7 @@ private slots:
     void rejectsUntrustedServerCertificate();
     void synchronizesOutboxAndChangesAtomically();
     void synchronizesThreeIndependentClients();
+    void synchronizesUnknownFrequencyPastFailedIndependentQso();
     void rejectsConcurrentQsoEditsWithoutOverwriting();
     void retriesCommittedQsoAfterLostResponse();
     void resumesPendingClientOutboxAfterClientAndServerRestart();
@@ -2006,6 +2007,132 @@ void SyncServerTest::synchronizesThreeIndependentClients()
         node->database = QSqlDatabase();
         QSqlDatabase::removeDatabase(node->connectionName);
     }
+}
+
+void SyncServerTest::synchronizesUnknownFrequencyPastFailedIndependentQso()
+{
+    QString error;
+    const QString logUuid = m_repository->repository()->contests().first().logUuid;
+    m_server->close();
+    QVERIFY2(m_server->listenTrustedNetwork(
+        QStringLiteral("127.0.0.1"), 0, 4, &error), qPrintable(error));
+
+    struct Station {
+        QString connectionName;
+        QSqlDatabase database;
+        std::unique_ptr<logger::SqliteRepository> repository;
+        logger::SyncClient client;
+        ~Station()
+        {
+            client.disconnectFromServer();
+            repository.reset();
+            database.close();
+            database = {};
+            QSqlDatabase::removeDatabase(connectionName);
+        }
+    };
+    std::array<Station, 2> stations;
+    for (std::size_t index = 0; index < stations.size(); ++index) {
+        auto &station = stations.at(index);
+        station.connectionName = QStringLiteral("unknown-frequency-%1-%2")
+            .arg(index).arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        station.database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), station.connectionName);
+        station.database.setDatabaseName(QStringLiteral(":memory:"));
+        QVERIFY(station.database.open());
+        station.repository = std::make_unique<logger::SqliteRepository>(station.database);
+        QVERIFY2(station.repository->initialize(&error), qPrintable(error));
+        QVERIFY2(station.repository->ensureGeneralLog(&error), qPrintable(error));
+        QSqlQuery setLog(station.database);
+        setLog.prepare(QStringLiteral("UPDATE contests SET log_uuid = ? WHERE id = 1"));
+        setLog.addBindValue(logUuid);
+        QVERIFY2(setLog.exec(), qPrintable(setLog.lastError().text()));
+        QVERIFY2(station.repository->setSynchronizationEnabled(logUuid, true, &error),
+                 qPrintable(error));
+    }
+
+    auto &source = *stations.front().repository;
+    logger::Qso rejected;
+    rejected.contestId = 1;
+    rejected.callsign = QStringLiteral("W1BAD");
+    rejected.stationCallsign = QStringLiteral("K1TEST");
+    rejected.band = QStringLiteral("160m");
+    rejected.timestampUtc = QDateTime::currentDateTimeUtc();
+    rejected.frequencyHz = 0;
+    rejected.mode = QStringLiteral("CW");
+    rejected.sentExchange = QStringLiteral("599");
+    rejected.receivedExchange = QStringLiteral("599");
+    rejected.points = -1;
+    QVERIFY2(source.saveQso(rejected, &error), qPrintable(error));
+    const QString rejectedOperation =
+        source.syncOutbox(logUuid, false, &error).first().operationUuid;
+    rejected.callsign = QStringLiteral("W1BAD/P");
+    QVERIFY2(source.updateQso(rejected, &error), qPrintable(error));
+    logger::Qso valid = rejected;
+    valid.id = 0;
+    valid.qsoUuid.clear();
+    valid.callsign = QStringLiteral("SP6MI/M");
+    valid.points = 1;
+    QVERIFY2(source.saveQso(valid, &error), qPrintable(error));
+    QSignalSpy failures(&stations.front().client, &logger::SyncClient::requestFailed);
+    for (std::size_t index = 0; index < stations.size(); ++index) {
+        auto &station = stations.at(index);
+        logger::SyncClientConfiguration configuration;
+        configuration.host = QStringLiteral("127.0.0.1");
+        configuration.port = m_server->serverPort();
+        configuration.trustedNetworkMode = true;
+        configuration.stationUuid = station.repository->localStationUuid(&error);
+        configuration.computerName = QStringLiteral("NO-CAT-%1").arg(index);
+        configuration.logUuid = logUuid;
+        station.client.connectToServer(configuration);
+        QVERIFY2(station.client.startSynchronization(*station.repository, &error),
+                 qPrintable(error));
+    }
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_repository->currentRevision(logUuid), qint64(1), 8000);
+    for (auto &station : stations) {
+        QTRY_COMPARE_WITH_TIMEOUT(
+            station.repository->syncCursor(logUuid), qint64(1), 8000);
+        const auto qsos = station.repository->qsosForContest(1);
+        const auto found = std::find_if(qsos.cbegin(), qsos.cend(),
+            [&valid](const logger::Qso &qso) { return qso.qsoUuid == valid.qsoUuid; });
+        QVERIFY(found != qsos.cend());
+        QCOMPARE(found->frequencyHz, qint64(0));
+        QCOMPARE(found->points, 1);
+        QCOMPARE(found->syncStatus, logger::QsoSyncStatus::Synced);
+    }
+    const auto hostQsos = m_repository->repository()->qsosForContest(1);
+    QCOMPARE(hostQsos.size(), 1);
+    QCOMPARE(hostQsos.first().frequencyHz, qint64(0));
+    auto queued = source.syncOutbox(logUuid, false, &error);
+    QCOMPARE(queued.size(), 2);
+    QCOMPARE(queued.first().status, QStringLiteral("failed"));
+    QVERIFY(queued.first().lastError.contains(QStringLiteral("points")));
+    QVERIFY(queued.first().lastError.contains(rejectedOperation));
+    QCOMPARE(queued.last().operation, QStringLiteral("qso.update"));
+    QCOMPARE(queued.last().status, QStringLiteral("pending"));
+    // The dependent update was in the original atomic batch, which rolled back.
+    QCOMPARE(queued.last().attempts, 1);
+    QVERIFY(std::any_of(failures.cbegin(), failures.cend(),
+        [](const QList<QVariant> &failure) {
+            return failure.at(1).toString() == QStringLiteral("INVALID_MESSAGE")
+                && failure.at(2).toString().contains(QStringLiteral("points"));
+        }));
+
+    auto edit = source.qsoById(valid.id, &error);
+    QVERIFY(edit.has_value());
+    edit->callsign = QStringLiteral("SP6MI/P");
+    QVERIFY2(source.updateQso(*edit, &error), qPrintable(error));
+    stations.front().client.flushPendingChanges();
+    QTRY_COMPARE_WITH_TIMEOUT(m_repository->currentRevision(logUuid), qint64(2), 8000);
+    QTRY_COMPARE_WITH_TIMEOUT(stations.back().repository->syncCursor(logUuid), qint64(2), 8000);
+    const auto replicated = stations.back().repository->qsosForContest(1);
+    QCOMPARE(replicated.size(), 1);
+    QCOMPARE(replicated.first().callsign, QStringLiteral("SP6MI/P"));
+    QCOMPARE(replicated.first().frequencyHz, qint64(0));
+    queued = source.syncOutbox(logUuid, false, &error);
+    QCOMPARE(queued.size(), 2);
+    QCOMPARE(queued.last().attempts, 1);
 }
 
 void SyncServerTest::rejectsConcurrentQsoEditsWithoutOverwriting()

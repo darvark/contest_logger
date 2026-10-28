@@ -1544,6 +1544,8 @@ void SyncServer::processMessage(QSslSocket *socket, const QByteArray &frame)
             QJsonObject context;
             if (error.startsWith(QStringLiteral("UNKNOWN_LOG"))) {
                 code = QStringLiteral("UNKNOWN_LOG");
+            } else if (error.startsWith(QStringLiteral("INVALID_MESSAGE"))) {
+                code = QStringLiteral("INVALID_MESSAGE");
             } else if (error.startsWith(QStringLiteral("IDEMPOTENCY_KEY_REUSED"))) {
                 code = QStringLiteral("IDEMPOTENCY_KEY_REUSED");
             } else if (error.startsWith(QStringLiteral("VERSION_CONFLICT"))) {
