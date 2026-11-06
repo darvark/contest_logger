@@ -526,6 +526,14 @@ bool LogExporter::validate(LogExportFormat format, const Contest &contest,
                            const ContestDefinition *definition,
                            const QVector<Qso> &qsos, QString *error)
 {
+    return validate(format, contest, definition, qsos, LogExportOptions{}, error);
+}
+
+bool LogExporter::validate(LogExportFormat format, const Contest &contest,
+                           const ContestDefinition *definition,
+                           const QVector<Qso> &qsos,
+                           const LogExportOptions &options, QString *error)
+{
     setError(error, {});
     QVector<Qso> activeQsos;
     std::copy_if(qsos.cbegin(), qsos.cend(), std::back_inserter(activeQsos),
@@ -573,6 +581,9 @@ bool LogExporter::validate(LogExportFormat format, const Contest &contest,
         }
         if (definition != nullptr) {
             ContestEvaluationContext context;
+            if (options.multiplierResolver) {
+                context.resolvedMultiplierValues = options.multiplierResolver(qso);
+            }
             for (qsizetype previous = 0; previous < index; ++previous) {
                 context.previousQsos.append(activeQsos.at(previous));
             }
@@ -655,7 +666,7 @@ bool LogExporter::writeFile(const QString &filePath, LogExportFormat format,
     QVector<Qso> activeQsos;
     std::copy_if(qsos.cbegin(), qsos.cend(), std::back_inserter(activeQsos),
                  [](const Qso &qso) { return !qso.invalid; });
-    if (!validate(format, contest, definition, activeQsos, error)) {
+    if (!validate(format, contest, definition, activeQsos, options, error)) {
         return false;
     }
     if (station.callsign.trimmed().isEmpty()) {

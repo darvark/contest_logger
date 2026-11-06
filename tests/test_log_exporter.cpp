@@ -276,9 +276,9 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
         {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("10m"),
          QStringLiteral("CW"),
          {{QStringLiteral("report"), QStringLiteral("599")},
-          {QStringLiteral("exchange"), QStringLiteral("CT")}},
+                    {QStringLiteral("state"), QStringLiteral("CT")}},
          {{QStringLiteral("report"), QStringLiteral("599")},
-          {QStringLiteral("exchange"), QStringLiteral("CA")}},
+                    {QStringLiteral("state"), QStringLiteral("CA")}},
          QStringLiteral("CT"), QStringLiteral("CA")},
         {QStringLiteral("arrl-dx-cw.yaml"), QStringLiteral("20m"),
          QStringLiteral("CW"),
@@ -361,10 +361,10 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
         {QStringLiteral("eudx.yaml"), QStringLiteral("20m"),
          QStringLiteral("CW"),
          {{QStringLiteral("report"), QStringLiteral("599")},
-          {QStringLiteral("region"), QStringLiteral("EM10")}},
+          {QStringLiteral("region"), QStringLiteral("FR20")}},
          {{QStringLiteral("report"), QStringLiteral("599")},
-          {QStringLiteral("region"), QStringLiteral("EM20")}},
-         QStringLiteral("EM10"), QStringLiteral("EM20")},
+          {QStringLiteral("region"), QStringLiteral("NL13")}},
+         QStringLiteral("FR20"), QStringLiteral("NL13")},
         {QStringLiteral("euhfc.yaml"), QStringLiteral("20m"),
          QStringLiteral("CW"),
          {{QStringLiteral("report"), QStringLiteral("599")},
@@ -481,9 +481,19 @@ void LogExporterTest::exportsBundledProfileCabrilloExchanges()
             contestDefinition.receivedExchange, scenario.received);
         const QString outputPath = directory.filePath(
             QStringLiteral("profile-%1.log").arg(index));
+        logger::LogExportOptions options;
+        if (scenario.file == QStringLiteral("arrl-dx-10m.yaml")) {
+            options.multiplierResolver = [](const logger::Qso &) {
+                return QMap<QString, QString>{
+                    {QStringLiteral("station_class"), QStringLiteral("state")},
+                    {QStringLiteral("station.station_class"),
+                     QStringLiteral("state")}
+                };
+            };
+        }
         QVERIFY2(logger::LogExporter::writeFile(
                      outputPath, logger::LogExportFormat::Cabrillo, contest(),
-                     &contestDefinition, {record}, station, &error),
+                     &contestDefinition, {record}, station, options, &error),
                  qPrintable((scenario.file + QStringLiteral(": ") + error)));
         QFile output(outputPath);
         QVERIFY(output.open(QIODevice::ReadOnly));

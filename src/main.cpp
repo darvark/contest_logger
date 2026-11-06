@@ -38,6 +38,8 @@ int main(int argc, char *argv[])
     QApplication::setStyle(QStringLiteral("Fusion"));
     QCoreApplication::setOrganizationName(QStringLiteral("ContestLogger"));
     QCoreApplication::setApplicationName(QStringLiteral("ContestLogger"));
+    QCoreApplication::setApplicationVersion(
+        QStringLiteral(CONTEST_LOGGER_VERSION));
     QSettings settings;
     QString language = settings.value(
         QStringLiteral("ui/language"), QStringLiteral("en")).toString();
@@ -63,6 +65,7 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(
         QStringLiteral("Cross-platform amateur radio contest logger"));
     parser.addHelpOption();
+    parser.addVersionOption();
     const QCommandLineOption restoreOption(
         QStringList{QStringLiteral("restore-backup")},
         QStringLiteral("Restore the database from a verified backup and exit."),

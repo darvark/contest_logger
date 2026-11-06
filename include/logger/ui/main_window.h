@@ -182,6 +182,7 @@ private:
     int currentEntryContext() const;
     void setActiveEntryContext(int context);
     void refreshCheckWindows();
+    void refreshNeededSummary();
     void refreshScoreSummary();
     void refreshRate();
     void updateTopStatus();
@@ -309,12 +310,14 @@ private:
     QComboBox *m_bandmapContinentFilter = nullptr;
     QComboBox *m_clusterConnectionSelector = nullptr;
     QLineEdit *m_clusterCommandInput = nullptr;
+    QLineEdit *m_spotBlacklistEdit = nullptr;
     QCheckBox *m_hideWorkedSpots = nullptr;
     QCheckBox *m_onlyNewMultiplierSpots = nullptr;
     QLabel *m_clusterLabel = nullptr;
     QTimer *m_spotExpiryTimer = nullptr;
     QListWidget *m_checkPartial = nullptr;
     QTableWidget *m_checkCallGrid = nullptr;
+    QTableWidget *m_neededSummary = nullptr;
     QLabel *m_checkCallTitle = nullptr;
     QLabel *m_rateLabel = nullptr;
     QWidget *m_rateChart = nullptr;
@@ -343,6 +346,7 @@ private:
     QDockWidget *m_clusterDock = nullptr;
     QDockWidget *m_checkPartialDock = nullptr;
     QDockWidget *m_checkCallDock = nullptr;
+    QDockWidget *m_neededSummaryDock = nullptr;
     QDockWidget *m_rateDock = nullptr;
     QDockWidget *m_summaryDock = nullptr;
     QDockWidget *m_greylineDock = nullptr;

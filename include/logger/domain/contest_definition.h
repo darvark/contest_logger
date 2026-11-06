@@ -44,6 +44,7 @@ struct MultiplierDefinition {
     bool perBand = false;
     bool perMode = false;
     QStringList excludedValues;
+    QMap<QString, QString> when;
 };
 
 struct QsoPointsRule {
@@ -68,6 +69,9 @@ struct ContestDefinition {
     int qsoPoints = 1;
     QVector<QsoPointsRule> qsoPointRules;
     QVector<MultiplierDefinition> multipliers;
+    QMap<QString, int> multiplierBandWeights;
+    QVector<QStringList> sentExactlyOneOf;
+    QVector<QStringList> receivedExactlyOneOf;
     QStringList dupeKey{QStringLiteral("callsign"),
                         QStringLiteral("band"),
                         QStringLiteral("mode")};

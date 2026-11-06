@@ -10,7 +10,8 @@ Spis funkcji dostępnych w obecnej wersji Contest Logger. Funkcje wymagające fi
 - Oznaczanie QSO jako nieważnego i przywracanie go z menu kontekstowego. Rekord pozostaje w historii i synchronizacji; nieważne QSO nie wpływa na punktację, mnożniki ani eksport.
 - Podpowiedzi callsign z listy Super Check Partial, call history i zalogowanych QSO. Wyboru można dokonać klawiaturą; wpisywanie nie podmienia automatycznie tekstu pola.
 - Podsumowanie tempa w paśmie i emisji oraz wykres liczby QSO w przedziałach pięciominutowych za ostatnią godzinę.
-- Bandmapa udostępnia filtry pasma/emisji/kontynentu i nowych mnożników, ukrywanie zaliczonych stacji, nawigację skrótami klawiaturowymi, źródło spotu oraz przejście do następnego niezaliczonego mnożnika.
+- Widok **Needed QSO / Mult** zlicza aktualne, różne spoty możliwe do zalogowania i nowe mnożniki per pasmo/emisja; wybór wiersza ustawia filtry bandmapy.
+- Bandmapa udostępnia filtry pasma/emisji/kontynentu i nowych mnożników, blacklistę znaków stacji/spotterów, ukrywanie zaliczonych stacji, nawigację skrótami klawiaturowymi, agregację raportów według znaku/pasma/emisji i źródła oraz przejście do następnego niezaliczonego mnożnika.
 - Okno Check callsign pokazuje macierz pasmo × emisja dla wpisanego znaku; `+M` oznacza rozpoznany nowy mnożnik, `M` już zaliczony. Wartości zależne od nieznanej wymiany lub brakujących danych pomocniczych pozostają nierozpoznane.
 - Automatyczne kopie bazy z konfigurowalnym odstępem i retencją oraz jawny rollback wersji definicji YAML i pobranych danych pomocniczych.
 - Ustawienie **Operating → Allow logging duplicate QSOs** jest domyślnie wyłączone; po włączeniu pozwala zapisywać i edytować dupe bez naliczania punktów ani nowych mnożników.

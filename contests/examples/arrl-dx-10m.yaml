@@ -3,27 +3,63 @@ id: arrl-dx-10m
 name: ARRL 10-Meter Contest
 description: >-
   2026 rules: https://www.arrl.org/files/file/Contest%20Rules%20PDFs/2026/10%20Meter%20Rules%20v%202_0%20-%202026.pdf.
-  Exchange depends on station location: W/VE and Mexican stations send a
-  state/province, DX stations a serial, and maritime mobile stations an ITU
-  region. CW QSOs score 4 points and SSB QSOs 2; multipliers are separated by
-  mode. The free-text exchange handles the alternatives, but the scorer cannot
-  classify state/province, DXCC, and maritime-region multipliers, so multiplier
-  totals remain provisional.
+  Exchange and multiplier type depend on the worked station: W/VE and Mexican
+  stations send a state/province, DX stations a serial, and maritime mobile
+  stations an ITU region. CW QSOs score 4 points and SSB QSOs 2; multipliers
+  are separated by mode. A CTY lookup is required to identify the exchange class.
 bands: [10m]
 modes: [CW, SSB]
 cabrillo: {contest: ARRL-10}
 exchange:
   sent:
     - {name: report, label: RST, type: rst, default: "599"}
-    - {name: exchange, label: "State/province, serial, or ITU region (station)", type: text}
+    - name: state
+      label: State / province (station)
+      type: enum
+      required: false
+      values: [AL, AK, AZ, AR, CA, CO, CT, DE, FL, GA, HI, ID, IL, IN, IA, KS, KY, LA, ME, MD, MA, MI, MN, MS, MO, MT, NE, NV, NH, NJ, NM, NY, NC, ND, OH, OK, OR, PA, RI, SC, SD, TN, TX, UT, VT, VA, WA, WV, WI, WY, DC, AB, BC, MB, NB, NL, NS, NT, NU, ON, PE, QC, SK, YT, AGS, BAC, BCS, CAM, CHI, CHH, CMX, COA, COL, DGO, EMX, GTO, GRO, HGO, JAL, MIC, MOR, NAY, NLE, OAX, PUE, QRO, QUI, SLP, SIN, SON, TAB, TAM, TLX, VER, YUC, ZAC]
+      when: {station.station_class: state}
+    - name: serial
+      label: Serial (station)
+      type: serial
+      generated: true
+      width: 3
+      required: false
+      when: {station.station_class: dx}
+    - name: itu_region
+      label: ITU region (station)
+      type: enum
+      required: false
+      values: ["1", "2", "3"]
+      when: {station.station_class: maritime}
   received:
     - {name: report, label: RST, type: rst}
-    - {name: exchange, label: "State/province, serial, or ITU region", type: text}
+    - name: state
+      label: State / province
+      type: enum
+      required: false
+      values: [AL, AK, AZ, AR, CA, CO, CT, DE, FL, GA, HI, ID, IL, IN, IA, KS, KY, LA, ME, MD, MA, MI, MN, MS, MO, MT, NE, NV, NH, NJ, NM, NY, NC, ND, OH, OK, OR, PA, RI, SC, SD, TN, TX, UT, VT, VA, WA, WV, WI, WY, DC, AB, BC, MB, NB, NL, NS, NT, NU, ON, PE, QC, SK, YT, AGS, BAC, BCS, CAM, CHI, CHH, CMX, COA, COL, DGO, EMX, GTO, GRO, HGO, JAL, MIC, MOR, NAY, NLE, OAX, PUE, QRO, QUI, SLP, SIN, SON, TAB, TAM, TLX, VER, YUC, ZAC]
+      required_when: {station_class: state}
+    - name: serial
+      label: Serial
+      type: integer
+      required: false
+      min: 1
+      max: 999999
+      required_when: {station_class: dx}
+    - name: itu_region
+      label: ITU region
+      type: enum
+      required: false
+      values: ["1", "2", "3"]
+      required_when: {station_class: maritime}
 scoring:
   qso_points: 0
   qso_point_rules:
     - {points: 4, when: {mode: CW}}
     - {points: 2, when: {mode: SSB}}
   multipliers:
-    - {type: exchange, field: exchange, per_band: false, per_mode: true}
+    - {type: exchange, field: state, per_mode: true, when: {station_class: state}}
+    - {type: dxcc, per_mode: true, when: {station_class: dx}}
+    - {type: exchange, field: itu_region, per_mode: true, when: {station_class: maritime}}
 dupe_key: [callsign, band, mode]

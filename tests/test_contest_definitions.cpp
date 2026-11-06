@@ -157,6 +157,7 @@ private slots:
     void scoresWagDistrictLetterMultipliers();
     void scoresArrlSweepstakesProfiles();
     void scoresArrlDxWveProfiles();
+    void scoresArrlTenMeterExchangeClasses();
     void scoresAllBundledExamplesAgainstRegressionCases();
     void scoresWaeQtcMessages();
     void rejectsInvalidReceivedExchange();
@@ -290,6 +291,23 @@ void ContestDefinitionTest::loadsBundledExamples()
             QCOMPARE(definition.multipliers.first().field,
                      QStringLiteral("region"));
             QCOMPARE(definition.multipliers.last().type, QStringLiteral("dxcc"));
+        }
+        if (filename == QStringLiteral("arrl-dx-10m.yaml")) {
+            const auto stateField = std::find_if(
+                definition.receivedExchange.cbegin(),
+                definition.receivedExchange.cend(),
+                [](const logger::ExchangeFieldDefinition &field) {
+                    return field.name == QStringLiteral("state");
+                });
+            QVERIFY(stateField != definition.receivedExchange.cend());
+            QCOMPARE(stateField->values.size(), 96);
+            QVERIFY(stateField->values.contains(QStringLiteral("AGS")));
+            QVERIFY(stateField->values.contains(QStringLiteral("BAC")));
+            QVERIFY(stateField->values.contains(QStringLiteral("CMX")));
+            QCOMPARE(definition.multipliers.size(), 3);
+            QVERIFY(definition.multipliers.at(0).perMode);
+            QVERIFY(definition.multipliers.at(1).perMode);
+            QVERIFY(definition.multipliers.at(2).perMode);
         }
         if (filename == QStringLiteral("euhfc.yaml")) {
             QCOMPARE(definition.cabrilloContest, QStringLiteral("EUHFC"));
@@ -505,7 +523,9 @@ void ContestDefinitionTest::scoresVerifiedContestProfiles()
     };
     result = engine.evaluate(
         iaru, QStringLiteral("W1AW"), QStringLiteral("20m"),
-        QStringLiteral("CW"), {{QStringLiteral("report"), QStringLiteral("599")}},
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("itu_zone"), QStringLiteral("08")}},
         context);
     QVERIFY(result.valid);
     QCOMPARE(result.points, 5);
@@ -553,12 +573,26 @@ void ContestDefinitionTest::scoresIaruAndEudxRules()
     result = engine.evaluate(
         iaru, QStringLiteral("W1AW"), QStringLiteral("20m"),
         QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("itu_zone"), QStringLiteral("08")},
+         {QStringLiteral("hq"), QStringLiteral("NU1AW")}},
+        logger::ContestEvaluationContext{.resolvedMultiplierValues = {
+            {QStringLiteral("same_continent"), QStringLiteral("true")}
+        }});
+    QVERIFY(!result.valid);
+    QVERIFY(std::any_of(result.issues.cbegin(), result.issues.cend(),
+                        [](const logger::ContestValidationIssue &issue) {
+                            return issue.field == QStringLiteral("received.exchange");
+                        }));
+
+    result = engine.evaluate(
+        iaru, QStringLiteral("W1AW"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
         {{QStringLiteral("report"), QStringLiteral("599")}},
         logger::ContestEvaluationContext{.resolvedMultiplierValues = {
             {QStringLiteral("same_continent"), QStringLiteral("true")}
         }});
-    QVERIFY(result.valid);
-    QCOMPARE(result.points, 0);
+    QVERIFY(!result.valid);
 
     const auto eudx = loadExample(QStringLiteral("eudx.yaml"));
     context.resolvedMultiplierValues = {
@@ -570,16 +604,24 @@ void ContestDefinitionTest::scoresIaruAndEudxRules()
         eudx, QStringLiteral("EA1ABC"), QStringLiteral("20m"),
         QStringLiteral("CW"),
         {{QStringLiteral("report"), QStringLiteral("599")},
-         {QStringLiteral("region"), QStringLiteral("EM10")}},
+         {QStringLiteral("region"), QStringLiteral("FR20")}},
         context);
     QVERIFY2(result.valid, qPrintable(result.issues.isEmpty()
                                           ? QString()
                                           : result.issues.first().message));
     QCOMPARE(result.points, 10);
     QVERIFY(result.newMultiplierKeys.contains(
-        QStringLiteral("exchange:region:EM10@20m")));
+        QStringLiteral("exchange:region:FR20@20m")));
     QVERIFY(result.newMultiplierKeys.contains(
         QStringLiteral("dxcc:SPAIN@20m")));
+
+    auto invalidRegion = engine.evaluate(
+        eudx, QStringLiteral("EA1ABC"), QStringLiteral("20m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("region"), QStringLiteral("EM10")}},
+        context);
+    QVERIFY(!invalidRegion.valid);
 
     context.resolvedMultiplierValues.insert(QStringLiteral("same_country"),
                                             QStringLiteral("true"));
@@ -587,7 +629,7 @@ void ContestDefinitionTest::scoresIaruAndEudxRules()
         eudx, QStringLiteral("EA1ABC"), QStringLiteral("20m"),
         QStringLiteral("CW"),
         {{QStringLiteral("report"), QStringLiteral("599")},
-         {QStringLiteral("region"), QStringLiteral("EM10")}},
+         {QStringLiteral("region"), QStringLiteral("FR20")}},
         context);
     QVERIFY(result.valid);
     QCOMPARE(result.points, 2);
@@ -822,8 +864,12 @@ void ContestDefinitionTest::scoresAllBundledExamplesAgainstRegressionCases()
         int expectedPoints;
     };
     const QVector<Scenario> scenarios{
-        {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("CW"), {}, 4},
-        {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("SSB"), {}, 2},
+        {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("CW"),
+         {{QStringLiteral("station_class"), QStringLiteral("state")},
+          {QStringLiteral("station.station_class"), QStringLiteral("state")}}, 4},
+        {QStringLiteral("arrl-dx-10m.yaml"), QStringLiteral("SSB"),
+         {{QStringLiteral("station_class"), QStringLiteral("state")},
+          {QStringLiteral("station.station_class"), QStringLiteral("state")}}, 2},
         {QStringLiteral("arrl-dx-cw.yaml"), QStringLiteral("CW"), {}, 3},
         {QStringLiteral("arrl-dx-ssb.yaml"), QStringLiteral("SSB"), {}, 3},
         {QStringLiteral("arrl-dx-cw-w-ve.yaml"), QStringLiteral("CW"), {}, 3},
@@ -879,6 +925,9 @@ void ContestDefinitionTest::scoresAllBundledExamplesAgainstRegressionCases()
             if (!value.isEmpty()) {
                 received.insert(field.name, value);
             }
+        }
+        if (scenario.file == QStringLiteral("iaruhfc.yaml")) {
+            received.remove(QStringLiteral("hq"));
         }
         QMap<QString, QString> sent;
         for (const auto &field : definition.sentExchange) {
@@ -940,18 +989,102 @@ void ContestDefinitionTest::scoresWaeQtcMessages()
 
     const logger::ContestDefinition definition =
         loadExample(QStringLiteral("wae-cw.yaml"));
-    const logger::ContestScore score =
-        logger::ContestEngine().score(definition, {qso});
-    QCOMPARE(score.totalPoints, 3);
-    QCOMPARE(score.finalScore, 3);
+    logger::Qso secondQso = qso;
+    secondQso.id = 2;
+    secondQso.callsign = QStringLiteral("G1XYZ");
+    secondQso.band = QStringLiteral("40m");
+    secondQso.qtcTransfers.clear();
+    const auto score = logger::ContestEngine().score(
+        definition, {qso, secondQso},
+        [](const logger::Qso &contact) {
+            return QMap<QString, QString>{
+                {QStringLiteral("dxcc"),
+                 contact.callsign == QStringLiteral("DL1ABC")
+                     ? QStringLiteral("Germany") : QStringLiteral("United Kingdom")}
+            };
+        });
+    QCOMPARE(score.totalPoints, 4);
+    QCOMPARE(score.totalMultipliers, 2);
+    QCOMPARE(score.finalScore, 20);
     QCOMPARE(score.perBand.value(QStringLiteral("20m")).points, 3);
-    QCOMPARE(score.perMode.value(QStringLiteral("CW")).points, 3);
+    QCOMPARE(score.perBand.value(QStringLiteral("40m")).points, 1);
+    QCOMPARE(score.perMode.value(QStringLiteral("CW")).points, 4);
+
+    for (const QString &profile : {QStringLiteral("wae-cw.yaml"),
+                                   QStringLiteral("wae-ssb.yaml"),
+                                   QStringLiteral("wae-rtty.yaml")}) {
+        const auto wae = loadExample(profile);
+        QCOMPARE(wae.multiplierBandWeights.value(QStringLiteral("80m")), 4);
+        QCOMPARE(wae.multiplierBandWeights.value(QStringLiteral("40m")), 3);
+        QCOMPARE(wae.multiplierBandWeights.value(QStringLiteral("20m")), 2);
+        QCOMPARE(wae.multipliers.size(), 1);
+        QVERIFY(wae.multipliers.first().perBand);
+    }
 
     const logger::ContestDefinition nonWaeDefinition =
         loadExample(QStringLiteral("general-logging.yaml"));
     const logger::ContestScore nonWaeScore =
         logger::ContestEngine().score(nonWaeDefinition, {qso});
     QCOMPARE(nonWaeScore.totalPoints, 1);
+}
+
+void ContestDefinitionTest::scoresArrlTenMeterExchangeClasses()
+{
+    const auto definition = loadExample(QStringLiteral("arrl-dx-10m.yaml"));
+    logger::ContestEngine engine;
+
+    logger::ContestEvaluationContext context;
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("station_class"), QStringLiteral("state")},
+        {QStringLiteral("station.station_class"), QStringLiteral("state")},
+        {QStringLiteral("dxcc"), QStringLiteral("United States")}
+    };
+    auto result = engine.evaluate(
+        definition, QStringLiteral("W1AW"), QStringLiteral("10m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("state"), QStringLiteral("CA")}},
+        context, std::nullopt, {{QStringLiteral("state"), QStringLiteral("NY")}});
+    QVERIFY2(result.valid, qPrintable(result.issues.isEmpty()
+                                          ? QString()
+                                          : result.issues.first().message));
+    QCOMPARE(result.points, 4);
+    QCOMPARE(result.sentExchange.value(QStringLiteral("state")),
+             QStringLiteral("NY"));
+    QVERIFY(result.newMultiplierKeys.contains(
+        QStringLiteral("exchange:state:CA@CW")));
+
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("station_class"), QStringLiteral("dx")},
+        {QStringLiteral("station.station_class"), QStringLiteral("state")},
+        {QStringLiteral("dxcc"), QStringLiteral("Germany")}
+    };
+    result = engine.evaluate(
+        definition, QStringLiteral("DL1ABC"), QStringLiteral("10m"),
+        QStringLiteral("SSB"),
+        {{QStringLiteral("report"), QStringLiteral("59")},
+         {QStringLiteral("serial"), QStringLiteral("123")}},
+        context, std::nullopt, {{QStringLiteral("state"), QStringLiteral("NY")}});
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 2);
+    QVERIFY(result.newMultiplierKeys.contains(
+        QStringLiteral("dxcc:GERMANY@SSB")));
+
+    context.resolvedMultiplierValues = {
+        {QStringLiteral("station_class"), QStringLiteral("maritime")},
+        {QStringLiteral("station.station_class"), QStringLiteral("dx")},
+        {QStringLiteral("dxcc"), QStringLiteral("Maritime Mobile")}
+    };
+    result = engine.evaluate(
+        definition, QStringLiteral("MM0ABC/MM"), QStringLiteral("10m"),
+        QStringLiteral("CW"),
+        {{QStringLiteral("report"), QStringLiteral("599")},
+         {QStringLiteral("itu_region"), QStringLiteral("2")}},
+        context);
+    QVERIFY(result.valid);
+    QCOMPARE(result.points, 4);
+    QVERIFY(result.newMultiplierKeys.contains(
+        QStringLiteral("exchange:itu_region:2@CW")));
 }
 
 void ContestDefinitionTest::rejectsInvalidReceivedExchange()

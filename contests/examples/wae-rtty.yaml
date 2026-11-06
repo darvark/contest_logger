@@ -1,7 +1,11 @@
 schema_version: 1
 id: wae-rtty
 name: Worked All Europe DX Contest (RTTY)
-description: WAE DX RTTY contest profile. QTC exchange is managed separately in the log.
+description: >-
+  WAE DX RTTY profile with QTC message points and band-weighted DXCC
+  multipliers. Europe/non-Europe QSO eligibility and the official WAE
+  country/call-area multiplier list still require validation before claiming a
+  final score.
 cabrillo: {contest: WAE-DC-RTTY}
 bands: [80m, 40m, 20m, 15m, 10m]
 modes: [RTTY]
@@ -12,4 +16,7 @@ exchange:
     - {name: serial, label: Serial, type: integer, min: 1, max: 999999}
 scoring:
   qso_points: 1
+  multiplier_band_weights: {80m: 4, 40m: 3, 20m: 2, 15m: 2, 10m: 2}
+  multipliers:
+    - {type: dxcc, per_band: true}
 dupe_key: [callsign, band, mode]

@@ -24,6 +24,9 @@ i przykładowe definicje zawodów YAML. Biblioteki wykonawcze Qt, SQLite
 i yaml-cpp należy zainstalować za pomocą menedżera pakietów systemu.
 
 Kompilacja katalogu tłumaczeń używa komponentu Qt LinguistTools (Linguist/lrelease).
+Wersja aplikacji widoczna w oknie **Help > About Contest Logger** pochodzi z
+pola `VERSION` w deklaracji `project()` w `CMakeLists.txt`. Okno pokazuje
+również datę i godzinę kompilacji oraz autora.
 
 Testy integracyjne radia używają Hamlib Dummy (model 1), w tym lokalnego
 procesu `rigctld` do sprawdzania transportu TCP (model NET rigctl 2). Wymagają

@@ -188,8 +188,16 @@ bool validateField(const ExchangeFieldDefinition &field, const QString &rawValue
 QString multiplierValue(const MultiplierDefinition &multiplier,
                         const QMap<QString, QString> &exchange,
                         const ContestEvaluationContext &context,
-                        const QString &callsign)
+                        const QString &callsign, const QString &band,
+                        const QString &mode)
 {
+    if (!multiplier.when.isEmpty()
+        && !conditionMatches(
+            multiplier.when,
+            conditionFacts(band, mode, exchange,
+                           context.resolvedMultiplierValues))) {
+        return {};
+    }
     QString value;
     if (multiplier.type == QStringLiteral("exchange")
         || multiplier.type == QStringLiteral("exchange_prefix")) {
@@ -326,10 +334,12 @@ QStringList ContestEngine::multiplierKeys(
     const QMap<QString, QString> resolved = resolver ? resolver(qso)
                                                       : QMap<QString, QString>{};
     const QMap<QString, QString> exchange = receivedFieldsFor(qso, definition);
+    ContestEvaluationContext context;
+    context.resolvedMultiplierValues = resolved;
     for (const MultiplierDefinition &multiplier : definition.multipliers) {
         const QString value = multiplierValue(multiplier, exchange,
-                                              ContestEvaluationContext{.resolvedMultiplierValues = resolved},
-                                              qso.callsign);
+                                              context, qso.callsign,
+                                              qso.band, qso.mode);
         if (!value.isEmpty()) {
             keys.append(multiplierKey(multiplier, value, qso.band, qso.mode));
         }
@@ -433,8 +443,19 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
         }
         const QMap<QString, QString> resolved = resolver ? resolver(qso)
                                                           : QMap<QString, QString>{};
+        const MultiplierResolver currentResolver = [&resolved](const Qso &) {
+            return resolved;
+        };
+        const QStringList keys = multiplierKeys(definition, qso, currentResolver);
+        QMap<QString, QString> scoreFacts = resolved;
+        const bool hasNewMultiplier = std::any_of(
+            keys.cbegin(), keys.cend(),
+            [&worked](const QString &key) { return !worked.contains(key); });
+        scoreFacts.insert(QStringLiteral("new_multiplier"),
+                          hasNewMultiplier ? QStringLiteral("true")
+                                           : QStringLiteral("false"));
         const int points = qso.points > 0
-            ? qso.points : pointsForQso(definition, qso, resolved);
+            ? qso.points : pointsForQso(definition, qso, scoreFacts);
         int qtcPoints = 0;
         if (definition.id.startsWith(QStringLiteral("wae-"), Qt::CaseInsensitive)
             || definition.cabrilloContest.startsWith(
@@ -447,17 +468,14 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
         result.totalPoints += contactPoints;
         result.perBand[qso.band.trimmed().toLower()].points += contactPoints;
         result.perMode[qso.mode.trimmed().toUpper()].points += contactPoints;
-        const MultiplierResolver currentResolver = [&resolved](const Qso &) {
-            return resolved;
-        };
-        const QStringList keys = multiplierKeys(definition, qso, currentResolver);
         ContestEvaluationContext context;
-        context.resolvedMultiplierValues = resolved;
+        context.resolvedMultiplierValues = scoreFacts;
         const QMap<QString, QString> exchange = receivedFieldsFor(qso, definition);
         for (qsizetype index = 0; index < definition.multipliers.size(); ++index) {
             const MultiplierDefinition &multiplier = definition.multipliers.at(index);
             const QString value = multiplierValue(multiplier, exchange, context,
-                                                  qso.callsign);
+                                                  qso.callsign, qso.band,
+                                                  qso.mode);
             if (value.isEmpty()) {
                 const QString unresolved = multiplier.type + QLatin1Char(':')
                     + qso.callsign.trimmed().toUpper();
@@ -482,8 +500,17 @@ ContestScore ContestEngine::score(const ContestDefinition &definition,
             ++modeScore.multiplierCounts[multiplier.type];
         }
     }
+    int multiplierScore = result.totalMultipliers;
+    if (!definition.multiplierBandWeights.isEmpty()) {
+        multiplierScore = 0;
+        for (auto it = result.perBand.cbegin(); it != result.perBand.cend(); ++it) {
+            const int weight = definition.multiplierBandWeights.value(
+                it.key(), 1);
+            multiplierScore += it.value().multipliers * weight;
+        }
+    }
     result.finalScore = result.totalPoints
-        * (definition.multipliers.isEmpty() ? 1 : result.totalMultipliers);
+        * (definition.multipliers.isEmpty() ? 1 : multiplierScore);
     return result;
 }
 
@@ -657,6 +684,28 @@ ContestEvaluationResult ContestEngine::evaluate(
         }
     }
 
+    const auto validateExactlyOneOf = [&result](
+                                          const QVector<QStringList> &groups,
+                                          const QMap<QString, QString> &values,
+                                          const QString &direction) {
+        for (const QStringList &group : groups) {
+            int present = 0;
+            for (const QString &field : group) {
+                present += !values.value(field).trimmed().isEmpty();
+            }
+            if (present != 1) {
+                addIssue(result, direction,
+                         QStringLiteral("exactly one of %1 must be provided")
+                             .arg(group.join(QStringLiteral(", "))));
+            }
+        }
+    };
+    validateExactlyOneOf(definition.sentExactlyOneOf, result.sentExchange,
+                         QStringLiteral("sent.exchange"));
+    validateExactlyOneOf(definition.receivedExactlyOneOf,
+                         result.receivedExchange,
+                         QStringLiteral("received.exchange"));
+
     result.valid = result.issues.isEmpty();
     if (!result.valid) {
         return result;
@@ -666,16 +715,37 @@ ContestEvaluationResult ContestEngine::evaluate(
                                       result.receivedExchange,
                                       context.resolvedMultiplierValues,
                                       result.sentExchange);
+    ContestEvaluationContext scoringContext = context;
+    const QStringList candidateMultiplierKeys = multiplierKeys(
+        definition,
+        Qso{.callsign = normalizedCall,
+            .band = normalizedBand,
+            .mode = normalizedMode,
+            .receivedExchangeFields = result.receivedExchange},
+        [&context](const Qso &) { return context.resolvedMultiplierValues; });
+    const bool newMultiplierAvailable = std::any_of(
+        candidateMultiplierKeys.cbegin(), candidateMultiplierKeys.cend(),
+        [&context](const QString &key) {
+            return !context.workedMultiplierKeys.contains(key);
+        });
+    scoringContext.resolvedMultiplierValues.insert(
+        QStringLiteral("new_multiplier"),
+        newMultiplierAvailable ? QStringLiteral("true")
+                               : QStringLiteral("false"));
     result.points = definition.qsoPoints;
     for (const QsoPointsRule &rule : definition.qsoPointRules) {
-        if (conditionMatches(rule.when, facts)) {
+        if (conditionMatches(rule.when, conditionFacts(
+                normalizedBand, normalizedMode, result.receivedExchange,
+                scoringContext.resolvedMultiplierValues,
+                result.sentExchange))) {
             result.points = rule.points;
             break;
         }
     }
     for (const MultiplierDefinition &multiplier : definition.multipliers) {
         const QString value = multiplierValue(
-            multiplier, result.receivedExchange, context, normalizedCall);
+            multiplier, result.receivedExchange, context, normalizedCall,
+            normalizedBand, normalizedMode);
         if (value.isEmpty()) {
             result.warnings.append(
                 QStringLiteral("Multiplier '%1' could not be resolved.")

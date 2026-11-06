@@ -33,6 +33,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QPalette>
 #include <QPushButton>
@@ -98,8 +99,11 @@ private slots:
     void bandmapSortAndKeyboardNavigation();
     void bandmapFiltersSpotsByMode();
     void bandmapNewMultiplierFilterAndMatrixUpdate();
+    void neededSummaryCountsNewQsosAndMultipliers();
+    void bandmapBlacklistAndAggregatesSpotSources();
     void languagePreferenceIsPersisted();
     void polishCatalogTranslatesWindowAfterRestart();
+    void aboutDialogShowsVersionBuildAndAuthor();
     void colorPalettePreferenceIsPersistedAndApplied();
     void bandmapSpotLifetimeIsConfigurable();
     void clusterAnnouncementsShowOnlyLiveSpots();
@@ -1865,6 +1869,131 @@ void MainWindowUiTest::bandmapNewMultiplierFilterAndMatrixUpdate()
     QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("K1AAA"));
 }
 
+void MainWindowUiTest::neededSummaryCountsNewQsosAndMultipliers()
+{
+    const auto addSpot = [this](const QString &callsign, const QString &mode) {
+        Spot spot;
+        spot.callsign = callsign;
+        spot.frequencyHz = 7'040'000;
+        spot.band = QStringLiteral("40m");
+        spot.mode = mode;
+        spot.spotter = QStringLiteral("K1SPOTTER");
+        spot.comment = QStringLiteral("CQ TEST");
+        spot.timestampUtc = QDateTime::currentDateTimeUtc();
+        spot.source = QStringLiteral("cluster");
+        return QMetaObject::invokeMethod(
+            m_window.get(), "receiveSpot", Qt::DirectConnection,
+            Q_ARG(logger::Spot, spot));
+    };
+    QVERIFY(addSpot(QStringLiteral("W1AAA"), QStringLiteral("CW")));
+    QVERIFY(addSpot(QStringLiteral("K1AAA"), QStringLiteral("CW")));
+
+    auto *summary = m_window->findChild<QTableWidget *>(
+        QStringLiteral("neededSummary"));
+    QVERIFY(summary != nullptr);
+    auto findCellRow = [summary](const QString &band, const QString &mode) {
+        for (int row = 0; row < summary->rowCount(); ++row) {
+            if (summary->item(row, 0)->text() == band
+                && summary->item(row, 1)->text() == mode) {
+                return row;
+            }
+        }
+        return -1;
+    };
+    int row = findCellRow(QStringLiteral("40m"), QStringLiteral("CW"));
+    QVERIFY(row >= 0);
+    QCOMPARE(summary->item(row, 2)->text(), QStringLiteral("2"));
+    QCOMPARE(summary->item(row, 3)->text(), QStringLiteral("2"));
+
+    enterQso(QStringLiteral("W1AAA"), QString(), QStringLiteral("1"));
+    row = findCellRow(QStringLiteral("40m"), QStringLiteral("CW"));
+    QVERIFY(row >= 0);
+    QCOMPARE(summary->item(row, 2)->text(), QStringLiteral("1"));
+    QCOMPARE(summary->item(row, 3)->text(), QStringLiteral("1"));
+
+    auto *bandFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapBandFilter"));
+    auto *modeFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapModeFilter"));
+    auto *multFilter = m_window->findChild<QCheckBox *>(
+        QStringLiteral("bandmapNewMultiplierFilter"));
+    auto *summaryDock = m_window->findChild<QDockWidget *>(
+        QStringLiteral("neededSummaryDock"));
+    QVERIFY(bandFilter != nullptr);
+    QVERIFY(modeFilter != nullptr);
+    QVERIFY(multFilter != nullptr);
+    QVERIFY(summaryDock != nullptr);
+    summaryDock->raise();
+    QCoreApplication::processEvents();
+    QVERIFY(QMetaObject::invokeMethod(
+        summary, "cellClicked", Qt::DirectConnection,
+        Q_ARG(int, row), Q_ARG(int, 0)));
+    QCOMPARE(bandFilter->currentData().toString(), QStringLiteral("40m"));
+    QCOMPARE(modeFilter->currentData().toString(), QStringLiteral("CW"));
+    QVERIFY(multFilter->isChecked());
+}
+
+void MainWindowUiTest::bandmapBlacklistAndAggregatesSpotSources()
+{
+    const auto addSpot = [this](const QString &callsign, const QString &spotter,
+                                const QString &source) {
+        Spot spot;
+        spot.callsign = callsign;
+        spot.frequencyHz = 7'040'000;
+        spot.band = QStringLiteral("40m");
+        spot.mode = QStringLiteral("CW");
+        spot.spotter = spotter;
+        spot.comment = QStringLiteral("CQ TEST");
+        spot.timestampUtc = QDateTime::currentDateTimeUtc();
+        spot.source = source;
+        return QMetaObject::invokeMethod(
+            m_window.get(), "receiveSpot", Qt::DirectConnection,
+            Q_ARG(logger::Spot, spot));
+    };
+    QVERIFY(addSpot(QStringLiteral("W1GOOD"), QStringLiteral("K1SPOTTER"),
+                    QStringLiteral("cluster-a")));
+    QVERIFY(addSpot(QStringLiteral("W1GOOD"), QStringLiteral("K2SPOTTER"),
+                    QStringLiteral("skimmer-b")));
+    QVERIFY(addSpot(QStringLiteral("W1BAD"), QStringLiteral("K1SPOTTER"),
+                    QStringLiteral("cluster-a")));
+
+    auto *bandmap = m_window->findChild<QTableWidget *>(
+        QStringLiteral("dxBandmap"));
+    auto *bandFilter = m_window->findChild<QComboBox *>(
+        QStringLiteral("bandmapBandFilter"));
+    auto *blacklist = m_window->findChild<QLineEdit *>(
+        QStringLiteral("spotBlacklistEdit"));
+    QVERIFY(bandmap != nullptr);
+    QVERIFY(bandFilter != nullptr);
+    QVERIFY(blacklist != nullptr);
+    bandFilter->setCurrentIndex(bandFilter->findData(QString()));
+    QCOMPARE(bandmap->rowCount(), 2);
+
+    int goodRow = -1;
+    for (int row = 0; row < bandmap->rowCount(); ++row) {
+        if (bandmap->item(row, 1)->text() == QStringLiteral("W1GOOD")) {
+            goodRow = row;
+        }
+    }
+    QVERIFY(goodRow >= 0);
+    QVERIFY(bandmap->item(goodRow, 4)->text().contains(
+        QStringLiteral("(+1 sources)")));
+    QVERIFY(bandmap->item(goodRow, 4)->toolTip().contains(
+        QStringLiteral("2 reports")));
+    QVERIFY(bandmap->item(goodRow, 4)->toolTip().contains(
+        QStringLiteral("skimmer-b")));
+
+    blacklist->setText(QStringLiteral("W1BAD, K1SPOTTER"));
+    QCOMPARE(bandmap->rowCount(), 1);
+    QCOMPARE(bandmap->item(0, 1)->text(), QStringLiteral("W1GOOD"));
+    QCOMPARE(QSettings().value(QStringLiteral("dxCluster/spotBlacklist")).toString(),
+             QString());
+    blacklist->setFocus();
+    QTest::keyClick(blacklist, Qt::Key_Return);
+    QCOMPARE(QSettings().value(QStringLiteral("dxCluster/spotBlacklist")).toString(),
+             QStringLiteral("W1BAD, K1SPOTTER"));
+}
+
 void MainWindowUiTest::languagePreferenceIsPersisted()
 {
     QTranslator catalog;
@@ -1921,6 +2050,11 @@ void MainWindowUiTest::polishCatalogTranslatesWindowAfterRestart()
     auto *bandmap = m_window->findChild<QTableWidget *>(QStringLiteral("dxBandmap"));
     QVERIFY(bandmap != nullptr);
     QCOMPARE(bandmap->horizontalHeaderItem(1)->text(), QString::fromUtf8("Znak"));
+    auto *neededSummary = m_window->findChild<QTableWidget *>(
+        QStringLiteral("neededSummary"));
+    QVERIFY(neededSummary != nullptr);
+    QCOMPARE(neededSummary->horizontalHeaderItem(2)->text(),
+             QString::fromUtf8("Nowe QSO"));
     auto *english = m_window->findChild<QAction *>(
         QStringLiteral("languageEnglishAction"));
     QVERIFY(english != nullptr);
@@ -1933,6 +2067,41 @@ void MainWindowUiTest::polishCatalogTranslatesWindowAfterRestart()
     newLog = m_window->findChild<QAction *>(QStringLiteral("newLogAction"));
     QVERIFY(newLog != nullptr);
     QCOMPARE(newLog->text(), QStringLiteral("&New log..."));
+}
+
+void MainWindowUiTest::aboutDialogShowsVersionBuildAndAuthor()
+{
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("aboutAction"));
+    QVERIFY(action != nullptr);
+    auto *helpMenu = m_window->findChild<QMenu *>(QStringLiteral("helpMenu"));
+    QVERIFY(helpMenu != nullptr);
+    auto *polish = m_window->findChild<QAction *>(
+        QStringLiteral("languagePolishAction"));
+    auto *english = m_window->findChild<QAction *>(
+        QStringLiteral("languageEnglishAction"));
+    QVERIFY(polish != nullptr);
+    QVERIFY(english != nullptr);
+    polish->trigger();
+    QCOMPARE(helpMenu->title(), QString::fromUtf8("&Pomoc"));
+    QCOMPARE(action->text(), QString::fromUtf8("&O programie Contest Logger"));
+    english->trigger();
+    QCOMPARE(helpMenu->title(), QStringLiteral("&Help"));
+    QCOMPARE(action->text(), QStringLiteral("&About Contest Logger"));
+
+    runWhenModalAppears([](QDialog *dialog) {
+        auto *messageBox = qobject_cast<QMessageBox *>(dialog);
+        QVERIFY(messageBox != nullptr);
+        QCOMPARE(messageBox->windowTitle(), QStringLiteral("About Contest Logger"));
+        const QStringList details = messageBox->informativeText().split(QLatin1Char('\n'));
+        QCOMPARE(details.size(), 3);
+        QVERIFY(details.at(0).startsWith(QStringLiteral("Version: ")));
+        QVERIFY(details.at(0).size() > QStringLiteral("Version: ").size());
+        QVERIFY(details.at(1).startsWith(QStringLiteral("Build: ")));
+        QVERIFY(details.at(1).size() > QStringLiteral("Build: ").size());
+        QCOMPARE(details.at(2), QStringLiteral("Author: Marcin SP6MI"));
+        messageBox->accept();
+    });
+    action->trigger();
 }
 
 void MainWindowUiTest::colorPalettePreferenceIsPersistedAndApplied()

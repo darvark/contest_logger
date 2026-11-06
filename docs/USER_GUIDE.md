@@ -152,9 +152,10 @@ Okna narzędziowe (docki; można je przesuwać, odłączać i ukrywać w menu
 | Okno | Zawartość |
 |---|---|
 | **Check callsign** | Siatka pasmo × emisja z zaznaczeniem, gdzie wpisany znak był już zrobiony; pod spodem stan („not in log”, dupe). |
+| **Needed QSO / Mult** | Dla każdej kombinacji pasma i emisji pokazuje liczbę różnych aktualnych spotów będących nowym QSO oraz liczbę nowych mnożników. Kliknięcie wiersza ustawia filtry bandmapy. |
 | **Check partial** | Znaki pasujące do fragmentu wpisanego znaku z Master.SCP/MASTER.CPY, call history i logu. Biały — nowy, zielony — zrobiony na innym paśmie/emisji, czerwony — dubel, pogrubiony — dokładne trafienie. Kliknięcie wstawia znak do pola Call. Pole Call pokazuje też podpowiedzi dla wpisanego prefiksu; tekst zmienia się dopiero po wybraniu sugestii. |
 | **Contest info** | Opis aktywnej definicji: pasma, emisje, wymiana, punktacja, mnożniki, klucz dubli. |
-| **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), emisji i kontynentu, **New mult only**, sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Kolumny `kHz, Call, Age, Spotter, Source, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
+| **Bandmap** | Spoty: filtr pasma (aktywne/wszystkie/konkretne), emisji i kontynentu, blacklistę znaków stacji/spotterów, **New mult only**, sortowanie (częstotliwość/najnowsze), **Hide worked**, **Tune**. Powtórzone spoty są agregowane osobno dla znaku, pasma i emisji; źródła i liczba raportów są widoczne w kolumnie Source. Kolumny `kHz, Call, Age, Spotter, Source, Comment`. Pomarańczowy — spot najbliższy częstotliwości radia, szary — zrobiony. |
 | **Rate** | QSO/h z ostatnich 10 i 100 QSO, liczba QSO z ostatnich 60 i 10 minut, suma QSO, prędkość CW oraz wykres liczby QSO w kolejnych 5-minutowych przedziałach ostatniej godziny. Zawiera też podsumowanie QSO/punktów/mnożników per pasmo i emisja. |
 | **Summary** | Tabela per pasmo: QSO, punkty, mnożniki, średnia; wiersz TOTAL i **FINAL SCORE**. |
 | **DX Cluster announcements** | Surowa, chronologiczna lista ogłoszeń clustera; dwuklik — przejście do spotu. |
@@ -383,6 +384,17 @@ mnożnik nie został jeszcze zaliczony; wybór uwzględnia aktywne filtry oraz
 przypisanie bandmapy do VFO/radia. Filtry pasma, emisji i kontynentu są niezależne. Rozpoznanie kontynentu
 korzysta z załadowanego `wl_cty.dat`; bez pasującego wpisu spot trafia do filtra
 **Unknown**. Spoty starsze niż 1 h nie są wyświetlane.
+
+Okno **Needed QSO / Mult** zlicza osobne, aktualne spoty według pasma i emisji:
+kolumna **New QSOs** pokazuje stacje, których nie zalicza klucz duplikatu
+aktywnego contestu, a **New mults** — rozpoznane, jeszcze niezaliczone klucze
+mnożników. Powtórzenia tej samej stacji/pasma/emisji liczone są raz. Kliknięcie
+wiersza ustawia pasmo i emisję bandmapy, a jeśli dostępny jest mnożnik,
+aktywuje **New mult only**.
+
+Pole **Hide calls/spotters** bandmapy przyjmuje listę znaków oddzielonych
+przecinkami, średnikami lub spacjami. Dokładne dopasowanie ukrywa spot, gdy
+pasuje znak stacji albo znak spottera; ustawienie jest zapamiętywane lokalnie.
 
 ## 9. Keyer CW i komunikaty F1–F8
 

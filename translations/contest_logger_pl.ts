@@ -42,6 +42,14 @@
     <message><source>&amp;Radio</source><translation>&amp;Radio</translation></message>
     <message><source>Op&amp;tions</source><translation>Opc&amp;je</translation></message>
     <message><source>&amp;Window</source><translation>O&amp;kno</translation></message>
+    <message><source>&amp;Help</source><translation>&amp;Pomoc</translation></message>
+    <message><source>&amp;About Contest Logger</source><translation>&amp;O programie Contest Logger</translation></message>
+    <message><source>About Contest Logger</source><translation>O programie Contest Logger</translation></message>
+    <message><source>Version: %1
+Build: %2
+Author: %3</source><translation>Wersja: %1
+Kompilacja: %2
+Autor: %3</translation></message>
     <message><source>Language</source><translation>Język</translation></message>
     <message><source>Color palette</source><translation>Paleta kolorów</translation></message>
     <message><source>Current</source><translation>Obecna</translation></message>
@@ -64,6 +72,17 @@
     <message><source>Check partial</source><translation>Sprawdź fragment znaku</translation></message>
     <message><source>Bandmap</source><translation>Mapa pasma</translation></message>
     <message><source>Bandmap — Radio A</source><translation>Mapa pasma — radio A</translation></message>
+    <message><source>Needed QSO / Mult</source><translation>Potrzebne QSO / mnożniki</translation></message>
+    <message><source>Needed QSO / Mult — %1</source><translation>Potrzebne QSO / mnożniki — %1</translation></message>
+    <message><source>no contest</source><translation>brak zawodów</translation></message>
+    <message><source>New QSOs</source><translation>Nowe QSO</translation></message>
+    <message><source>New mults</source><translation>Nowe mnożniki</translation></message>
+    <message><source>Counts distinct live spots that are new QSOs or offer an unworked multiplier. Select a row to filter the bandmap.</source><translation>Zlicza różne aktualne spoty oznaczające nowe QSO lub niezaliczony mnożnik. Wybierz wiersz, aby filtrować mapę pasma.</translation></message>
+    <message><source>%1 distinct live spot(s); select the row to filter the bandmap.</source><translation>Liczba różnych aktualnych spotów: %1. Wybierz wiersz, aby filtrować mapę pasma.</translation></message>
+    <message><source>Hide calls/spotters (comma-separated)</source><translation>Ukryj znaki/spotterów (oddziel przecinkami)</translation></message>
+    <message><source>Exact callsigns listed here are hidden as spotted stations or spotters.</source><translation>Dokładne znaki z listy są ukrywane jako stacje DX lub spotterzy.</translation></message>
+    <message><source>%1 (+%2 sources)</source><translation>%1 (+%2 źr.)</translation></message>
+    <message><source>%1 reports from: %2</source><translation>Liczba zgłoszeń: %1; źródła: %2</translation></message>
     <message><source>New mult only</source><translation>Tylko nowe mnożniki</translation></message>
     <message><source>Show only spots that can add a multiplier under the active contest rules.</source><translation>Pokaż tylko spoty dające nowy mnożnik w aktywnych zawodach.</translation></message>
     <message><source>A time means the callsign was worked; +M means this station would add a new multiplier.</source><translation>Godzina oznacza zaliczone QSO; +M oznacza nowy mnożnik dla tej stacji.</translation></message>

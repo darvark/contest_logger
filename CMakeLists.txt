@@ -107,6 +107,8 @@ add_executable(contest_logger
     src/main.cpp
 )
 target_link_libraries(contest_logger PRIVATE logger_ui)
+target_compile_definitions(contest_logger PRIVATE
+    CONTEST_LOGGER_VERSION="${PROJECT_VERSION}")
 qt_add_translations(contest_logger
     TS_FILES translations/contest_logger_pl.ts
     RESOURCE_PREFIX "/i18n"

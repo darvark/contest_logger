@@ -1003,6 +1003,51 @@ QStringList defaultModes()
             QStringLiteral("FM")};
 }
 
+QString normalizedSpotMode(const QString &value)
+{
+    const QString upper = value.trimmed().toUpper();
+    return upper == QLatin1String("USB") || upper == QLatin1String("LSB")
+        ? QStringLiteral("SSB") : upper;
+}
+
+QString spotAggregationKey(const Spot &spot)
+{
+    return spot.callsign.trimmed().toUpper() + QLatin1Char('|')
+        + spot.band.trimmed().toLower() + QLatin1Char('|')
+        + normalizedSpotMode(spot.mode);
+}
+
+QStringList spotBlacklistTokens(const QString &value)
+{
+    QStringList tokens;
+    for (const QString &token :
+         value.split(QRegularExpression(QStringLiteral("[,;\\s]+")),
+                     Qt::SkipEmptyParts)) {
+        const QString normalized = token.trimmed().toUpper();
+        if (!normalized.isEmpty() && !tokens.contains(normalized)) {
+            tokens.append(normalized);
+        }
+    }
+    return tokens;
+}
+
+bool isSpotBlacklisted(const Spot &spot, const QStringList &tokens)
+{
+    const QString callsign = spot.callsign.trimmed().toUpper();
+    const QString spotter = spot.spotter.trimmed().toUpper();
+    return std::any_of(tokens.cbegin(), tokens.cend(),
+                       [&callsign, &spotter](const QString &token) {
+                           return callsign == token || spotter == token;
+                       });
+}
+
+struct BandmapSpotRow {
+    Spot spot;
+    bool worked = false;
+    QStringList sources;
+    int reports = 0;
+};
+
 class RatePaceChart final : public QWidget {
 public:
     explicit RatePaceChart(QWidget *parent = nullptr)
@@ -2823,6 +2868,51 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     m_checkCallDock = createPaneDock(tr("Check callsign"),
                                      QStringLiteral("checkCallDock"), checkCallPane);
 
+    auto *neededPane = createPane(QStringLiteral("neededSummaryPane"));
+    m_neededSummary = new QTableWidget(0, 4, neededPane);
+    m_neededSummary->setObjectName(QStringLiteral("neededSummary"));
+    m_neededSummary->setHorizontalHeaderLabels(
+        {tr("Band"), tr("Mode"), tr("New QSOs"), tr("New mults")});
+    m_neededSummary->setFont(monoFont(10, true));
+    m_neededSummary->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_neededSummary->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_neededSummary->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_neededSummary->setShowGrid(false);
+    m_neededSummary->verticalHeader()->hide();
+    m_neededSummary->horizontalHeader()->setHighlightSections(false);
+    m_neededSummary->horizontalHeader()->setStretchLastSection(true);
+    m_neededSummary->setToolTip(
+        tr("Counts distinct live spots that are new QSOs or offer an unworked multiplier. "
+           "Select a row to filter the bandmap."));
+    connect(m_neededSummary, &QTableWidget::cellClicked, this,
+            [this](int row, int) {
+                const QTableWidgetItem *bandItem = m_neededSummary->item(row, 0);
+                const QTableWidgetItem *modeItem = m_neededSummary->item(row, 1);
+                if (bandItem == nullptr || modeItem == nullptr) {
+                    return;
+                }
+                const QString band = bandItem->text();
+                const QString mode = modeItem->text();
+                const QTableWidgetItem *multItem = m_neededSummary->item(row, 3);
+                const bool hasNewMultiplier =
+                    multItem != nullptr && multItem->text().toInt() > 0;
+                const int bandIndex = m_bandmapBandFilter->findData(
+                    band, Qt::UserRole, Qt::MatchFixedString);
+                if (bandIndex >= 0) {
+                    m_bandmapBandFilter->setCurrentIndex(bandIndex);
+                }
+                const int modeIndex = m_bandmapModeFilter->findData(
+                    mode, Qt::UserRole, Qt::MatchFixedString);
+                if (modeIndex >= 0) {
+                    m_bandmapModeFilter->setCurrentIndex(modeIndex);
+                }
+                m_onlyNewMultiplierSpots->setChecked(hasNewMultiplier);
+                m_bandmapDock->raise();
+            });
+    neededPane->layout()->addWidget(m_neededSummary);
+    m_neededSummaryDock = createPaneDock(
+        tr("Needed QSO / Mult"), QStringLiteral("neededSummaryDock"), neededPane);
+
     // Check partial (super check partial from master.cpy, call history and log).
     auto *checkPartialPane = createPane(QStringLiteral("checkPartialPane"));
     m_checkPartial = new QListWidget(checkPartialPane);
@@ -2891,6 +2981,14 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         tr("Sort spots by frequency or by time, newest first."));
     m_hideWorkedSpots = new QCheckBox(tr("Hide worked"), bandmapPane);
     m_hideWorkedSpots->setChecked(true);
+    m_spotBlacklistEdit = new QLineEdit(bandmapPane);
+    m_spotBlacklistEdit->setObjectName(QStringLiteral("spotBlacklistEdit"));
+    m_spotBlacklistEdit->setPlaceholderText(
+        tr("Hide calls/spotters (comma-separated)"));
+    m_spotBlacklistEdit->setToolTip(
+        tr("Exact callsigns listed here are hidden as spotted stations or spotters."));
+    m_spotBlacklistEdit->setText(QSettings().value(
+        QStringLiteral("dxCluster/spotBlacklist")).toString());
     auto *tuneSelectedSpot = new QPushButton(tr("Tune"), bandmapPane);
     tuneSelectedSpot->setObjectName(QStringLiteral("tuneSelectedSpotButton"));
     bandmapControls->addWidget(m_bandmapBandFilter, 1);
@@ -2898,6 +2996,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     bandmapControls->addWidget(m_bandmapContinentFilter);
     bandmapControls->addWidget(bandmapSortSelector);
     bandmapControls->addWidget(m_hideWorkedSpots);
+    bandmapControls->addWidget(m_spotBlacklistEdit, 1);
     bandmapControls->addWidget(tuneSelectedSpot);
     static_cast<QVBoxLayout *>(bandmapPane->layout())->addLayout(bandmapControls);
     auto *multiplierFilterLayout = new QHBoxLayout;
@@ -2944,6 +3043,12 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             this, &MainWindow::refreshBandmap);
     connect(m_onlyNewMultiplierSpots, &QCheckBox::toggled,
             this, &MainWindow::refreshBandmap);
+    connect(m_spotBlacklistEdit, &QLineEdit::textChanged,
+            this, &MainWindow::refreshBandmap);
+    connect(m_spotBlacklistEdit, &QLineEdit::editingFinished, this, [this] {
+        QSettings().setValue(QStringLiteral("dxCluster/spotBlacklist"),
+                             m_spotBlacklistEdit->text().trimmed());
+    });
     bandmapPane->layout()->addWidget(m_bandmap);
     m_bandmapDock = createPaneDock(tr("Bandmap"), QStringLiteral("dxBandmapDock"),
                                    bandmapPane);
@@ -3161,6 +3266,21 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
 
     applyDefaultDockLayout();
     createWindowMenu();
+    auto *helpMenu = menuBar()->addMenu(tr("&Help"));
+    helpMenu->setObjectName(QStringLiteral("helpMenu"));
+    auto *aboutAction = helpMenu->addAction(tr("&About Contest Logger"));
+    aboutAction->setObjectName(QStringLiteral("aboutAction"));
+    connect(aboutAction, &QAction::triggered, this, [this] {
+        QMessageBox dialog(this);
+        dialog.setWindowTitle(tr("About Contest Logger"));
+        dialog.setText(tr("Contest Logger"));
+        dialog.setInformativeText(
+            tr("Version: %1\nBuild: %2\nAuthor: %3")
+                .arg(QStringLiteral(CONTEST_LOGGER_VERSION),
+                     QStringLiteral(__DATE__ " " __TIME__),
+                     QStringLiteral("Marcin SP6MI")));
+        dialog.exec();
+    });
     restoreWindowLayout();
     m_radioABandmapDock->hide();
     updateFunctionKeyButtons();
@@ -3211,6 +3331,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         autoStartNetworkClient();
     });
     m_retranslateUi = [this, fileMenu, newLogAction, contestMenu, operatingMenu,
+                       helpMenu, aboutAction,
                        radioMenu, settingsMenu, languageMenu, englishAction,
                        polishAction, colorPaletteMenu, currentPaletteAction,
                        monokaiPaletteAction, operatorAction, operatorCallsignAction, radioAction,
@@ -3222,6 +3343,8 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         newLogAction->setText(tr("&New log..."));
         contestMenu->setTitle(tr("&Contest"));
         operatingMenu->setTitle(tr("O&perating"));
+        helpMenu->setTitle(tr("&Help"));
+        aboutAction->setText(tr("&About Contest Logger"));
         radioMenu->setTitle(tr("&Radio"));
         settingsMenu->setTitle(tr("Op&tions"));
         languageMenu->setTitle(tr("Language"));
@@ -3247,12 +3370,17 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
             tr("Restore default layout"));
         m_checkCallDock->setWindowTitle(tr("Check callsign"));
         m_checkPartialDock->setWindowTitle(tr("Check partial"));
+        m_neededSummaryDock->setWindowTitle(tr("Needed QSO / Mult"));
         m_summaryDock->setWindowTitle(tr("Summary"));
         m_contestInfoDock->setWindowTitle(tr("Contest information"));
         m_onlyNewMultiplierSpots->setText(tr("New mult only"));
         m_onlyNewMultiplierSpots->setToolTip(
             tr("Show only spots that can add a multiplier under the active contest rules."));
         m_hideWorkedSpots->setText(tr("Hide worked"));
+        m_spotBlacklistEdit->setPlaceholderText(
+            tr("Hide calls/spotters (comma-separated)"));
+        m_spotBlacklistEdit->setToolTip(
+            tr("Exact callsigns listed here are hidden as spotted stations or spotters."));
         tuneSelectedSpot->setText(tr("Tune"));
         sendClusterCommand->setText(tr("Send"));
         m_clusterCommandInput->setPlaceholderText(
@@ -3273,6 +3401,12 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
         }
         m_clusterLog->setHorizontalHeaderLabels(
             {tr("UTC"), tr("kHz"), tr("Call"), tr("Spotter"), tr("Source"), tr("Comment")});
+        m_neededSummary->setHorizontalHeaderLabels(
+            {tr("Band"), tr("Mode"), tr("New QSOs"), tr("New mults")});
+        m_neededSummary->setToolTip(
+            tr("Counts distinct live spots that are new QSOs or offer an unworked multiplier. "
+               "Select a row to filter the bandmap."));
+        m_neededSummaryDock->setWindowTitle(tr("Needed QSO / Mult"));
         m_checkCallGrid->setToolTip(
             tr("A time means the callsign was worked; +M means this station would add a new multiplier."));
         updateEntryHeaders();
@@ -3530,19 +3664,22 @@ void MainWindow::applyDefaultDockLayout()
     // Left: check windows and contest info; right: bandmap column plus rate,
     // summary and cluster stacked beside it (the DXLog default arrangement).
     addDockWidget(Qt::LeftDockWidgetArea, m_checkCallDock);
+    addDockWidget(Qt::LeftDockWidgetArea, m_neededSummaryDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_checkPartialDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_contestInfoDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_radioABandmapDock);
     splitDockWidget(m_checkCallDock, m_radioABandmapDock, Qt::Horizontal);
     addDockWidget(Qt::LeftDockWidgetArea, m_greylineDock);
     addDockWidget(Qt::LeftDockWidgetArea, m_networkStationsDock);
+    tabifyDockWidget(m_checkCallDock, m_neededSummaryDock);
     tabifyDockWidget(m_contestInfoDock, m_greylineDock);
     addDockWidget(Qt::RightDockWidgetArea, m_bandmapDock);
     addDockWidget(Qt::RightDockWidgetArea, m_rateDock);
     splitDockWidget(m_bandmapDock, m_rateDock, Qt::Horizontal);
     splitDockWidget(m_rateDock, m_summaryDock, Qt::Vertical);
     splitDockWidget(m_summaryDock, m_clusterDock, Qt::Vertical);
-    for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock,
+    for (QDockWidget *dock : {m_checkCallDock, m_neededSummaryDock,
+                              m_checkPartialDock,
                               m_radioABandmapDock, m_greylineDock,
                               m_networkStationsDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
@@ -3555,8 +3692,9 @@ void MainWindow::applyDefaultDockLayout()
     m_contestInfoDock->raise();
     resizeDocks({m_checkCallDock, m_radioABandmapDock, m_bandmapDock, m_rateDock},
                 {230, 280, 250, 400}, Qt::Horizontal);
-    resizeDocks({m_checkCallDock, m_checkPartialDock, m_contestInfoDock},
-                {250, 260, 230}, Qt::Vertical);
+    resizeDocks({m_checkCallDock, m_neededSummaryDock, m_checkPartialDock,
+                 m_contestInfoDock},
+                {250, 260, 260, 230}, Qt::Vertical);
     resizeDocks({m_rateDock, m_summaryDock, m_clusterDock},
                 {200, 230, 320}, Qt::Vertical);
 }
@@ -3565,7 +3703,8 @@ void MainWindow::createWindowMenu()
 {
     QMenu *windowMenu = menuBar()->addMenu(tr("&Window"));
     windowMenu->setObjectName(QStringLiteral("windowMenu"));
-    for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock, m_bandmapDock,
+    for (QDockWidget *dock : {m_checkCallDock, m_neededSummaryDock,
+                              m_checkPartialDock, m_bandmapDock,
                               m_clusterDock, m_rateDock, m_summaryDock,
                               m_contestInfoDock, m_greylineDock,
                               m_networkStationsDock}) {
@@ -3612,7 +3751,8 @@ void MainWindow::resetWindowLayout()
 {
     showNormal();
     resize(1600, 960);
-    for (QDockWidget *dock : {m_checkCallDock, m_checkPartialDock,
+    for (QDockWidget *dock : {m_checkCallDock, m_neededSummaryDock,
+                              m_checkPartialDock,
                               m_radioABandmapDock, m_greylineDock,
                               m_networkStationsDock,
                               m_contestInfoDock, m_bandmapDock, m_rateDock,
@@ -6957,6 +7097,7 @@ void MainWindow::exportCurrentLog(LogExportFormat format)
     LogExportOptions options;
     options.createdBy = QStringLiteral("Contest Logger %1")
                             .arg(QStringLiteral(CONTEST_LOGGER_VERSION));
+    options.multiplierResolver = multiplierResolver();
     if (definitionPtr != nullptr) {
         options.claimedScore =
             ContestEngine().score(*definitionPtr, qsos, multiplierResolver()).finalScore;
@@ -9991,6 +10132,34 @@ ContestEngine::MultiplierResolver MainWindow::multiplierResolver() const
         const QString stationCall = qso.stationCallsign.isEmpty()
             ? m_station.callsign : qso.stationCallsign;
         const QMap<QString, QString> station = resolve(stationCall);
+        const auto stationClass = [](const QString &rawCall,
+                                     const QMap<QString, QString> &location) {
+            const QString call = rawCall.trimmed().toUpper();
+            if (call.endsWith(QStringLiteral("/MM"))) {
+                return QStringLiteral("maritime");
+            }
+            const QString entity = location.value(QStringLiteral("dxcc"));
+            if (entity.compare(QStringLiteral("United States"),
+                               Qt::CaseInsensitive) == 0
+                || entity.compare(QStringLiteral("Alaska"),
+                                  Qt::CaseInsensitive) == 0
+                || entity.compare(QStringLiteral("Hawaii"),
+                                  Qt::CaseInsensitive) == 0
+                || entity.compare(QStringLiteral("Canada"),
+                                  Qt::CaseInsensitive) == 0
+                || entity.compare(QStringLiteral("Mexico"),
+                                  Qt::CaseInsensitive) == 0
+                || call.startsWith(QStringLiteral("KH6"))
+                || call.startsWith(QStringLiteral("KH7"))
+                || call.startsWith(QStringLiteral("KL7"))) {
+                return QStringLiteral("state");
+            }
+            return QStringLiteral("dx");
+        };
+        resolved.insert(QStringLiteral("station_class"),
+                        stationClass(qso.callsign, resolved));
+        resolved.insert(QStringLiteral("station.station_class"),
+                        stationClass(stationCall, station));
         for (const QString &key : {QStringLiteral("dxcc"),
                                    QStringLiteral("country"),
                                    QStringLiteral("continent"),
@@ -10581,6 +10750,128 @@ void MainWindow::refreshCheckWindows()
                      info.isEmpty() ? QString() : QStringLiteral(" — ") + info,
                      dxcc.isEmpty() ? QString() : QLatin1Char('\n') + dxcc));
     }
+}
+
+void MainWindow::refreshNeededSummary()
+{
+    if (m_neededSummary == nullptr) {
+        return;
+    }
+    const ContestDefinition *definition = activeDefinition();
+    const QStringList bands = definition != nullptr && !definition->bands.isEmpty()
+        ? definition->bands : defaultBands();
+    const QStringList modes = definition != nullptr && !definition->modes.isEmpty()
+        ? definition->modes : defaultModes();
+    const int context = currentEntryContext();
+    const QString fallbackMode =
+        m_modeSelectors[context]->currentText().trimmed().toUpper();
+    const int lifetimeMinutes = qBound(
+        1, QSettings().value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
+        1440);
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QStringList blacklist = spotBlacklistTokens(m_spotBlacklistEdit->text());
+    QHash<QString, QSet<QString>> availableQsoKeys;
+    QHash<QString, QSet<QString>> availableMultiplierKeys;
+    QSet<QString> countedSpots;
+    const ContestEngine engine;
+    const auto resolver = multiplierResolver();
+    const QStringList dupeKey = definition != nullptr
+        ? definition->dupeKey : QStringList{};
+
+    for (const Spot &spot : std::as_const(m_spots)) {
+        const qint64 ageSeconds = spot.timestampUtc.secsTo(now);
+        if (ageSeconds < 0 || ageSeconds > lifetimeMinutes * 60
+            || isSpotBlacklisted(spot, blacklist)) {
+            continue;
+        }
+        QString mode = normalizedSpotMode(spot.mode);
+        if (mode.isEmpty()) {
+            mode = fallbackMode;
+        }
+        const QString band = spot.band.trimmed().toLower();
+        if (band.isEmpty() || !bands.contains(band, Qt::CaseInsensitive)
+            || !modes.contains(mode, Qt::CaseInsensitive)) {
+            continue;
+        }
+        const QString aggregationKey =
+            spot.callsign.trimmed().toUpper() + QLatin1Char('|') + band
+            + QLatin1Char('|') + mode;
+        if (countedSpots.contains(aggregationKey)) {
+            continue;
+        }
+        countedSpots.insert(aggregationKey);
+
+        const QString cellKey = band + QLatin1Char('|') + mode;
+        bool worked = false;
+        for (const Qso &qso : std::as_const(m_logQsos)) {
+            if (qso.invalid) {
+                continue;
+            }
+            if (mode.isEmpty()) {
+                worked = qso.callsign.compare(spot.callsign, Qt::CaseInsensitive) == 0
+                    && qso.band.compare(band, Qt::CaseInsensitive) == 0;
+            } else {
+                worked = sameDupeKey(dupeKey, qso, spot.callsign, band, mode);
+            }
+            if (worked) {
+                break;
+            }
+        }
+        if (!worked) {
+            availableQsoKeys[cellKey].insert(spot.callsign.trimmed().toUpper());
+        }
+
+        if (definition == nullptr || definition->multipliers.isEmpty()) {
+            continue;
+        }
+        Qso candidate;
+        candidate.callsign = spot.callsign.trimmed().toUpper();
+        candidate.band = band;
+        candidate.mode = mode;
+        const QStringList keys =
+            engine.multiplierKeys(*definition, candidate, resolver);
+        for (const QString &key : keys) {
+            if (!key.isEmpty() && !m_workedMultiplierKeys.contains(key)) {
+                availableMultiplierKeys[cellKey].insert(key);
+            }
+        }
+    }
+
+    m_neededSummary->setUpdatesEnabled(false);
+    m_neededSummary->setRowCount(bands.size() * modes.size());
+    int row = 0;
+    for (const QString &band : bands) {
+        for (const QString &mode : modes) {
+            const QString key = band.toLower() + QLatin1Char('|') + mode.toUpper();
+            const int newQsoCount = availableQsoKeys.value(key).size();
+            const int newMultiplierCount = availableMultiplierKeys.value(key).size();
+            const QStringList values{
+                band, mode, QString::number(newQsoCount),
+                QString::number(newMultiplierCount)};
+            for (int column = 0; column < values.size(); ++column) {
+                auto *item = new QTableWidgetItem(values.at(column));
+                item->setTextAlignment(column < 2
+                                           ? Qt::AlignLeft | Qt::AlignVCenter
+                                           : Qt::AlignCenter);
+                if (column == 2 && newQsoCount > 0) {
+                    item->setForeground(QColor(QStringLiteral("#006400")));
+                } else if (column == 3 && newMultiplierCount > 0) {
+                    item->setForeground(QColor(QStringLiteral("#006400")));
+                    item->setBackground(QColor(QStringLiteral("#DDF2DD")));
+                }
+                item->setToolTip(
+                    tr("%1 distinct live spot(s); select the row to filter the bandmap.")
+                        .arg(column == 2 ? newQsoCount : newMultiplierCount));
+                m_neededSummary->setItem(row, column, item);
+            }
+            ++row;
+        }
+    }
+    m_neededSummary->resizeColumnsToContents();
+    m_neededSummary->setUpdatesEnabled(true);
+    m_neededSummaryDock->setWindowTitle(
+        tr("Needed QSO / Mult — %1")
+            .arg(definition == nullptr ? tr("no contest") : definition->name));
 }
 
 void MainWindow::logQso()
@@ -11730,6 +12021,7 @@ void MainWindow::refreshBandmap()
     if (m_bandmap == nullptr || m_radioABandmap == nullptr) {
         return;
     }
+    refreshNeededSummary();
     const ContestDefinition *definition = activeDefinition();
     const QStringList dupeKey = definition != nullptr ? definition->dupeKey : QStringList{};
     QSet<QString> loggedCalls;
@@ -11780,6 +12072,7 @@ void MainWindow::refreshBandmap()
                            });
     };
     const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QStringList blacklist = spotBlacklistTokens(m_spotBlacklistEdit->text());
     const int spotLifetimeMinutes = qBound(
         1, QSettings().value(QStringLiteral("dxCluster/spotLifetimeMinutes"), 60).toInt(),
         1440);
@@ -11793,7 +12086,8 @@ void MainWindow::refreshBandmap()
         && sortSelector->currentData().toString() == QLatin1String("time");
 
     const auto populate = [this, &ordered, &isWorked, &hasNewMultiplier,
-                           &loggedCalls, &now, sortByTime, spotLifetimeMinutes](
+                           &loggedCalls, &now, &blacklist, sortByTime,
+                           spotLifetimeMinutes](
                               QTableWidget *bandmap, QDockWidget *dock,
                               int context, int radio, int labelRadio) {
         qint64 selectedSpot = -1;
@@ -11805,19 +12099,18 @@ void MainWindow::refreshBandmap()
         if (filterBand == QStringLiteral("@active")) {
             filterBand = m_bandSelectors[context]->currentText().trimmed().toLower();
         }
-        const auto normalizeSpotMode = [](const QString &value) {
-            const QString upper = value.trimmed().toUpper();
-            return upper == QLatin1String("USB") || upper == QLatin1String("LSB")
-                ? QStringLiteral("SSB") : upper;
-        };
-        const QString filterMode = normalizeSpotMode(m_bandmapModeFilter->currentData().toString());
+        const QString filterMode =
+            normalizedSpotMode(m_bandmapModeFilter->currentData().toString());
         const QString filterContinent =
             m_bandmapContinentFilter->currentData().toString();
-        QSet<QString> displayed;
-        QVector<QPair<Spot, bool>> visible;
+        QHash<QString, int> displayed;
+        QVector<BandmapSpotRow> visible;
         for (const Spot &spot : std::as_const(ordered)) {
             const qint64 ageSeconds = spot.timestampUtc.secsTo(now);
             if (ageSeconds < 0 || ageSeconds > spotLifetimeMinutes * 60) {
+                continue;
+            }
+            if (isSpotBlacklisted(spot, blacklist)) {
                 continue;
             }
             if (!filterBand.isEmpty()
@@ -11825,7 +12118,7 @@ void MainWindow::refreshBandmap()
                 continue;
             }
             if (!filterMode.isEmpty()
-                && normalizeSpotMode(spot.mode) != filterMode) {
+                && normalizedSpotMode(spot.mode) != filterMode) {
                 continue;
             }
             if (!filterContinent.isEmpty()) {
@@ -11837,12 +12130,18 @@ void MainWindow::refreshBandmap()
                     continue;
                 }
             }
-            const QString dedupeKey =
-                spot.callsign.toUpper() + QLatin1Char('|') + spot.band;
-            if (displayed.contains(dedupeKey)) {
+            const QString dedupeKey = spotAggregationKey(spot);
+            const auto existing = displayed.constFind(dedupeKey);
+            if (existing != displayed.cend()) {
+                BandmapSpotRow &row = visible[existing.value()];
+                ++row.reports;
+                if (!spot.source.trimmed().isEmpty()
+                    && !row.sources.contains(spot.source.trimmed())) {
+                    row.sources.append(spot.source.trimmed());
+                }
                 continue;
             }
-            displayed.insert(dedupeKey);
+            displayed.insert(dedupeKey, visible.size());
             const bool worked = isWorked(spot);
             if (m_onlyNewMultiplierSpots->isChecked()
                 && !hasNewMultiplier(spot, context)) {
@@ -11851,20 +12150,27 @@ void MainWindow::refreshBandmap()
             if (worked && m_hideWorkedSpots->isChecked()) {
                 continue;
             }
-            visible.append({spot, worked});
+            BandmapSpotRow row;
+            row.spot = spot;
+            row.worked = worked;
+            row.reports = 1;
+            if (!spot.source.trimmed().isEmpty()) {
+                row.sources.append(spot.source.trimmed());
+            }
+            visible.append(std::move(row));
         }
         std::sort(visible.begin(), visible.end(), [sortByTime](const auto &left,
                                                                const auto &right) {
             if (sortByTime) {
-                if (left.first.timestampUtc != right.first.timestampUtc) {
-                    return left.first.timestampUtc > right.first.timestampUtc;
+                if (left.spot.timestampUtc != right.spot.timestampUtc) {
+                    return left.spot.timestampUtc > right.spot.timestampUtc;
                 }
-                return left.first.frequencyHz < right.first.frequencyHz;
+                return left.spot.frequencyHz < right.spot.frequencyHz;
             }
-            if (left.first.frequencyHz != right.first.frequencyHz) {
-                return left.first.frequencyHz < right.first.frequencyHz;
+            if (left.spot.frequencyHz != right.spot.frequencyHz) {
+                return left.spot.frequencyHz < right.spot.frequencyHz;
             }
-            return left.first.timestampUtc > right.first.timestampUtc;
+            return left.spot.timestampUtc > right.spot.timestampUtc;
         });
 
         const RadioSnapshot &snapshot = m_radioSnapshots[radio];
@@ -11883,7 +12189,7 @@ void MainWindow::refreshBandmap()
         qint64 nearestDistance = 3'000;
         for (int row = 0; row < visible.size(); ++row) {
             const qint64 distance =
-                qAbs(visible.at(row).first.frequencyHz - radioFrequency);
+                qAbs(visible.at(row).spot.frequencyHz - radioFrequency);
             if (radioFrequency > 0 && distance <= nearestDistance) {
                 nearestDistance = distance;
                 nearestRow = row;
@@ -11897,16 +12203,24 @@ void MainWindow::refreshBandmap()
         workedFont.setItalic(true);
         int selectRow = -1;
         for (int row = 0; row < visible.size(); ++row) {
-            const Spot &spot = visible.at(row).first;
-            const bool worked = visible.at(row).second;
+            const BandmapSpotRow &displayRow = visible.at(row);
+            const Spot &spot = displayRow.spot;
+            const bool worked = displayRow.worked;
             const bool newStation = !loggedCalls.contains(spot.callsign.toUpper());
             const qint64 ageMinutes = spot.timestampUtc.secsTo(now) / 60;
+            const QString sourceSummary = displayRow.sources.isEmpty()
+                ? spot.source
+                : displayRow.sources.size() == 1
+                    ? displayRow.sources.first()
+                    : tr("%1 (+%2 sources)")
+                          .arg(displayRow.sources.first())
+                          .arg(displayRow.sources.size() - 1);
             const QStringList values{
                 QString::number(static_cast<double>(spot.frequencyHz) / 1000.0, 'f', 1),
                 spot.callsign,
                 QStringLiteral("%1m").arg(ageMinutes),
                 spot.spotter,
-                spot.source,
+                sourceSummary,
                 spot.comment};
             for (int column = 0; column < values.size(); ++column) {
                 auto *item = new QTableWidgetItem(values.at(column));
@@ -11925,6 +12239,12 @@ void MainWindow::refreshBandmap()
                 if (column == 0) {
                     item->setData(Qt::UserRole, spot.id);
                     item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                }
+                if (column == 4 && displayRow.reports > 1) {
+                    item->setToolTip(
+                        tr("%1 reports from: %2")
+                            .arg(displayRow.reports)
+                            .arg(displayRow.sources.join(QStringLiteral(", "))));
                 }
                 bandmap->setItem(row, column, item);
             }

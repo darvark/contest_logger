@@ -6,6 +6,7 @@
 #include <QString>
 #include <QVector>
 
+#include <functional>
 #include <optional>
 
 namespace logger {
@@ -19,6 +20,7 @@ struct LogExportOptions {
     // Score shown as CLAIMED-SCORE; when empty it is computed from the definition.
     std::optional<qint64> claimedScore;
     QString createdBy;
+    std::function<QMap<QString, QString>(const Qso &)> multiplierResolver;
 };
 
 class LogExporter final {
@@ -28,6 +30,11 @@ public:
     static bool validate(LogExportFormat format, const Contest &contest,
                          const ContestDefinition *definition,
                          const QVector<Qso> &qsos,
+                         QString *error = nullptr);
+    static bool validate(LogExportFormat format, const Contest &contest,
+                         const ContestDefinition *definition,
+                         const QVector<Qso> &qsos,
+                         const LogExportOptions &options,
                          QString *error = nullptr);
     static bool writeFile(const QString &filePath, LogExportFormat format,
                           const Contest &contest,
