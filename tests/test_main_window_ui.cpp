@@ -78,6 +78,7 @@ private slots:
     void networkStationPresenceFreshnessExpires();
     void networkStatusShowsQueueAndOfflineState();
     void exportsStoredFrequencyAndPointsInDiagnostics();
+    void cabrilloExportOffersManualScpSubmission();
     void networkStatusListsConnectedStations();
     void dxClusterDialogSelectsDirectoryOrCustomServer();
     void dxClusterConnectionsPersistAndRestore();
@@ -823,6 +824,76 @@ void MainWindowUiTest::exportsStoredFrequencyAndPointsInDiagnostics()
     QCOMPARE(operations.last().toObject().value(QStringLiteral("frequency_hz")).toInteger(),
              qint64(1825000));
     QCOMPARE(operations.last().toObject().value(QStringLiteral("points")).toInt(), 2);
+}
+
+void MainWindowUiTest::cabrilloExportOffersManualScpSubmission()
+{
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    enterQso(QStringLiteral("W1AW"), QStringLiteral("599"), QStringLiteral("1"));
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString exportPath = directory.filePath(QStringLiteral("serial-sprint.log"));
+    bool optionsSeen = false;
+    bool disclosureSeen = false;
+    bool fileDialogSeen = false;
+    bool instructionsSeen = false;
+    QTimer driver;
+    driver.setInterval(20);
+    connect(&driver, &QTimer::timeout, this, [&] {
+        auto *modal = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (modal == nullptr) {
+            return;
+        }
+        if (auto *box = qobject_cast<QMessageBox *>(modal)) {
+            if (box->windowTitle() == QLatin1String("Export Cabrillo")) {
+                optionsSeen = true;
+                auto *option = box->checkBox();
+                QVERIFY(option != nullptr);
+                QCOMPARE(option->objectName(), QStringLiteral("prepareScpSubmission"));
+                QVERIFY(!option->isChecked());
+                option->setChecked(true);
+                box->button(QMessageBox::Ok)->click();
+            } else if (box->windowTitle()
+                       == QLatin1String("Confirm manual SCP preparation")) {
+                disclosureSeen = true;
+                QVERIFY(box->text().contains(QStringLiteral("full QSO records")));
+                QVERIFY(box->text().contains(QStringLiteral("callsigns only")));
+                box->button(QMessageBox::Yes)->click();
+            } else if (box->windowTitle() == QLatin1String("Manual SCP submission")) {
+                instructionsSeen = true;
+                QVERIFY(box->text().contains(QStringLiteral("logs@supercheckpartial.com")));
+                QVERIFY(box->text().contains(QStringLiteral("Do not zip")));
+                QVERIFY(box->text().contains(QStringLiteral("No data has been transmitted")));
+                box->accept();
+                driver.stop();
+            } else {
+                QFAIL(qPrintable(box->windowTitle()));
+            }
+        } else if (auto *picker = qobject_cast<QFileDialog *>(modal)) {
+            fileDialogSeen = true;
+            auto *fileName = picker->findChild<QLineEdit *>(QStringLiteral("fileNameEdit"));
+            QVERIFY(fileName != nullptr);
+            fileName->setText(exportPath);
+            QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+        } else {
+            QFAIL("Unexpected modal dialog during Cabrillo export");
+        }
+    });
+    driver.start();
+
+    auto *action = m_window->findChild<QAction *>(QStringLiteral("exportCabrilloAction"));
+    QVERIFY(action != nullptr);
+    action->trigger();
+
+    QVERIFY(optionsSeen);
+    QVERIFY(disclosureSeen);
+    QVERIFY(fileDialogSeen);
+    QVERIFY(instructionsSeen);
+    QVERIFY(QFileInfo::exists(exportPath));
+    QFile exportedLog(exportPath);
+    QVERIFY(exportedLog.open(QIODevice::ReadOnly));
+    QVERIFY(exportedLog.readAll().contains("QSO:"));
 }
 
 void MainWindowUiTest::networkStatusListsConnectedStations()

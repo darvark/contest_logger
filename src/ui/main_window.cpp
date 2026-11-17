@@ -2167,6 +2167,7 @@ MainWindow::MainWindow(SqliteRepository &repository, QWidget *parent)
     importLogAction->setObjectName(QStringLiteral("importLogAction"));
     connect(importLogAction, &QAction::triggered, this, &MainWindow::importLog);
     auto *exportCabrilloAction = fileMenu->addAction(tr("Export Cabrillo..."));
+    exportCabrilloAction->setObjectName(QStringLiteral("exportCabrilloAction"));
     connect(exportCabrilloAction, &QAction::triggered,
             this, &MainWindow::exportCabrillo);
     auto *exportAdifAction = fileMenu->addAction(tr("Export ADIF..."));
@@ -7062,6 +7063,7 @@ void MainWindow::exportAdif()
 
 void MainWindow::exportCurrentLog(LogExportFormat format)
 {
+    bool prepareScpSubmission = false;
     if (m_contestSelector->currentIndex() < 0) {
         QMessageBox::warning(this, tr("No contest selected"),
                              tr("Select a contest log before exporting."));
@@ -7106,6 +7108,38 @@ void MainWindow::exportCurrentLog(LogExportFormat format)
         .arg(contestIt->code.toLower(), format == LogExportFormat::Cabrillo
                                              ? QStringLiteral("log")
                                              : QStringLiteral("adi"));
+    if (format == LogExportFormat::Cabrillo) {
+        QMessageBox submissionOptions(
+            QMessageBox::Information, tr("Export Cabrillo"),
+            tr("Automatic upload to Super Check Partial is not available in this version. "
+               "You can prepare a Cabrillo file for manual submission. "
+               "Contest Logger will not send any data to SCP."),
+            QMessageBox::Ok | QMessageBox::Cancel, this);
+        auto *submissionOption = new QCheckBox(
+            tr("Prepare for manual submission to Super Check Partial"),
+            &submissionOptions);
+        submissionOption->setObjectName(QStringLiteral("prepareScpSubmission"));
+        submissionOptions.setCheckBox(submissionOption);
+        submissionOptions.setDefaultButton(QMessageBox::Ok);
+        if (submissionOptions.exec() != QMessageBox::Ok) {
+            return;
+        }
+        prepareScpSubmission = submissionOption->isChecked();
+        if (prepareScpSubmission
+            && QMessageBox::warning(
+                   this, tr("Confirm manual SCP preparation"),
+                   tr("The Cabrillo file contains the full QSO records, including "
+                      "callsigns, times, bands, modes, frequencies and exchanges "
+                      "where present. Super Check Partial states that it retains "
+                      "callsigns only and does not store QSO details; submitted "
+                      "files become its property. Continue to create a file for "
+                      "manual submission?"),
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                   != QMessageBox::Yes) {
+            return;
+        }
+    }
+
     const QString path = QFileDialog::getSaveFileName(
         this,
         format == LogExportFormat::Cabrillo ? tr("Export Cabrillo")
@@ -7120,6 +7154,19 @@ void MainWindow::exportCurrentLog(LogExportFormat format)
     if (!LogExporter::writeFile(path, format, *contestIt, definitionPtr,
                                 qsos, m_station, options, &error)) {
         QMessageBox::critical(this, tr("Export validation or write failed"), error);
+        return;
+    }
+    if (prepareScpSubmission) {
+        const QString instructions =
+            tr("Cabrillo log exported to:") + QLatin1Char('\n')
+            + QDir::toNativeSeparators(path) + QStringLiteral("\n\n")
+            + tr("To submit this file, attach the .log directly to an email to "
+                 "logs@supercheckpartial.com. Do not zip it.")
+            + QLatin1Char('\n')
+            + tr("No data has been transmitted by Contest Logger.");
+        QMessageBox::information(
+            this, tr("Manual SCP submission"),
+            instructions);
         return;
     }
     statusBar()->showMessage(tr("Log exported to %1").arg(path), 5000);

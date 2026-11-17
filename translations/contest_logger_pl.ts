@@ -149,6 +149,14 @@ Autor: %3</translation></message>
     <message><source>Opened log: %1</source><translation>Otwarto log: %1</translation></message>
     <message><source>Export Cabrillo...</source><translation>Eksportuj Cabrillo...</translation></message>
     <message><source>Export ADIF...</source><translation>Eksportuj ADIF...</translation></message>
+    <message><source>Automatic upload to Super Check Partial is not available in this version. You can prepare a Cabrillo file for manual submission. Contest Logger will not send any data to SCP.</source><translation>Automatyczne wysyłanie do Super Check Partial nie jest dostępne w tej wersji. Możesz przygotować plik Cabrillo do ręcznego zgłoszenia. Contest Logger nie wyśle żadnych danych do SCP.</translation></message>
+    <message><source>Prepare for manual submission to Super Check Partial</source><translation>Przygotuj do ręcznego zgłoszenia do Super Check Partial</translation></message>
+    <message><source>Confirm manual SCP preparation</source><translation>Potwierdź przygotowanie zgłoszenia do SCP</translation></message>
+    <message><source>The Cabrillo file contains the full QSO records, including callsigns, times, bands, modes, frequencies and exchanges where present. Super Check Partial states that it retains callsigns only and does not store QSO details; submitted files become its property. Continue to create a file for manual submission?</source><translation>Plik Cabrillo zawiera pełne rekordy QSO, w tym znaki, czas, pasmo, emisję, częstotliwość i wymianę, jeśli są dostępne. Super Check Partial informuje, że przechowuje tylko znaki korespondentów, a nie szczegóły QSO; przesłane pliki stają się jego własnością. Czy kontynuować tworzenie pliku do ręcznego zgłoszenia?</translation></message>
+    <message><source>Manual SCP submission</source><translation>Ręczne zgłoszenie do SCP</translation></message>
+    <message><source>Cabrillo log exported to:</source><translation>Wyeksportowano log Cabrillo:</translation></message>
+    <message><source>To submit this file, attach the .log directly to an email to logs@supercheckpartial.com. Do not zip it.</source><translation>Aby zgłosić log, dołącz plik .log bezpośrednio do wiadomości e-mail na adres logs@supercheckpartial.com. Nie pakuj go do archiwum ZIP.</translation></message>
+    <message><source>No data has been transmitted by Contest Logger.</source><translation>Contest Logger nie wysłał żadnych danych.</translation></message>
 </context>
 <context>
     <name>logger::SyncConnectionDialog</name>

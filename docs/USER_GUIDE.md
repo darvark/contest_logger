@@ -552,6 +552,14 @@ UTC, pasmo/częstotliwość, emisję, dublety, pola wymiany) przed zapisem. Przy
 błędzie istniejący plik nie jest nadpisywany; zapis odbywa się atomowo przez
 plik tymczasowy.
 
+Przy eksporcie Cabrillo można zaznaczyć **Prepare for manual submission to Super Check Partial**
+(domyślnie wyłączone). Aplikacja nie wysyła logu automatycznie: SCP nie udostępnia
+publicznej specyfikacji API do zgłaszania logów. Po potwierdzeniu zakresu danych
+i zapisaniu pliku aplikacja wyświetli instrukcję ręcznego wysłania go jako
+załącznika `.log` na `logs@supercheckpartial.com` (bez ZIP-a). Plik Cabrillo
+zawiera pełne dane QSO; SCP informuje, że przechowuje tylko znaki korespondentów,
+nie szczegóły QSO, a przesłane pliki stają się jego własnością.
+
 ### WAE QTC
 
 Profile WAE CW, SSB i RTTY udostępniają **Contest → Manage WAE QTC…**. Najpierw
